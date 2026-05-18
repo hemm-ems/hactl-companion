@@ -9,7 +9,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=8.0",
+    "pytest>=9.0.3",
     "pytest-aiohttp>=1.1.0",
     "pytest-asyncio>=0.23",
     "ruff>=0.15.13",
@@ -17,7 +17,7 @@ dev = [
     "openapi-spec-validator>=0.8.5",
 ]
 integration = [
-    "pytest>=8.0",
+    "pytest>=9.0.3",
     "requests>=2.31",
     "websocket-client>=1.7",
 ]
