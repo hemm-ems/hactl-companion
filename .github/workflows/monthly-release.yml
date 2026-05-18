@@ -80,7 +80,8 @@ jobs:
           git checkout -b "$BRANCH"
           sed -i "s/^version = .*/version = \"${{ steps.version.outputs.ver }}\"/" pyproject.toml
           sed -i "s/^  version: .*/  version: ${{ steps.version.outputs.ver }}/" openapi/companion-v1.yaml
-          git add pyproject.toml openapi/companion-v1.yaml
+          sed -i "s/^version: .*/version: \"${{ steps.version.outputs.ver }}\"/" hactl_companion/config.yaml
+          git add pyproject.toml openapi/companion-v1.yaml hactl_companion/config.yaml
           git commit -m "release: bump version to ${{ steps.version.outputs.ver }}"
           git push -u origin "$BRANCH"
           gh pr create \

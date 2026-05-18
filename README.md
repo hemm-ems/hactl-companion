@@ -1,29 +1,52 @@
 # hactl-companion
 
-Home Assistant Add-on that exposes HA-internal features (config files, Supervisor API, logs, HA CLI) for the [hactl](https://github.com/hemm-ems/hactl) CLI.
+Home Assistant app that exposes HA-internal features for the [hactl](https://github.com/hemm-ems/hactl) CLI.
 
 ## What it does
 
-hactl-companion runs as an HA Add-on (aiohttp server) accessible only via Ingress. It bridges the gap between hactl (external Go CLI) and HA internals that aren't reachable through the standard REST/WS API:
+The standard HA REST/WebSocket API doesn't give you everything — no direct config file access, no Supervisor queries, no log tailing, no reload triggers. hactl-companion fills that gap. It runs as an aiohttp server inside an HA app, accessible only via Ingress, and gives hactl a bridge to the things that normally require SSH or shell access: reading and writing YAML config with diff previews and automatic backups, querying the Supervisor API for system info and app state, reading Core/Supervisor/app logs, and running whitelisted HA CLI commands like reloads and restarts.
 
-- **Config Read/Write** — List, read, and write YAML config files with dry-run diffs and automatic backups
-- **Supervisor Proxy** — Query system info, add-ons, and backups via the Supervisor API
-- **Log Access** — Read Core, Supervisor, and Add-on logs with filtering
-- **HA CLI Bridge** — Trigger reloads, restarts, and config checks
+> **Requires HA OS or Supervised.** The app won't work on HA Container or Core installs — those don't have the Supervisor or the app infrastructure.
+
+## Install
+
+Add this repository to your HA App Store:
+
+**Settings → Apps → App Store → ⋮ → Repositories**
+
+```
+https://github.com/hemm-ems/hactl-companion
+```
+
+Or use the one-click button:
+
+[![Open your Home Assistant instance and show the add-on store with this repository pre-filled.](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fhemm-ems%2Fhactl-companion)
+
+After refreshing, "hactl companion" will appear in the store. Install it, then start it. No configuration needed — it binds to Ingress on port 9100 automatically.
+
+Once running, add the companion URL to your hactl `.env`:
+
+```bash
+HA_COMPANION_URL=http://homeassistant.local/api/hassio_ingress/<ingress_token>
+```
+
+The ingress token is shown in the app's info page under "Ingress URL". Alternatively, `hactl companion-url` can retrieve it for you once a token is set.
+
+Supported architectures: `amd64`, `aarch64`.
 
 ## Architecture
 
 ```
 HA OS / Supervised
 ├── HA Core (REST/WS API)
-├── hactl-companion Add-on (aiohttp, Ingress only, port 9100)
+├── hactl-companion App (aiohttp, Ingress only, port 9100)
 │   ├── /config (bind mount, read/write)
 │   ├── Supervisor API (http://supervisor)
 │   └── ha CLI (subprocess)
 └── hactl (Go CLI, external) → HA Ingress → companion
 ```
 
-## API Overview
+## API
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
@@ -38,6 +61,10 @@ HA OS / Supervised
 | POST | `/v1/config/helper` | Create a helper (JSON: domain, id, content) |
 | PUT | `/v1/config/helper` | Update a helper (JSON: domain, id, content) |
 | DELETE | `/v1/config/helper?domain=...&id=...` | Delete a helper |
+
+## Security
+
+The app is only reachable via HA Ingress — no port is exposed to the network. Auth is handled via the Supervisor token or the Ingress session header. All config endpoints prevent path traversal, and `secrets.yaml` is always denied regardless of the request. Write operations default to dry-run and include automatic rollback on validation failure. CLI access is whitelisted; there's no arbitrary command execution.
 
 ## Development
 
@@ -57,23 +84,16 @@ pytest -v
 ruff format src/ tests/
 ```
 
-### Integration Tests
+### Integration tests
 
-Live tests against real HA Core + companion Docker containers. Requires Docker Desktop.
+The integration suite is unusually thorough for an app — it spins up real HA Core (stable) and the companion in Docker, performs a headless HA onboarding (user creation, token generation), tests every API endpoint against the live stack, and tears everything down on completion. It requires Docker Desktop.
 
 ```bash
-# Install integration deps
 uv pip install -e ".[dev,integration]"
 
-# Run integration tests (compose up → test → compose down)
+# Compose up → test → compose down
 make test-int
 ```
-
-The integration suite:
-- Spins up HA Core (stable) + companion on a shared Docker bridge network
-- Performs headless HA onboarding (user creation + long-lived token)
-- Tests all API endpoints against the live stack
-- Tears down containers and volumes on completion
 
 ```bash
 # Or manually:
@@ -82,19 +102,9 @@ pytest tests/integration -v --tb=short
 docker compose -f docker-compose.integration.yaml down -v
 ```
 
-## hactl Integration
+## hactl integration
 
 For instructions on implementing companion support in the hactl Go CLI (downloading from GitHub, Docker test setup, Go client, end-to-end tests), see [HACTL_INTEGRATION.md](HACTL_INTEGRATION.md).
-
-## Security
-
-- Accessible only via HA Ingress (no exposed port)
-- Bearer token auth (Supervisor token) or Ingress header bypass
-- Path traversal prevention on all config endpoints
-- `secrets.yaml` access is always denied
-- Write operations default to dry-run
-- Config validation + automatic rollback on failure
-- No arbitrary command execution (CLI commands are whitelisted)
 
 ## License
 
