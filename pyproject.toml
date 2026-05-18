@@ -19,7 +19,7 @@ dev = [
 integration = [
     "pytest>=9.0.3",
     "requests>=2.31",
-    "websocket-client>=1.7",
+    "websocket-client>=1.9.0",
 ]
 
 [build-system]
