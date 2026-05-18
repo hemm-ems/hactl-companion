@@ -6,6 +6,7 @@ from pathlib import Path
 
 from companion.openapi import ENDPOINT_META, generate_spec, write_spec
 from companion.server import create_app
+from companion import __version__
 
 
 def test_spec_is_valid_openapi() -> None:
@@ -18,7 +19,7 @@ def test_spec_is_valid_openapi() -> None:
 
 def test_spec_has_correct_version() -> None:
     spec = generate_spec()
-    assert spec["info"]["version"] == "0.3.0"  # type: ignore[index]
+    assert spec["info"]["version"] == __version__  # type: ignore[index]
 
 
 def test_all_routes_have_spec_entry() -> None:

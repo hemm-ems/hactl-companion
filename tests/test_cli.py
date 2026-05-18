@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from companion.__main__ import _parse_args
+from companion import __version__
 
 
 def test_version_flag(capsys: pytest.CaptureFixture[str]) -> None:
@@ -13,7 +14,7 @@ def test_version_flag(capsys: pytest.CaptureFixture[str]) -> None:
         _parse_args(["--version"])
     captured = capsys.readouterr()
     assert "hactl-companion" in captured.out
-    assert "0.3.0" in captured.out
+    assert __version__ in captured.out
 
 
 def test_help_flag(capsys: pytest.CaptureFixture[str]) -> None:
