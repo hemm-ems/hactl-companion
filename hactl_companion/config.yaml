@@ -1,6 +1,6 @@
 # https://developers.home-assistant.io/docs/apps/configuration
 name: "hactl companion"
-version: "0.3.0"
+version: "2026.5.1"
 slug: hactl_companion
 description: "Exposes HA-internal config, logs, and Supervisor API for hactl CLI"
 url: "https://github.com/hemm-ems/hactl-companion"
