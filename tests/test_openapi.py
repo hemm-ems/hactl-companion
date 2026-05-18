@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from companion import __version__
 from companion.openapi import ENDPOINT_META, generate_spec, write_spec
 from companion.server import create_app
-from companion import __version__
 
 
 def test_spec_is_valid_openapi() -> None:

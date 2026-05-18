@@ -1,6 +1,7 @@
 """Tests for GET /v1/health."""
 
 from aiohttp.test_utils import TestClient
+
 from companion import __version__
 
 
