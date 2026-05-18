@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from companion.__main__ import _parse_args
 from companion import __version__
+from companion.__main__ import _parse_args
 
 
 def test_version_flag(capsys: pytest.CaptureFixture[str]) -> None:
