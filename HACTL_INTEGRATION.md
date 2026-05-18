@@ -1,4 +1,4 @@
-﻿# hactl ↔ companion: End-to-End Integration Guide
+# hactl ↔ companion: End-to-End Integration Guide
 
 > Implementation & test instructions for the **hactl** Go project to download, install, and test hactl-companion from GitHub.
 

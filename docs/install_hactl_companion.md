@@ -1,4 +1,4 @@
-﻿# Task: hactl_companion HA Add-on per Supervisor-API installieren
+# Task: hactl_companion HA Add-on per Supervisor-API installieren
 
 Installiere das HA Add-on `hactl_companion` (Repo: `https://github.com/hemm-ems/hactl-companion`) auf einer Home-Assistant-Instanz **ohne SSH**, ausschließlich über die HTTP-API.
 

@@ -1,4 +1,4 @@
-﻿# hactl-companion – Implementation Plan
+# hactl-companion – Implementation Plan
 
 > Separate GitHub Repo: `hemm-ems/hactl-companion`  
 > HA Add-on (Docker im Supervisor) mit aiohttp HTTP-Server.  

@@ -1,4 +1,4 @@
-﻿# WireGuard VPN Client — Feature Manual
+# WireGuard VPN Client — Feature Manual
 
 ## Overview
 

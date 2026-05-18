@@ -1,4 +1,4 @@
-﻿# hactl-companion
+# hactl-companion
 
 Home Assistant Add-on that exposes HA-internal features (config files, Supervisor API, logs, HA CLI) for the [hactl](https://github.com/hemm-ems/hactl) CLI.
 
