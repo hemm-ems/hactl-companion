@@ -1,0 +1,7 @@
+guest_mode:
+  name: Guest Mode
+  icon: mdi:account-group
+
+vacation_mode:
+  name: Vacation Mode
+  icon: mdi:beach

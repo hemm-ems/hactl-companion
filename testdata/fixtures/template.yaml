@@ -1,0 +1,19 @@
+- sensor:
+    - name: "Energie Zählerstand Flur"
+      unit_of_measurement: "kWh"
+      state: "{{ states('sensor.energieverbrauch_total') | float(0) + 100 }}"
+      unique_id: tpl_energie_zaehler
+    - name: "Durchschnittstemperatur"
+      unit_of_measurement: "°C"
+      device_class: temperature
+      state: >-
+        {{ ((states('sensor.temp_wohnzimmer') | float(0) +
+             states('sensor.temp_schlafzimmer') | float(0)) / 2) | round(1) }}
+      unique_id: tpl_avg_temperature
+
+- binary_sensor:
+    - name: "Wohnzimmer Bewegung doublechek"
+      state: |-
+        {% set motion = states('binary_sensor.wohnzimmer_motion') %}
+        {{ motion == 'on' }}
+      unique_id: tpl_wohnzimmer_motion

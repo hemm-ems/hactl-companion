@@ -1,0 +1,21 @@
+name: "hactl companion"
+version: "0.3.0"
+slug: hactl_companion
+description: "Exposes HA-internal config, logs, and Supervisor API for hactl CLI"
+arch:
+  - amd64
+  - aarch64
+startup: application
+ingress: true
+ingress_port: 9100
+ingress_entry: /
+hassio_api: true
+hassio_role: manager
+homeassistant_api: true
+privileged:
+  - NET_ADMIN
+map:
+  - type: homeassistant_config
+    read_only: false
+options: {}
+schema: {}

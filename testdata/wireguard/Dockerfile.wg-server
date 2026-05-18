@@ -1,0 +1,7 @@
+FROM alpine:3.20
+RUN sed -i 's|https://|http://|g' /etc/apk/repositories \
+ && apk add --no-cache wireguard-tools iptables bash
+COPY server-entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+EXPOSE 51820/udp
+ENTRYPOINT ["/entrypoint.sh"]

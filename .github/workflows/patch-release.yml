@@ -1,0 +1,109 @@
+name: Patch Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Reason for patch release (optional, shown in release notes)"
+        required: false
+        default: ""
+
+concurrency:
+  group: patch-release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  # ---------- Job 0: compute next patch version ----------
+  versions:
+    name: Compute Patch Version
+    runs-on: ubuntu-latest
+    outputs:
+      next-tag: ${{ steps.calc.outputs.next_tag }}
+      next-version: ${{ steps.calc.outputs.next_version }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Calculate next patch version
+        id: calc
+        run: |
+          # Find latest CalVer tag (vYYYY.M.PATCH)
+          latest=$(git tag --sort=-v:refname | grep -E '^v[0-9]{4}\.[0-9]+\.[0-9]+$' | head -1)
+          if [ -z "$latest" ]; then
+            echo "::error::No CalVer tag found (vYYYY.M.PATCH). Run monthly-release first to establish the baseline."
+            exit 1
+          fi
+          echo "Latest tag: ${latest}"
+
+          # Parse and increment patch
+          ver=$(echo "$latest" | sed 's/^v//')
+          yyyy=$(echo "$ver" | cut -d. -f1)
+          m=$(echo "$ver" | cut -d. -f2)
+          patch=$(echo "$ver" | cut -d. -f3)
+          next_patch=$((patch + 1))
+          next_tag="v${yyyy}.${m}.${next_patch}"
+
+          echo "next_tag=${next_tag}" >> "$GITHUB_OUTPUT"
+          echo "next_version=${yyyy}.${m}.${next_patch}" >> "$GITHUB_OUTPUT"
+
+      - name: Check tag does not exist
+        run: |
+          tag="${{ steps.calc.outputs.next_tag }}"
+          if git rev-parse "refs/tags/${tag}" >/dev/null 2>&1; then
+            echo "::error::Tag ${tag} already exists — already released or duplicate run"
+            exit 1
+          fi
+          echo "Next patch tag: ${tag}"
+
+  # ---------- Job 1: run tests ----------
+  test:
+    name: Test
+    needs: versions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v8.1.0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: uv sync --extra dev
+      - run: uv run pytest tests/ --ignore=tests/integration -v --tb=short
+
+  # ---------- Job 2: create release + trigger Docker build ----------
+  release:
+    name: Release ${{ needs.versions.outputs.next-tag }}
+    needs: [versions, test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="${{ needs.versions.outputs.next-tag }}"
+          reason="${{ inputs.reason }}"
+          notes="Patch release ${tag}"
+          if [ -n "$reason" ]; then
+            notes="${notes} — ${reason}"
+          fi
+          gh release create "${tag}" \
+            --title "${tag}" \
+            --generate-notes \
+            --target main \
+            --latest
+
+      - name: Trigger Docker build and push
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="${{ needs.versions.outputs.next-tag }}"
+          gh workflow run release.yml --ref "${tag}"
+          echo "::notice::Docker build triggered for ${tag} via release.yml"

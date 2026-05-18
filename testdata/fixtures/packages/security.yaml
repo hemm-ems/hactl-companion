@@ -1,0 +1,10 @@
+automation:
+  - alias: "Security Alert"
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.motion_backyard
+        to: "on"
+    action:
+      - service: notify.mobile_app
+        data:
+          message: "Motion detected in backyard"

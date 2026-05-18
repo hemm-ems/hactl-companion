@@ -1,0 +1,21 @@
+changelog:
+  exclude:
+    authors:
+      - dependabot[bot]
+  categories:
+    - title: "\U0001F680 Features & Improvements"
+      labels:
+        - enhancement
+        - feature
+    - title: "\U0001F41B Bug Fixes"
+      labels:
+        - bug
+        - fix
+    - title: "\U0001F4E6 Dependencies"
+      labels:
+        - dependencies
+    - title: "\U0001F527 Maintenance"
+      labels:
+        - chore
+        - ci
+        - docs

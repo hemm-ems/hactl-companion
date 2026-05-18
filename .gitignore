@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+
+# uv
+uv.lock
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test output
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+coverage.out
+
+# Backups created by companion
+*.bak.*
+
+# Docker
+docker-compose.override.yaml

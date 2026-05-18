@@ -1,0 +1,43 @@
+services:
+  homeassistant:
+    image: ghcr.io/home-assistant/home-assistant:stable
+    container_name: ha-integration
+    ports:
+      - "8123"
+    volumes:
+      - ha-config:/config
+    networks:
+      ha-net:
+        aliases:
+          - homeassistant
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8123/api/onboarding')"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 60s
+
+  companion:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BASE_IMAGE: python:3.12-alpine
+    container_name: companion-integration
+    environment:
+      SUPERVISOR_TOKEN: integration-test-token-12345
+    ports:
+      - "9100"
+    volumes:
+      - ha-config:/config
+    networks:
+      ha-net:
+        aliases:
+          - companion
+
+volumes:
+  ha-config:
+
+networks:
+  ha-net:
+    driver: bridge

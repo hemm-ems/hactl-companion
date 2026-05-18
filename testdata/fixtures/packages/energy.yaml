@@ -1,0 +1,7 @@
+sensor:
+  - platform: template
+    sensors:
+      energy_daily:
+        friendly_name: "Daily Energy Usage"
+        value_template: "{{ states('sensor.energy_total') }}"
+        unit_of_measurement: "kWh"

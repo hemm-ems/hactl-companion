@@ -1,0 +1,97 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  release:
+    types: [published]
+  workflow_dispatch: {} # triggered by monthly-release workflow
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  test:
+    name: Test before release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v8.1.0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: uv sync --extra dev
+      - run: uv run pytest tests/ --ignore=tests/integration -v --tb=short
+
+  publish:
+    name: Build & Push to GHCR
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Login to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          platforms: linux/amd64,linux/arm64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  annotate:
+    name: Annotate release with image tags
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      - name: Append Docker image info to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          if ! gh release view "$TAG" --repo "$REPO" > /dev/null 2>&1; then
+            echo "No release found for $TAG — skipping annotation"
+            exit 0
+          fi
+          VERSION="${TAG#v}"
+          MINOR="${VERSION%.*}"
+          cat >> /tmp/extra.md <<EOF
+
+          ---
+
+          ### 🐳 Docker image
+
+          \`\`\`bash
+          docker pull ghcr.io/${REPO}:${VERSION}
+          # or
+          docker pull ghcr.io/${REPO}:${MINOR}
+          \`\`\`
+          EOF
+          gh release view "$TAG" --repo "$REPO" --json body -q .body > /tmp/body.md
+          cat /tmp/extra.md >> /tmp/body.md
+          gh release edit "$TAG" --repo "$REPO" --notes-file /tmp/body.md

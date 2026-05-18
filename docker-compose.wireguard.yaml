@@ -1,0 +1,54 @@
+services:
+  wg-server:
+    build:
+      context: testdata/wireguard
+      dockerfile: Dockerfile.wg-server
+    container_name: wg-server
+    cap_add:
+      - NET_ADMIN
+    sysctls:
+      - net.ipv4.ip_forward=1
+    volumes:
+      - wg-shared:/shared
+    networks:
+      wg-net:
+        aliases:
+          - wg-server
+    healthcheck:
+      test: ["CMD", "test", "-f", "/shared/ready"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+
+  companion-wg:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BASE_IMAGE: python:3.12-alpine
+    container_name: companion-wg
+    cap_add:
+      - NET_ADMIN
+    sysctls:
+      - net.ipv4.ip_forward=1
+    environment:
+      SUPERVISOR_TOKEN: wg-test-token-12345
+    ports:
+      - "9100"
+    volumes:
+      - wg-shared:/shared:ro
+    networks:
+      wg-net:
+        aliases:
+          - companion-wg
+    depends_on:
+      wg-server:
+        condition: service_healthy
+
+volumes:
+  wg-shared:
+
+networks:
+  wg-net:
+    driver: bridge

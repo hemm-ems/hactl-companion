@@ -1,0 +1,9 @@
+homeassistant:
+  name: Test Home
+  unit_system: metric
+  time_zone: Europe/Berlin
+  packages: !include_dir_named packages
+
+automation: !include automations.yaml
+script: !include scripts.yaml
+template: !include template.yaml

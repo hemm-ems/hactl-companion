@@ -1,0 +1,91 @@
+name: Monthly Release
+
+on:
+  schedule:
+    # 10th of each month at noon UTC — a few days after HA's first-Wednesday release
+    - cron: "0 12 10 * *"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Override version (e.g. 2026.6). Leave empty for auto YYYY.M"
+        required: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+jobs:
+  release:
+    name: Create monthly release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Compute version
+        id: version
+        run: |
+          if [ -n "${{ inputs.version }}" ]; then
+            VER="${{ inputs.version }}"
+          else
+            VER="$(date -u +'%Y.%-m')"
+          fi
+          TAG="v${VER}.0"
+          echo "ver=${VER}.0" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "title=${VER}" >> "$GITHUB_OUTPUT"
+
+      - name: Check if already released
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "${{ steps.version.outputs.tag }}" --repo "${{ github.repository }}" > /dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Release ${{ steps.version.outputs.tag }} already exists — skipping."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create GitHub Release
+        if: steps.check.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ steps.version.outputs.tag }}" \
+            --repo "${{ github.repository }}" \
+            --title "${{ steps.version.outputs.title }}" \
+            --generate-notes \
+            --target main
+
+      - name: Trigger release workflow (Docker build & push)
+        if: steps.check.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh workflow run release.yml \
+            --repo "${{ github.repository }}" \
+            --ref "${{ steps.version.outputs.tag }}"
+
+      - name: Open version-bump PR
+        if: steps.check.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH="release/${{ steps.version.outputs.title }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          sed -i "s/^version = .*/version = \"${{ steps.version.outputs.ver }}\"/" pyproject.toml
+          sed -i "s/^  version: .*/  version: ${{ steps.version.outputs.ver }}/" openapi/companion-v1.yaml
+          git add pyproject.toml openapi/companion-v1.yaml
+          git commit -m "release: bump version to ${{ steps.version.outputs.ver }}"
+          git push -u origin "$BRANCH"
+          gh pr create \
+            --title "release: bump version to ${{ steps.version.outputs.ver }}" \
+            --body "Automated version bump for release ${{ steps.version.outputs.title }}." \
+            --label chore \
+            --head "$BRANCH" \
+            --base main
