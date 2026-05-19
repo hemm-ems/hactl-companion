@@ -31,14 +31,16 @@ jobs:
 
       - name: Merge approved dependabot PRs
         run: |
-          prs=$(gh pr list --author "app/dependabot" --state open --json number,mergeable,reviewDecision --jq '.[] | select(.mergeable == "MERGEABLE") | .number')
+          prs=$(gh pr list --author "app/dependabot" --state open \
+            --json number,mergeable,statusCheckRollup \
+            --jq '.[] | select(.mergeable == "MERGEABLE" and ((.statusCheckRollup | length) > 0) and (.statusCheckRollup | all(.state == "SUCCESS"))) | .number')
           if [ -z "$prs" ]; then
             echo "No mergeable dependabot PRs found"
             exit 0
           fi
           for pr in $prs; do
             echo "Merging dependabot PR #${pr}..."
-            if gh pr merge "$pr" --squash --admin; then
+            if gh pr merge "$pr" --squash; then
               echo "✓ PR #${pr} merged"
             else
               echo "⚠ PR #${pr} merge failed (non-blocking)"
