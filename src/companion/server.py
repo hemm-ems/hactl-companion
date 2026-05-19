@@ -11,7 +11,7 @@ from typing import Any
 from aiohttp import web
 
 from companion import __version__
-from companion.routes import automations, config, ha, health, helpers, scripts, templates, wireguard
+from companion.routes import automations, config, ha, health, helpers, root, scripts, templates, wireguard
 
 logger = logging.getLogger("companion.access")
 
@@ -87,13 +87,20 @@ def register_routes(app: web.Application, module: Any) -> None:
 
 def create_app(config_base_path: str = "/config") -> web.Application:
     """Create and configure the aiohttp application."""
-    app = web.Application(middlewares=[access_log_middleware, auth_middleware])
+    app = web.Application(
+        middlewares=[
+            web.normalize_path_middleware(merge_slashes=True, append_slash=False),
+            access_log_middleware,
+            auth_middleware,
+        ]
+    )
 
     # Store shared config
     app["version"] = __version__
     app["config_base_path"] = config_base_path
 
     # Register route modules
+    register_routes(app, root)
     register_routes(app, health)
     register_routes(app, config)
     register_routes(app, templates)

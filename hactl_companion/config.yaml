@@ -2,8 +2,8 @@
 name: "hactl companion"
 version: "2026.5.4"
 slug: hactl_companion
-description: "Exposes HA-internal config, logs, and Supervisor API for hactl CLI"
-url: "https://github.com/hemm-ems/hactl-companion"
+description: "Bridge for the hactl CLI — config file access, Supervisor API, and HA CLI commands"
+url: "https://github.com/hemm-ems/hactl-companion/releases"
 arch:
   - amd64
   - aarch64

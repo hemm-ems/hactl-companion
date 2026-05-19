@@ -129,3 +129,4 @@ jobs:
             --label chore \
             --head "$BRANCH" \
             --base main
+          gh pr merge "$BRANCH" --squash --auto --delete-branch

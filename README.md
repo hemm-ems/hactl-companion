@@ -10,19 +10,17 @@ The standard HA REST/WebSocket API doesn't give you everything — no direct con
 
 ## Install
 
-Add this repository to your HA App Store:
-
-**Settings → Apps → App Store → ⋮ → Repositories**
+Add this custom repository in **Settings → Add-ons → Add-on Store → ⋮ → Repositories**:
 
 ```
 https://github.com/hemm-ems/hactl-companion
 ```
 
-Or use the one-click button:
-
-[![Open your Home Assistant instance and show the add-on store with this repository pre-filled.](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fhemm-ems%2Fhactl-companion)
-
 After refreshing, "hactl companion" will appear in the store. Install it, then start it. No configuration needed.
+
+> **Note:** This is a custom repository, not part of the default HA add-on catalogue. The "My Home Assistant" one-click badge below only works if `my.home-assistant.io` is configured for your HA instance — the manual method above always works.
+>
+> [![Add repository to your Home Assistant](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fhemm-ems%2Fhactl-companion)
 
 **Auth**: no secret is needed. hactl auto-discovers the companion URL via the Supervisor WebSocket and accesses it through HA Ingress, which handles authentication automatically. `COMPANION_URL` in `.env` is only needed if you want to bypass Ingress with a direct connection.
 

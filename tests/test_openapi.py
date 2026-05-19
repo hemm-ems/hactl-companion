@@ -23,14 +23,18 @@ def test_spec_has_correct_version() -> None:
 
 
 def test_all_routes_have_spec_entry() -> None:
-    """Every registered route in the app should have a matching OpenAPI entry."""
+    """Every registered API route in the app should have a matching OpenAPI entry.
+
+    Non-API routes (e.g. GET / status page) are excluded from this check.
+    """
     app = create_app()
     spec_keys = set(ENDPOINT_META.keys())
+    non_api_paths = {"/"}
 
     for resource in app.router.resources():
         info = resource.get_info()
         path = info.get("path") or info.get("formatter", "")
-        if not path:
+        if not path or path in non_api_paths:
             continue
         for route in resource:
             method = route.method.upper()
