@@ -7,17 +7,17 @@ test:
 	uv run pytest tests/ --ignore=tests/integration -v --tb=short
 
 test-int:
-	docker compose -f $(COMPOSE_FILE) up -d --build
-	uv run pytest tests/integration -v --tb=short -x --ignore=tests/integration/test_wireguard.py; \
+	docker compose -f $(COMPOSE_FILE) down -v 2>/dev/null || true
+	uv run pytest tests/integration -v --tb=short -x -s --ignore=tests/integration/test_wireguard.py; \
 	status=$$?; \
-	docker compose -f $(COMPOSE_FILE) down -v; \
+	docker compose -f $(COMPOSE_FILE) down -v 2>/dev/null || true; \
 	exit $$status
 
 test-wg:
-	docker compose -f $(WG_COMPOSE_FILE) up -d --build
-	uv run pytest tests/integration/test_wireguard.py -v --tb=short -x; \
+	docker compose -f $(WG_COMPOSE_FILE) down -v 2>/dev/null || true
+	uv run pytest tests/integration/test_wireguard.py -v --tb=short -x -s; \
 	status=$$?; \
-	docker compose -f $(WG_COMPOSE_FILE) down -v; \
+	docker compose -f $(WG_COMPOSE_FILE) down -v 2>/dev/null || true; \
 	exit $$status
 
 lint:

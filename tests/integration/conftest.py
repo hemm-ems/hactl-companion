@@ -33,21 +33,26 @@ def _get_mapped_port(service: str, container_port: int) -> str:
 @pytest.fixture(scope="session")
 def compose_up():
     """Start the integration stack and yield port mappings, then tear down."""
+    t0 = time.monotonic()
+    print("\n[integration] docker compose up --build ...", flush=True)
     _compose("up", "-d", "--build")
     try:
         ha_port = _get_mapped_port("homeassistant", 8123)
         comp_port = _get_mapped_port("companion", 9100)
         ha_url = f"http://localhost:{ha_port}"
         companion_url = f"http://localhost:{comp_port}"
-        # Wait for HA to be reachable before yielding
+        print(f"[integration] waiting for HA at {ha_url} ...", flush=True)
         _wait_for_ha(ha_url)
-        # Wait for companion to be reachable
+        print(f"[integration] waiting for companion at {companion_url} ...", flush=True)
         _wait_for_url(f"{companion_url}/v1/health", timeout=30)
+        elapsed = time.monotonic() - t0
+        print(f"[integration] stack ready in {elapsed:.1f}s", flush=True)
         yield {
             "ha_url": ha_url,
             "companion_url": companion_url,
         }
     finally:
+        print("\n[integration] docker compose down -v ...", flush=True)
         _compose("down", "-v")
 
 
