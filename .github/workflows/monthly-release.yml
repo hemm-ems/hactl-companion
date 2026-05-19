@@ -120,7 +120,13 @@ jobs:
           sed -i "s/^  version: .*/  version: ${{ steps.version.outputs.ver }}/" openapi/companion-v1.yaml
           sed -i "s/^version: .*/version: \"${{ steps.version.outputs.ver }}\"/" hactl_companion/config.yaml
           sed -i "s/^__version__ = .*/__version__ = \"${{ steps.version.outputs.ver }}\"/" src/companion/__init__.py
-          git add pyproject.toml openapi/companion-v1.yaml hactl_companion/config.yaml src/companion/__init__.py
+          NOTES=$(gh release view "${{ steps.version.outputs.tag }}" --json body -q '.body' | sed '/^---$/,$d')
+          {
+            printf "## %s\n\n%s\n\n" "${{ steps.version.outputs.ver }}" "${NOTES}"
+            cat hactl_companion/CHANGELOG.md
+          } > /tmp/changelog_new.md
+          mv /tmp/changelog_new.md hactl_companion/CHANGELOG.md
+          git add pyproject.toml openapi/companion-v1.yaml hactl_companion/config.yaml src/companion/__init__.py hactl_companion/CHANGELOG.md
           git commit -m "release: bump version to ${{ steps.version.outputs.ver }}"
           git push -u origin "$BRANCH"
           gh pr create \

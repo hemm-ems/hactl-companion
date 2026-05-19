@@ -8,6 +8,18 @@ import time
 import requests
 
 
+class TestRoot:
+    def test_root_ok(self, companion_url: str, auth_headers: dict[str, str]) -> None:
+        r = requests.get(f"{companion_url}/", headers=auth_headers, timeout=10)
+        assert r.status_code == 200
+        assert "hactl-companion" in r.text
+
+    def test_root_multiple_slashes(self, companion_url: str, auth_headers: dict[str, str]) -> None:
+        """Regression: GET //// must not 404 — normalize_path_middleware must fire in Docker."""
+        r = requests.get(f"{companion_url}////", headers=auth_headers, timeout=10)
+        assert r.status_code == 200
+
+
 class TestHealth:
     def test_health_ok(self, companion_url: str) -> None:
         r = requests.get(f"{companion_url}/v1/health", timeout=10)
