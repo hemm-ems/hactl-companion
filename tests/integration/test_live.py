@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import subprocess
+import time
+
 import requests
 
 
@@ -267,3 +270,87 @@ class TestTemplatesCRUD:
         assert r.status_code == 200
         data = r.json()
         assert data["unique_id"] == "integ_test_tpl_1"
+
+
+def _container_logs(container_name: str) -> str:
+    result = subprocess.run(
+        ["docker", "logs", container_name],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    return result.stdout + result.stderr
+
+
+class TestStartupLogs:
+    """Verify that the companion logs key diagnostic info at startup."""
+
+    def test_version_logged(self, compose_up: dict[str, str]) -> None:
+        logs = _container_logs("companion-integration")
+        assert "hactl-companion v" in logs, f"version not in startup logs:\n{logs[:500]}"
+
+    def test_supervisor_token_status_logged(self, compose_up: dict[str, str]) -> None:
+        logs = _container_logs("companion-integration")
+        assert "supervisor token:" in logs, f"supervisor token status not in startup logs:\n{logs[:500]}"
+        # In the integration stack SUPERVISOR_TOKEN is set, so it should say "present"
+        assert "present" in logs, f"expected 'present' in logs:\n{logs[:500]}"
+
+    def test_auth_mode_logged(self, compose_up: dict[str, str]) -> None:
+        logs = _container_logs("companion-integration")
+        assert "auth:" in logs, f"auth mode not in startup logs:\n{logs[:500]}"
+
+
+class TestAccessLogMiddleware:
+    """Verify that the access log middleware emits entries for each request."""
+
+    def test_successful_request_logged(
+        self, compose_up: dict[str, str], auth_headers: dict[str, str], _ha_ready: None
+    ) -> None:
+        # Make a request and give the log a moment to flush
+        requests.get(
+            f"{compose_up['companion_url']}/v1/config/files",
+            headers=auth_headers,
+            timeout=10,
+        )
+        time.sleep(0.2)
+        logs = _container_logs("companion-integration")
+        assert "GET /v1/config/files" in logs, f"access log entry not found:\n{logs[-1000:]}"
+        assert "status=200" in logs, f"status=200 not in access logs:\n{logs[-1000:]}"
+
+    def test_auth_mode_bearer_logged(
+        self, compose_up: dict[str, str], auth_headers: dict[str, str], _ha_ready: None
+    ) -> None:
+        requests.get(
+            f"{compose_up['companion_url']}/v1/config/files",
+            headers=auth_headers,
+            timeout=10,
+        )
+        time.sleep(0.2)
+        logs = _container_logs("companion-integration")
+        assert "auth=bearer" in logs, f"auth=bearer not in access logs:\n{logs[-1000:]}"
+
+    def test_ingress_bypass_logged(self, compose_up: dict[str, str], _ha_ready: None) -> None:
+        requests.get(
+            f"{compose_up['companion_url']}/v1/config/files",
+            headers={"X-Ingress-Path": "/api/hassio_ingress/test"},
+            timeout=10,
+        )
+        time.sleep(0.2)
+        logs = _container_logs("companion-integration")
+        assert "auth=ingress" in logs, f"auth=ingress not in access logs:\n{logs[-1000:]}"
+
+    def test_exempt_path_logged_as_none(self, compose_up: dict[str, str]) -> None:
+        requests.get(f"{compose_up['companion_url']}/v1/health", timeout=10)
+        time.sleep(0.2)
+        logs = _container_logs("companion-integration")
+        assert "auth=none" in logs, f"auth=none not in access logs:\n{logs[-1000:]}"
+
+    def test_auth_failure_logged_at_warning(self, compose_up: dict[str, str]) -> None:
+        requests.get(
+            f"{compose_up['companion_url']}/v1/config/files",
+            headers={"Authorization": "Bearer wrong-token"},
+            timeout=10,
+        )
+        time.sleep(0.2)
+        logs = _container_logs("companion-integration")
+        assert "status=401" in logs, f"401 not logged:\n{logs[-1000:]}"

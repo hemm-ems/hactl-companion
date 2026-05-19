@@ -73,6 +73,32 @@ async def post_reload(request: web.Request) -> web.Response:
     return web.json_response({"status": "ok", "domain": domain})
 
 
+async def post_check_config(request: web.Request) -> web.Response:
+    """POST /v1/ha/check-config — validate HA configuration via ha CLI."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ha",
+            "core",
+            "check",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
+    except FileNotFoundError as exc:
+        raise web.HTTPBadGateway(text="ha CLI not available") from exc
+    except TimeoutError as exc:
+        raise web.HTTPGatewayTimeout(text="Check timed out") from exc
+
+    if proc.returncode != 0:
+        err = stderr.decode("utf-8", errors="replace").strip()
+        logger.error("ha core check failed (rc=%s): %s", proc.returncode, err)
+        raise web.HTTPBadGateway(text=f"Config check failed: {err}")
+
+    logger.info("HA config check passed")
+    return web.json_response({"status": "ok"})
+
+
 routes: list[RouteDef] = [
     RouteDef("POST", "/v1/ha/reload/{domain}", post_reload),
+    RouteDef("POST", "/v1/ha/check-config", post_check_config),
 ]

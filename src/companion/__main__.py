@@ -50,8 +50,15 @@ def main(argv: list[str] | None = None) -> None:
     )
 
     host = _parse_host(args.host)
-    app = create_app()
-    logger.info("hactl-companion v%s listening on %s:%s", __version__, args.host, args.port)
+    config_base_path = "/config"
+    app = create_app(config_base_path)
+    logger.info("hactl-companion v%s starting on %s:%s", __version__, args.host, args.port)
+    logger.info("config path: %s", config_base_path)
+    supervisor_token_status = (
+        "present" if os.environ.get("SUPERVISOR_TOKEN") else "MISSING (direct access via SUPERVISOR_TOKEN will fail)"
+    )
+    logger.info("supervisor token: %s", supervisor_token_status)
+    logger.info("auth: ingress requests bypass token check; direct requests require SUPERVISOR_TOKEN")
     web.run_app(app, host=host, port=args.port, print=None)
 
 

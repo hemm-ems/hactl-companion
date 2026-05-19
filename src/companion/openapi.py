@@ -431,6 +431,11 @@ ENDPOINT_META: dict[tuple[str, str], dict[str, object]] = {
         ],
         "response_schema": _RELOAD_SCHEMA,
     },
+    ("POST", "/v1/ha/check-config"): {
+        "summary": "Validate HA configuration via ha CLI",
+        "tags": ["ha"],
+        "response_schema": _STATUS_SCHEMA,
+    },
     # WireGuard
     ("POST", "/v1/wireguard/config"): {
         "summary": "Push WireGuard tunnel configuration",

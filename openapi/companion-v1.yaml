@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: hactl-companion API
-  version: 2026.5.3
+  version: 2026.5.4
   description: YAML file access API for Home Assistant. Provides structured CRUD
     for templates, scripts, and automations, plus raw config file read/write 
     with !include resolution.
@@ -625,6 +625,17 @@ paths:
         required: true
         schema:
           type: string
+  /v1/ha/check-config:
+    post:
+      summary: Validate HA configuration via ha CLI
+      tags:
+      - ha
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema: *id001
   /v1/wireguard/config:
     post:
       summary: Push WireGuard tunnel configuration

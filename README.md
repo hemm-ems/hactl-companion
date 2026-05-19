@@ -22,15 +22,9 @@ Or use the one-click button:
 
 [![Open your Home Assistant instance and show the add-on store with this repository pre-filled.](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fhemm-ems%2Fhactl-companion)
 
-After refreshing, "hactl companion" will appear in the store. Install it, then start it. No configuration needed — it binds to Ingress on port 9100 automatically.
+After refreshing, "hactl companion" will appear in the store. Install it, then start it. No configuration needed.
 
-Once running, add the companion URL to your hactl `.env`:
-
-```bash
-HA_COMPANION_URL=http://homeassistant.local/api/hassio_ingress/<ingress_token>
-```
-
-The ingress token is shown in the app's info page under "Ingress URL". Alternatively, `hactl companion-url` can retrieve it for you once a token is set.
+**Auth**: no secret is needed. hactl auto-discovers the companion URL via the Supervisor WebSocket and accesses it through HA Ingress, which handles authentication automatically. `COMPANION_URL` in `.env` is only needed if you want to bypass Ingress with a direct connection.
 
 Supported architectures: `amd64`, `aarch64`.
 
@@ -61,6 +55,23 @@ HA OS / Supervised
 | POST | `/v1/config/helper` | Create a helper (JSON: domain, id, content) |
 | PUT | `/v1/config/helper` | Update a helper (JSON: domain, id, content) |
 | DELETE | `/v1/config/helper?domain=...&id=...` | Delete a helper |
+| GET | `/v1/config/templates` | List template sensor definitions |
+| GET | `/v1/config/template?id=...` | Get a template definition |
+| PUT | `/v1/config/template?id=...&dry_run=true` | Update a template (dry-run or apply) |
+| POST | `/v1/config/template` | Create a template sensor |
+| DELETE | `/v1/config/template?id=...` | Delete a template |
+| GET | `/v1/config/scripts` | List script definitions |
+| GET | `/v1/config/script?id=...` | Get a script definition |
+| PUT | `/v1/config/script?id=...&dry_run=true` | Update a script |
+| POST | `/v1/config/script` | Create a script |
+| DELETE | `/v1/config/script?id=...` | Delete a script |
+| GET | `/v1/config/automations` | List automation definitions |
+| GET | `/v1/config/automation?id=...` | Get an automation definition |
+| PUT | `/v1/config/automation?id=...&dry_run=true` | Update an automation |
+| POST | `/v1/config/automation` | Create an automation |
+| DELETE | `/v1/config/automation?id=...` | Delete an automation |
+| POST | `/v1/ha/reload/{domain}` | Reload an HA integration domain |
+| POST | `/v1/ha/check-config` | Validate HA configuration |
 
 ## Security
 

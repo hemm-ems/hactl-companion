@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 import os
+import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -11,8 +13,46 @@ from aiohttp import web
 from companion import __version__
 from companion.routes import automations, config, ha, health, helpers, scripts, templates, wireguard
 
+logger = logging.getLogger("companion.access")
+
 # Paths that do not require authentication
 AUTH_EXEMPT_PATHS: set[str] = {"/v1/health"}
+
+
+@web.middleware
+async def access_log_middleware(
+    request: web.Request,
+    handler: Callable[[web.Request], Awaitable[web.StreamResponse]],
+) -> web.StreamResponse:
+    """Log every request with method, path, status, duration, and auth mode."""
+    start = time.monotonic()
+    if request.path in AUTH_EXEMPT_PATHS:
+        auth_mode = "none"
+    elif request.headers.get("X-Ingress-Path") is not None:
+        auth_mode = "ingress"
+    else:
+        auth_mode = "bearer"
+
+    try:
+        response = await handler(request)
+        status = response.status
+    except web.HTTPException as exc:
+        status = exc.status
+        raise
+    finally:
+        duration_ms = int((time.monotonic() - start) * 1000)
+        level = logging.WARNING if status == 401 else logging.INFO
+        logger.log(
+            level,
+            "%s %s status=%d duration=%dms auth=%s",
+            request.method,
+            request.path,
+            status,
+            duration_ms,
+            auth_mode,
+        )
+
+    return response
 
 
 @web.middleware
@@ -47,7 +87,7 @@ def register_routes(app: web.Application, module: Any) -> None:
 
 def create_app(config_base_path: str = "/config") -> web.Application:
     """Create and configure the aiohttp application."""
-    app = web.Application(middlewares=[auth_middleware])
+    app = web.Application(middlewares=[access_log_middleware, auth_middleware])
 
     # Store shared config
     app["version"] = __version__
