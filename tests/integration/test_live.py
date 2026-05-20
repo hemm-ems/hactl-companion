@@ -23,8 +23,15 @@ class TestStatus:
     def test_status_has_required_fields(self, companion_url: str) -> None:
         r = requests.get(f"{companion_url}/v1/status", timeout=10)
         data = r.json()
-        for field in ("version", "supervisor_reachable", "has_ha_cli", "config_writable", "ingress_active", "auth_mode"):
-            assert field in data, f"field '{field}' missing from /v1/status response"
+        for field in (
+            "version",
+            "supervisor_reachable",
+            "has_ha_cli",
+            "config_writable",
+            "ingress_active",
+            "auth_mode",
+        ):
+            assert field in data, f"missing: {field}"
 
     def test_status_response_matches_spec_fields(self, companion_url: str) -> None:
         """Response keys must be exactly the fields declared in the OpenAPI spec — no extras, no missing."""

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import pytest
 from pathlib import Path
+
+import pytest
 
 from companion import __version__
 from companion.openapi import ENDPOINT_META, generate_spec, write_spec
