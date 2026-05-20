@@ -209,12 +209,30 @@ _WG_CONFIG_JSON_BODY = {
 }
 
 # Map of (method, path) -> endpoint metadata
+_STATUS_SCHEMA = {
+    "type": "object",
+    "required": ["version", "supervisor_reachable", "has_ha_cli", "config_writable", "ingress_active", "auth_mode"],
+    "properties": {
+        "version": {"type": "string"},
+        "supervisor_reachable": {"type": "boolean"},
+        "has_ha_cli": {"type": "boolean"},
+        "config_writable": {"type": "boolean"},
+        "ingress_active": {"type": "boolean"},
+        "auth_mode": {"type": "string", "enum": ["ingress", "bearer"]},
+    },
+}
+
 ENDPOINT_META: dict[tuple[str, str], dict[str, object]] = {
     # Health
     ("GET", "/v1/health"): {
         "summary": "Liveness check",
         "tags": ["health"],
         "response_schema": _HEALTH_SCHEMA,
+    },
+    ("GET", "/v1/status"): {
+        "summary": "Companion capability report",
+        "tags": ["health"],
+        "response_schema": _STATUS_SCHEMA,
     },
     # Config files
     ("GET", "/v1/config/files"): {

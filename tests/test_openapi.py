@@ -71,8 +71,8 @@ def test_write_spec_to_file(tmp_path: Path) -> None:
 
 
 def test_spec_has_20_endpoints() -> None:
-    """Spec should have exactly 31 endpoint operations."""
-    assert len(ENDPOINT_META) == 31
+    """Spec should have exactly 32 endpoint operations (31 + /v1/status)."""
+    assert len(ENDPOINT_META) == 32
 
 
 def test_spec_paths_count() -> None:
@@ -80,5 +80,5 @@ def test_spec_paths_count() -> None:
     spec = generate_spec()
     paths = spec["paths"]
     assert isinstance(paths, dict)
-    # health(1) + config(3) + templates(2) + scripts(2) + automations(2) + helpers(2) + ha(2) + wireguard(4) = 18 paths
-    assert len(paths) == 18
+    # health(2) + config(3) + templates(2) + scripts(2) + automations(2) + helpers(2) + ha(2) + wireguard(4) = 19 paths
+    assert len(paths) == 19

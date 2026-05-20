@@ -11,12 +11,12 @@ from typing import Any
 from aiohttp import web
 
 from companion import __version__
-from companion.routes import automations, config, ha, health, helpers, root, scripts, templates, wireguard
+from companion.routes import automations, config, ha, health, helpers, root, scripts, status, templates, wireguard
 
 logger = logging.getLogger("companion.access")
 
 # Paths that do not require authentication
-AUTH_EXEMPT_PATHS: set[str] = {"/v1/health"}
+AUTH_EXEMPT_PATHS: set[str] = {"/v1/health", "/v1/status"}
 
 
 @web.middleware
@@ -102,6 +102,7 @@ def create_app(config_base_path: str = "/config") -> web.Application:
     # Register route modules
     register_routes(app, root)
     register_routes(app, health)
+    register_routes(app, status)
     register_routes(app, config)
     register_routes(app, templates)
     register_routes(app, scripts)
