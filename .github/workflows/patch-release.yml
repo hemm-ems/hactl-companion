@@ -83,6 +83,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
+          token: ${{ secrets.PACKAGES_TOKEN }}
 
       - name: Create GitHub Release
         env:
@@ -116,7 +117,6 @@ jobs:
           tag="${{ needs.versions.outputs.next-tag }}"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
           sed -i "s/^version = .*/version = \"${VER}\"/" pyproject.toml
           sed -i "s/^  version: .*/  version: ${VER}/" openapi/companion-v1.yaml
           sed -i "s/^version: .*/version: \"${VER}\"/" hactl_companion/config.yaml
