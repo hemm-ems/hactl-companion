@@ -68,6 +68,11 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.PACKAGES_TOKEN }}
         run: |
+          echo "=== listing org container packages ==="
+          gh api "/orgs/hemm-ems/packages?package_type=container" --jq '.[].name' || true
+          echo "=== listing user container packages ==="
+          gh api "/user/packages?package_type=container" --jq '.[].name' || true
+          echo "=== patching ==="
           gh api --method PATCH \
             /orgs/hemm-ems/packages/container/hactl-companion \
             --field visibility=public
