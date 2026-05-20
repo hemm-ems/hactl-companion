@@ -15,6 +15,7 @@ concurrency:
 permissions:
   contents: write
   actions: write
+  pull-requests: write
 
 jobs:
   # ---------- Job 0: compute next patch version ----------
