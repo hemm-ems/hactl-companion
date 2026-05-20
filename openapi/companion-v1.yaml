@@ -29,7 +29,6 @@ paths:
   /v1/status:
     get:
       summary: Companion capability report
-      description: Returns version and capability flags. Auth-exempt (same policy as /v1/health).
       tags:
       - health
       responses:
@@ -39,7 +38,13 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [version, supervisor_reachable, has_ha_cli, config_writable, ingress_active, auth_mode]
+                required:
+                - version
+                - supervisor_reachable
+                - has_ha_cli
+                - config_writable
+                - ingress_active
+                - auth_mode
                 properties:
                   version:
                     type: string
@@ -53,7 +58,11 @@ paths:
                     type: boolean
                   auth_mode:
                     type: string
-                    enum: [ingress, bearer]
+                    enum:
+                    - ingress
+                    - bearer
+      description: Returns version and capability flags. Auth-exempt (same 
+        policy as /v1/health).
   /v1/config/files:
     get:
       summary: List YAML config files

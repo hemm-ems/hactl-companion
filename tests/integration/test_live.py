@@ -8,6 +8,38 @@ import time
 import requests
 
 
+class TestStatus:
+    """Integration tests for GET /v1/status."""
+
+    def test_status_returns_200(self, companion_url: str) -> None:
+        r = requests.get(f"{companion_url}/v1/status", timeout=10)
+        assert r.status_code == 200
+
+    def test_status_no_auth_required(self, companion_url: str) -> None:
+        """Status is auth-exempt, same as health."""
+        r = requests.get(f"{companion_url}/v1/status", timeout=10)
+        assert r.status_code == 200
+
+    def test_status_has_required_fields(self, companion_url: str) -> None:
+        r = requests.get(f"{companion_url}/v1/status", timeout=10)
+        data = r.json()
+        for field in ("version", "supervisor_reachable", "has_ha_cli", "config_writable", "ingress_active", "auth_mode"):
+            assert field in data, f"field '{field}' missing from /v1/status response"
+
+    def test_status_response_matches_spec_fields(self, companion_url: str) -> None:
+        """Response keys must be exactly the fields declared in the OpenAPI spec — no extras, no missing."""
+        r = requests.get(f"{companion_url}/v1/status", timeout=10)
+        data = r.json()
+        expected = {"version", "supervisor_reachable", "has_ha_cli", "config_writable", "ingress_active", "auth_mode"}
+        assert set(data.keys()) == expected, f"unexpected keys in /v1/status response: {set(data.keys()) ^ expected}"
+
+    def test_status_supervisor_token_present_in_stack(self, companion_url: str) -> None:
+        """Integration stack sets SUPERVISOR_TOKEN, so supervisor_reachable must be True."""
+        r = requests.get(f"{companion_url}/v1/status", timeout=10)
+        data = r.json()
+        assert data["supervisor_reachable"] is True
+
+
 class TestRoot:
     def test_root_ok(self, companion_url: str, auth_headers: dict[str, str]) -> None:
         r = requests.get(f"{companion_url}/", headers=auth_headers, timeout=10)
