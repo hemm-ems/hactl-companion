@@ -1,6 +1,6 @@
 [project]
 name = "hactl-companion"
-version = "2026.5.5"
+version = "2026.5.6"
 requires-python = ">=3.12"
 dependencies = [
     "aiohttp>=3.13.5",
