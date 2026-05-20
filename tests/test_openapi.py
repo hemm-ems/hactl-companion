@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from companion import __version__
 from companion.openapi import ENDPOINT_META, generate_spec, write_spec
 from companion.server import create_app
@@ -82,3 +84,52 @@ def test_spec_paths_count() -> None:
     assert isinstance(paths, dict)
     # health(2) + config(3) + templates(2) + scripts(2) + automations(2) + helpers(2) + ha(2) + wireguard(4) = 19 paths
     assert len(paths) == 19
+
+
+def test_committed_spec_matches_generator(tmp_path: Path) -> None:
+    """openapi/companion-v1.yaml must be in sync with write_spec().
+
+    If this fails, run: make spec
+    """
+    generated = tmp_path / "generated.yaml"
+    write_spec(str(generated))
+    committed = Path(__file__).parent.parent / "openapi" / "companion-v1.yaml"
+    assert generated.read_text() == committed.read_text(), (
+        "Committed spec is out of sync with the generator. Run: make spec"
+    )
+
+
+def test_status_endpoint_uses_capability_schema() -> None:
+    """GET /v1/status must use the full capability schema, not the simple {status: string} schema."""
+    schema = ENDPOINT_META[("GET", "/v1/status")]["response_schema"]
+    assert "required" in schema, "/v1/status schema must have a 'required' list"
+    required = schema["required"]
+    for field in ("version", "supervisor_reachable", "has_ha_cli", "config_writable", "ingress_active", "auth_mode"):
+        assert field in required, f"field '{field}' missing from /v1/status schema required list"
+
+
+# Regression guard: if _STATUS_SCHEMA is redefined (variable shadowing), these endpoints would
+# silently inherit the capability-report schema instead of the simple {status: string} schema.
+_SIMPLE_STATUS_ENDPOINTS = [
+    ("PUT", "/v1/config/template"),
+    ("DELETE", "/v1/config/template"),
+    ("PUT", "/v1/config/script"),
+    ("DELETE", "/v1/config/script"),
+    ("PUT", "/v1/config/automation"),
+    ("DELETE", "/v1/config/automation"),
+    ("PUT", "/v1/config/helper"),
+    ("DELETE", "/v1/config/helper"),
+    ("POST", "/v1/ha/check-config"),
+]
+
+
+@pytest.mark.parametrize("method,path", _SIMPLE_STATUS_ENDPOINTS)
+def test_write_endpoints_use_simple_status_schema(method: str, path: str) -> None:
+    """Write/delete/check endpoints must return {status: string}, not the capability-report schema."""
+    schema = ENDPOINT_META[(method, path)]["response_schema"]
+    assert schema.get("properties") == {"status": {"type": "string"}}, (
+        f"{method} {path} must have {{status: string}} schema, got: {schema.get('properties')}"
+    )
+    assert "required" not in schema, (
+        f"{method} {path} must not carry a 'required' list — got the capability schema by mistake"
+    )

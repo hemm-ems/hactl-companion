@@ -24,14 +24,16 @@ async def get_status(request: web.Request) -> web.Response:
     config_base = request.app.get("config_base_path", "/config")
     config_writable = os.access(config_base, os.W_OK)
 
-    return web.json_response({
-        "version": __version__,
-        "supervisor_reachable": supervisor_reachable,
-        "has_ha_cli": has_ha_cli,
-        "config_writable": config_writable,
-        "ingress_active": ingress_active,
-        "auth_mode": auth_mode,
-    })
+    return web.json_response(
+        {
+            "version": __version__,
+            "supervisor_reachable": supervisor_reachable,
+            "has_ha_cli": has_ha_cli,
+            "config_writable": config_writable,
+            "ingress_active": ingress_active,
+            "auth_mode": auth_mode,
+        }
+    )
 
 
 routes: list[RouteDef] = [

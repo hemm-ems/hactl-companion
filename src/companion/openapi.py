@@ -89,7 +89,7 @@ _AUTOMATION_SCHEMA = {
     "type": "object",
     "properties": {"id": {"type": "string"}, "content": {"type": "string"}},
 }
-_STATUS_SCHEMA = {
+_SIMPLE_STATUS_SCHEMA = {
     "type": "object",
     "properties": {"status": {"type": "string"}},
 }
@@ -231,6 +231,7 @@ ENDPOINT_META: dict[tuple[str, str], dict[str, object]] = {
     },
     ("GET", "/v1/status"): {
         "summary": "Companion capability report",
+        "description": "Returns version and capability flags. Auth-exempt (same policy as /v1/health).",
         "tags": ["health"],
         "response_schema": _STATUS_SCHEMA,
     },
@@ -294,7 +295,7 @@ ENDPOINT_META: dict[tuple[str, str], dict[str, object]] = {
             "content": {"text/plain": {"schema": {"type": "string"}}},
             "required": True,
         },
-        "response_schema": _STATUS_SCHEMA,
+        "response_schema": _SIMPLE_STATUS_SCHEMA,
     },
     ("POST", "/v1/config/template"): {
         "summary": "Create new template sensor",
@@ -313,7 +314,7 @@ ENDPOINT_META: dict[tuple[str, str], dict[str, object]] = {
         "summary": "Delete template sensor",
         "tags": ["templates"],
         "parameters": [{"name": "id", "in": "query", "required": True, "schema": {"type": "string"}}],
-        "response_schema": _STATUS_SCHEMA,
+        "response_schema": _SIMPLE_STATUS_SCHEMA,
     },
     # Scripts
     ("GET", "/v1/config/scripts"): {
@@ -338,7 +339,7 @@ ENDPOINT_META: dict[tuple[str, str], dict[str, object]] = {
             "content": {"text/plain": {"schema": {"type": "string"}}},
             "required": True,
         },
-        "response_schema": _STATUS_SCHEMA,
+        "response_schema": _SIMPLE_STATUS_SCHEMA,
     },
     ("POST", "/v1/config/script"): {
         "summary": "Create new script",
@@ -354,7 +355,7 @@ ENDPOINT_META: dict[tuple[str, str], dict[str, object]] = {
         "summary": "Delete script",
         "tags": ["scripts"],
         "parameters": [{"name": "id", "in": "query", "required": True, "schema": {"type": "string"}}],
-        "response_schema": _STATUS_SCHEMA,
+        "response_schema": _SIMPLE_STATUS_SCHEMA,
     },
     # Automations
     ("GET", "/v1/config/automations"): {
@@ -379,7 +380,7 @@ ENDPOINT_META: dict[tuple[str, str], dict[str, object]] = {
             "content": {"text/plain": {"schema": {"type": "string"}}},
             "required": True,
         },
-        "response_schema": _STATUS_SCHEMA,
+        "response_schema": _SIMPLE_STATUS_SCHEMA,
     },
     ("POST", "/v1/config/automation"): {
         "summary": "Create new automation",
@@ -395,7 +396,7 @@ ENDPOINT_META: dict[tuple[str, str], dict[str, object]] = {
         "summary": "Delete automation",
         "tags": ["automations"],
         "parameters": [{"name": "id", "in": "query", "required": True, "schema": {"type": "string"}}],
-        "response_schema": _STATUS_SCHEMA,
+        "response_schema": _SIMPLE_STATUS_SCHEMA,
     },
     # Helpers
     ("GET", "/v1/config/helpers"): {
@@ -429,7 +430,7 @@ ENDPOINT_META: dict[tuple[str, str], dict[str, object]] = {
             "content": {"application/json": {"schema": {"type": "object"}}},
             "required": True,
         },
-        "response_schema": _STATUS_SCHEMA,
+        "response_schema": _SIMPLE_STATUS_SCHEMA,
     },
     ("DELETE", "/v1/config/helper"): {
         "summary": "Delete helper",
@@ -438,7 +439,7 @@ ENDPOINT_META: dict[tuple[str, str], dict[str, object]] = {
             {"name": "domain", "in": "query", "required": True, "schema": {"type": "string"}},
             {"name": "id", "in": "query", "required": True, "schema": {"type": "string"}},
         ],
-        "response_schema": _STATUS_SCHEMA,
+        "response_schema": _SIMPLE_STATUS_SCHEMA,
     },
     # HA CLI
     ("POST", "/v1/ha/reload/{domain}"): {
@@ -452,7 +453,7 @@ ENDPOINT_META: dict[tuple[str, str], dict[str, object]] = {
     ("POST", "/v1/ha/check-config"): {
         "summary": "Validate HA configuration via ha CLI",
         "tags": ["ha"],
-        "response_schema": _STATUS_SCHEMA,
+        "response_schema": _SIMPLE_STATUS_SCHEMA,
     },
     # WireGuard
     ("POST", "/v1/wireguard/config"): {
@@ -519,6 +520,8 @@ def generate_spec() -> dict[str, object]:
             },
         }
 
+        if "description" in meta:
+            operation["description"] = meta["description"]
         if "parameters" in meta:
             operation["parameters"] = meta["parameters"]
         if "requestBody" in meta:
