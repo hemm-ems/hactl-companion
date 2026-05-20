@@ -1,3 +1,11 @@
+## 2026.5.5
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+
+
+**Full Changelog**: https://github.com/hemm-ems/hactl-companion/compare/v2026.5.4...v2026.5.5
+
 ## 2026.5.4
 
 ### HTTP access log middleware
