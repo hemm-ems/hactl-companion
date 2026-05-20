@@ -63,6 +63,14 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Make package public
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_TOKEN }}
+        run: |
+          gh api --method PATCH \
+            /orgs/hemm-ems/packages/container/hactl-companion \
+            --field visibility=public
+
   annotate:
     name: Annotate release with image tags
     needs: publish
