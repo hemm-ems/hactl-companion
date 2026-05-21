@@ -1,5 +1,13 @@
 ## 2026.5.13
 
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+
+
+**Full Changelog**: https://github.com/hemm-ems/hactl-companion/compare/v2026.5.12...v2026.5.13
+
+## 2026.5.13
+
 ### WireGuard VPN client — declarative configuration
 
 The WireGuard tunnel can now be configured from the HA add-on **Configuration** tab. New options:
