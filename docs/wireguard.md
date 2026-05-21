@@ -2,9 +2,73 @@
 
 ## Overview
 
-The companion add-on now includes a WireGuard VPN **client** that can be fully configured, started, stopped, and monitored via the REST API. No SSH, no UI — everything works through HTTP with a Bearer token.
+The companion add-on includes a WireGuard VPN **client**. It can be driven two ways:
 
-This implements [issue #12](https://github.com/hemm-ems/hactl-companion/issues/12) (add-on side only; HA integration with entities/config flow is deferred).
+1. **Declaratively** from the HA add-on **Configuration** tab (recommended for end users).
+2. **Programmatically** via REST (for multi-tunnel setups or scripting from inside the LAN).
+
+The declarative path exists because `hactl` normally talks to HA *over* the VPN — it cannot be the thing that brings the tunnel up. The add-on supervises itself.
+
+## Declarative configuration (recommended)
+
+In the HA UI, open **Settings → Add-ons → hactl companion → Configuration** and fill in the `vpn` block:
+
+```yaml
+vpn:
+  enabled: true
+  autostart: true
+  tunnel: wg0
+  config: |
+    [Interface]
+    PrivateKey = <client-private-key>
+    Address = 10.13.13.2/24
+
+    [Peer]
+    PublicKey = <server-public-key>
+    Endpoint = vpn.example.com:51820
+    AllowedIPs = 0.0.0.0/0
+    PersistentKeepalive = 25
+```
+
+Save and restart the add-on. The supervisor reads `/data/options.json` at startup, writes the config to `/etc/wireguard/<tunnel>.conf` (mode `0600`), and runs `wg-quick up <tunnel>`.
+
+### Option semantics
+
+| Field | Meaning |
+|---|---|
+| `enabled` | Master switch. `false` ⇒ tunnel is brought down (and kept down) on add-on (re)start. `true` ⇒ tunnel is brought up. |
+| `autostart` | After `wg-quick up`, also runs `systemctl enable wg-quick@<tunnel>` so the tunnel survives a host reboot before the add-on starts (HA OS only — silently no-op where systemd is absent). |
+| `tunnel` | Interface name. Must match `^[a-zA-Z0-9_]{1,15}$`. Default `wg0`. |
+| `config` | The full `wg.conf` text. Leave empty to fall back to a file (see below). |
+
+### File fallback
+
+If you'd rather not paste the config into the UI, drop the file at:
+
+```
+/config/hactl/<tunnel>.conf
+```
+
+(reachable from the HA File Editor add-on, Samba share, or any other tool that can write into `/config`). Leave `vpn.config` empty in the add-on Configuration tab. On the next add-on start the supervisor will copy that file into `/etc/wireguard/` and bring the tunnel up.
+
+`vpn.config` takes precedence if both are present.
+
+### Verifying
+
+After the restart, check the add-on log — you should see one of:
+
+```
+vpn.enabled=true; bringing tunnel wg0 up
+WireGuard tunnel wg0 started
+```
+
+or for the disabled path:
+
+```
+vpn.enabled=false; bringing tunnel wg0 down
+```
+
+You can also query `GET /v1/wireguard/status?tunnel=wg0` (see below) for live state.
 
 ## API Endpoints
 

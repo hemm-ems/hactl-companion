@@ -29,6 +29,20 @@ No secret is needed. hactl auto-discovers the companion URL via the Supervisor W
 | Scripts & automations | Full CRUD |
 | HA commands | `reload/{domain}`, `check-config` |
 | Health | `GET /v1/health` — liveness check |
+| WireGuard VPN | Declarative tunnel config (HA UI) + REST start/stop/status |
+
+## VPN client (optional)
+
+The add-on can manage a WireGuard tunnel for you. Fill in the `vpn` block in the **Configuration** tab:
+
+| Option | Default | Meaning |
+|---|---|---|
+| `vpn.enabled` | `false` | Bring the tunnel up on add-on start when `true`; bring it down when `false`. |
+| `vpn.autostart` | `false` | Also enable `wg-quick@<tunnel>` via systemd (HA OS) so the tunnel survives host reboots. |
+| `vpn.tunnel` | `wg0` | Interface name (`^[a-zA-Z0-9_]{1,15}$`). |
+| `vpn.config` | `""` | The full `wg.conf` text. Paste it here, *or* leave empty and drop a file at `/config/hactl/<tunnel>.conf`. |
+
+Restart the add-on after changing the config. See `docs/wireguard.md` for the full feature manual, including the REST API for multi-tunnel or scripted setups.
 
 ## Security
 

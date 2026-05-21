@@ -19,6 +19,16 @@ privileged:
 map:
   - type: homeassistant_config
     read_only: false
-options: {}
-schema: {}
+options:
+  vpn:
+    enabled: false
+    autostart: false
+    tunnel: wg0
+    config: ""
+schema:
+  vpn:
+    enabled: bool
+    autostart: bool
+    tunnel: "match(^[a-zA-Z0-9_]{1,15}$)"
+    config: str?
 image: "ghcr.io/hemm-ems/hactl-companion"

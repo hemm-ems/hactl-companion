@@ -1,3 +1,16 @@
+## 2026.5.13
+
+### WireGuard VPN client — declarative configuration
+
+The WireGuard tunnel can now be configured from the HA add-on **Configuration** tab. New options:
+
+- `vpn.enabled` — master on/off switch. On (re)start the add-on reconciles the tunnel to match.
+- `vpn.autostart` — also enable `wg-quick@<tunnel>` via systemd so the tunnel survives a host reboot.
+- `vpn.tunnel` — interface name (default `wg0`).
+- `vpn.config` — the full `wg.conf` text, pasted into the UI. As an alternative, drop a file at `/config/hactl/<tunnel>.conf` and leave `vpn.config` empty.
+
+This is now the recommended path: the `hactl` CLI normally talks to HA *over* the VPN, so the add-on has to bring the tunnel up itself. The existing REST API (`/v1/wireguard/*`) is unchanged and still works for multi-tunnel or scripted setups.
+
 ## 2026.5.12
 
 <!-- Release notes generated using configuration in .github/release.yml at main -->

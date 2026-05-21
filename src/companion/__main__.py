@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import logging
 import os
 
 from aiohttp import web
 
-from companion import __version__
+from companion import __version__, wg_supervisor
 from companion.server import create_app
 
 logger = logging.getLogger("companion")
@@ -51,6 +52,16 @@ def main(argv: list[str] | None = None) -> None:
 
     host = _parse_host(args.host)
     config_base_path = "/config"
+
+    # Reconcile VPN tunnel state from HA add-on options before serving.
+    # A failure here must never block the rest of the add-on from starting.
+    try:
+        opts = wg_supervisor.load_options()
+        if opts is not None:
+            asyncio.run(wg_supervisor.reconcile(opts))
+    except Exception:
+        logger.exception("VPN reconcile failed; continuing add-on startup")
+
     app = create_app(config_base_path)
     logger.info("hactl-companion v%s starting on %s:%s", __version__, args.host, args.port)
     logger.info("config path: %s", config_base_path)
