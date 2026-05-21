@@ -3,7 +3,7 @@ name: "hactl companion"
 version: "2026.5.11"
 slug: hactl_companion
 description: "Bridge for the hactl CLI — config file access, Supervisor API, and HA CLI commands"
-url: "https://github.com/hemm-ems/hactl-companion/releases"
+url: "https://github.com/hemm-ems/hactl-companion/blob/main/hactl_companion/DOCS.md"
 arch:
   - amd64
   - aarch64
