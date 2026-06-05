@@ -2,8 +2,9 @@ name: Monthly Release
 
 on:
   schedule:
-    # 10th of each month at noon UTC — a few days after HA's first-Wednesday release
-    - cron: "0 12 10 * *"
+    # 10th of each month at 12:17 UTC — a few days after HA's first-Wednesday release.
+    # Off the top of the hour: GitHub delays/drops schedules at :00 under load.
+    - cron: "17 12 10 * *"
   workflow_dispatch:
     inputs:
       version:
