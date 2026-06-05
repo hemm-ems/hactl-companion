@@ -39,24 +39,30 @@ Save and restart the add-on. On startup the supervisor resolves the config (`vpn
 set, else the file), writes it canonically + into `/etc/wireguard/<tunnel>.conf` (mode `0600`),
 and runs `wg-quick up <tunnel>` when `enabled`.
 
-> ⚠️ **Inline `vpn.config` is YAML.** A multi-line `wg.conf` must be a block scalar — paste it
-> under `config: |` with every line indented:
-> ```yaml
-> vpn:
->   enabled: true
->   config: |
->     [Interface]
->     PrivateKey = <client-private-key>
->     Address = 10.13.13.2/24
+> **Pasting `vpn.config` — two cases:**
 >
->     [Peer]
->     PublicKey = <server-public-key>
->     Endpoint = vpn.example.com:51820
->     AllowedIPs = 0.0.0.0/0
->     PersistentKeepalive = 25
-> ```
-> Pasting the raw config without `config: |` + indentation is invalid YAML; HA rejects it with
-> a **syntax error** before the add-on runs. Prefer the file/hactl methods above to avoid this.
+> - **Form field (default UI):** the `config` box is single-line, so a pasted multi-line
+>   `wg.conf` arrives with its **line breaks stripped** (`[Interface]PrivateKey=…Address=…`).
+>   The add-on **normalizes** this back into a valid config on startup (the keys are a known
+>   vocabulary), so a mangled paste now works.
+> - **YAML editor mode:** a multi-line value must still be a block scalar — paste under
+>   `config: |` with every line indented:
+>   ```yaml
+>   vpn:
+>     enabled: true
+>     config: |
+>       [Interface]
+>       PrivateKey = <client-private-key>
+>       Address = 10.13.13.2/24
+>       [Peer]
+>       PublicKey = <server-public-key>
+>       Endpoint = vpn.example.com:51820
+>       AllowedIPs = 0.0.0.0/0
+>       PersistentKeepalive = 25
+>   ```
+>   Pasting raw without `config: |` is invalid YAML; HA rejects it with a syntax error *before*
+>   the add-on runs (so the normalizer can't help there). The file / `hactl config -f` methods
+>   above avoid all of this.
 
 ### Verifying
 

@@ -59,6 +59,7 @@ def save_config(tunnel: str, conf_text: str, persist_dir: Path | None = None) ->
     it into /etc/wireguard for wg-quick. Raises HTTPBadRequest on invalid input.
     """
     persist_dir = persist_dir if persist_dir is not None else _PERSIST_DIR
+    conf_text = _normalize_conf(conf_text)
     _validate_conf(conf_text)
     persist_dir.mkdir(parents=True, exist_ok=True)
     persist = _persist_path(tunnel, persist_dir)
@@ -112,6 +113,51 @@ def _conf_from_json(data: dict[str, object]) -> str:
 
     lines.append("")  # trailing newline
     return "\n".join(lines)
+
+
+# WireGuard config keys are a fixed vocabulary, which lets us reconstruct a
+# config whose line breaks were eaten by an HA add-on options text field (a
+# single-line `str`), e.g. a paste that arrives as
+# "[Interface]PrivateKey=...Address=...[Peer]PublicKey=...". We put each section
+# header and key=value on its own line so wg-quick can parse it.
+_WG_KEYS = (
+    "PrivateKey",
+    "Address",
+    "ListenPort",
+    "FwMark",
+    "DNS",
+    "MTU",
+    "Table",
+    "PreUp",
+    "PostUp",
+    "PreDown",
+    "PostDown",
+    "SaveConfig",
+    "PublicKey",
+    "PresharedKey",
+    "AllowedIPs",
+    "Endpoint",
+    "PersistentKeepalive",
+)
+_WG_SECTION_RE = re.compile(r"\s*(\[(?:Interface|Peer)\])\s*", re.IGNORECASE)
+# Match a known key immediately followed by '='. No word-boundary requirement —
+# a value may abut the next key with no separator (e.g. "…:51826AllowedIPs=…").
+# Case-sensitive PascalCase keeps this from tripping on base64 key material.
+_WG_KEY_RE = re.compile(r"\s*(" + "|".join(_WG_KEYS) + r")\s*=\s*")
+
+
+def _normalize_conf(content: str) -> str:
+    """Reconstruct a tidy wg.conf even if line breaks/spaces were stripped.
+
+    Idempotent on already well-formed input. Each ``[Interface]``/``[Peer]``
+    header and each known ``Key = Value`` is placed on its own line. Values are
+    preserved verbatim (only the key token and surrounding ``=`` are touched), so
+    base64 keys, IPs, and ``host:port`` endpoints are unaffected.
+    """
+    content = _WG_SECTION_RE.sub(lambda m: "\n" + m.group(1) + "\n", content)
+    content = _WG_KEY_RE.sub(lambda m: "\n" + m.group(1) + " = ", content)
+    lines = [line.strip() for line in content.splitlines() if line.strip()]
+    return "\n".join(lines) + "\n" if lines else content
 
 
 def _validate_conf(content: str) -> None:

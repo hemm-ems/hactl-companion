@@ -52,20 +52,12 @@ Then set the toggles in the **Configuration** tab and restart the add-on:
 | `vpn.tunnel` | `wg0` | Interface name (`^[a-zA-Z0-9_]{1,15}$`). |
 | `vpn.config` | `""` | *Optional* inline config. Leave empty to use the file above. When set, it is written into `/config/hactl/<tunnel>.conf` on start (it wins over an existing file). |
 
-> ⚠️ **Pasting into `vpn.config`:** add-on options are YAML, so a multi-line `wg.conf`
-> must use a block scalar — paste it under `config: |` with each line indented:
-> ```yaml
-> vpn:
->   enabled: true
->   config: |
->     [Interface]
->     PrivateKey = …
->     [Peer]
->     …
-> ```
-> Pasting the raw config without `config: |` / indentation is invalid YAML and HA will
-> reject it with a syntax error before the add-on ever sees it. The file methods above
-> avoid this entirely and are preferred.
+> ℹ️ **Pasting into `vpn.config`:** the default form field is single-line, so a pasted
+> multi-line `wg.conf` loses its line breaks — the add-on **normalizes** the collapsed
+> value back into a valid config on startup, so it still works. If you instead use the
+> **Edit in YAML** mode, a multi-line value must be a block scalar (`config: |` with each
+> line indented); raw paste there is invalid YAML and HA rejects it before the add-on runs.
+> The file / `hactl config -f` methods above avoid both pitfalls.
 
 Restart the add-on after changing the config. See `docs/wireguard.md` for the full feature manual, including the REST API for multi-tunnel or scripted setups.
 
