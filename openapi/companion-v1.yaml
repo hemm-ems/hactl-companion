@@ -755,8 +755,6 @@ paths:
                     type: string
                   tunnel:
                     type: string
-                  auto_enable:
-                    type: boolean
       parameters:
       - name: tunnel
         in: query
@@ -764,12 +762,6 @@ paths:
         schema:
           type: string
           default: wg0
-      - name: auto_enable
-        in: query
-        required: false
-        schema:
-          type: string
-          default: 'false'
   /v1/wireguard/stop:
     post:
       summary: Stop a WireGuard tunnel
@@ -794,12 +786,6 @@ paths:
         schema:
           type: string
           default: wg0
-      - name: auto_disable
-        in: query
-        required: false
-        schema:
-          type: string
-          default: 'false'
   /v1/wireguard/status:
     get:
       summary: Get WireGuard tunnel status
@@ -820,8 +806,6 @@ paths:
                     enum:
                     - active
                     - inactive
-                  auto_enable:
-                    type: boolean
                   interface:
                     type: object
                     properties:

@@ -94,6 +94,13 @@ jobs:
         run: |
           VER="${{ needs.versions.outputs.next-version }}"
           tag="${{ needs.versions.outputs.next-tag }}"
+          # Idempotent: if a previous run already bumped (e.g. it then failed at
+          # release creation on a transient API error), skip so re-running this
+          # workflow resumes cleanly instead of committing a duplicate bump.
+          if grep -qx "version: \"${VER}\"" hactl_companion/config.yaml; then
+            echo "::notice::config.yaml already at ${VER}; skipping bump (resuming a partial release)"
+            exit 0
+          fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           sed -i "s/^version = .*/version = \"${VER}\"/" pyproject.toml

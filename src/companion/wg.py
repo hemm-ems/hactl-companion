@@ -227,32 +227,3 @@ async def _is_interface_up(tunnel: str) -> bool:
     """Check if a WireGuard interface is currently active."""
     rc, _, _ = await _run_wg_cmd("wg", "show", tunnel)
     return rc == 0
-
-
-async def _enable_auto_start(tunnel: str) -> None:
-    """Enable wg-quick@<tunnel> systemd service for auto-start on boot (best-effort)."""
-    try:
-        rc, _, stderr = await _run_wg_cmd("systemctl", "enable", f"wg-quick@{tunnel}")
-        if rc != 0:
-            logger.warning("Could not enable auto-start for %s: %s", tunnel, stderr.strip())
-    except web.HTTPBadGateway:
-        logger.warning("systemctl not available — auto-start not supported on this system")
-
-
-async def _disable_auto_start(tunnel: str) -> None:
-    """Disable wg-quick@<tunnel> systemd service (best-effort)."""
-    try:
-        rc, _, stderr = await _run_wg_cmd("systemctl", "disable", f"wg-quick@{tunnel}")
-        if rc != 0:
-            logger.warning("Could not disable auto-start for %s: %s", tunnel, stderr.strip())
-    except web.HTTPBadGateway:
-        logger.warning("systemctl not available — auto-start not supported on this system")
-
-
-async def _is_auto_enabled(tunnel: str) -> bool:
-    """Check if auto-start is enabled for a tunnel (best-effort)."""
-    try:
-        rc, stdout, _ = await _run_wg_cmd("systemctl", "is-enabled", f"wg-quick@{tunnel}")
-        return rc == 0 and "enabled" in stdout.lower()
-    except web.HTTPBadGateway:
-        return False

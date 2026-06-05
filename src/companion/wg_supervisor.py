@@ -27,7 +27,6 @@ _FALLBACK_DIR = Path("/config/hactl")
 @dataclass
 class VPNOptions:
     enabled: bool
-    autostart: bool
     tunnel: str
     config: str
 
@@ -64,7 +63,6 @@ def load_options(path: Path = _OPTIONS_PATH) -> VPNOptions | None:
 
     return VPNOptions(
         enabled=bool(vpn.get("enabled", False)),
-        autostart=bool(vpn.get("autostart", False)),
         tunnel=tunnel,
         config=str(vpn.get("config") or ""),
     )
@@ -100,8 +98,6 @@ async def reconcile(opts: VPNOptions, *, fallback_dir: Path = _FALLBACK_DIR) -> 
                 rc, _, stderr = await wg._run_wg_cmd("wg-quick", "down", opts.tunnel)
                 if rc != 0:
                     logger.warning("wg-quick down %s failed (rc=%s): %s", opts.tunnel, rc, stderr.strip())
-            if not opts.autostart:
-                await wg._disable_auto_start(opts.tunnel)
             return
 
         conf_text = _resolve_conf_text(opts, fallback_dir)
@@ -132,10 +128,5 @@ async def reconcile(opts: VPNOptions, *, fallback_dir: Path = _FALLBACK_DIR) -> 
                 return
         else:
             logger.info("tunnel %s already up; left in place", opts.tunnel)
-
-        if opts.autostart:
-            await wg._enable_auto_start(opts.tunnel)
-        else:
-            await wg._disable_auto_start(opts.tunnel)
     except Exception:
         logger.exception("VPN reconcile failed for tunnel %s", opts.tunnel)

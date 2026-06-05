@@ -301,26 +301,12 @@ class TestPostStart:
         assert resp.status == 200
         body = await resp.json()
         assert body["status"] == "started"
-        assert body["auto_enable"] is False
 
     async def test_start_missing_config(self, client, auth_headers) -> None:
         """No persistent config → 404, not a confusing wg-quick 500."""
         with patch("companion.routes.wireguard._is_interface_up", return_value=False):
             resp = await client.post("/v1/wireguard/start?tunnel=wg0", headers=auth_headers)
         assert resp.status == 404
-
-    async def test_start_with_auto_enable(self, client, auth_headers, _wg_config_dir) -> None:
-        self._persist(_wg_config_dir)
-        with (
-            patch("companion.routes.wireguard._is_interface_up", return_value=False),
-            patch("companion.routes.wireguard._run_wg_cmd", return_value=(0, "", "")),
-            patch("companion.routes.wireguard._enable_auto_start") as mock_enable,
-        ):
-            resp = await client.post("/v1/wireguard/start?tunnel=wg0&auto_enable=true", headers=auth_headers)
-        assert resp.status == 200
-        body = await resp.json()
-        assert body["auto_enable"] is True
-        mock_enable.assert_called_once_with("wg0")
 
     async def test_start_already_up(self, client, auth_headers) -> None:
         with patch("companion.routes.wireguard._is_interface_up", return_value=True):
@@ -362,14 +348,11 @@ class TestGetStatus:
         )
 
         async def _mock_run(*args: str, timeout: int = 30) -> tuple[int, str, str]:
-            if args[1] == "show":
-                return (0, wg_output, "")
-            return (1, "", "not enabled")  # systemctl is-enabled
+            return (0, wg_output, "")
 
         with (
             patch("companion.routes.wireguard._is_interface_up", return_value=True),
             patch("companion.routes.wireguard._run_wg_cmd", side_effect=_mock_run),
-            patch("companion.routes.wireguard._is_auto_enabled", return_value=False),
         ):
             resp = await client.get("/v1/wireguard/status?tunnel=wg0", headers=auth_headers)
         assert resp.status == 200
@@ -378,7 +361,7 @@ class TestGetStatus:
         assert body["tunnel"] == "wg0"
         assert body["interface"]["public_key"] == "AAAA"
         assert len(body["peers"]) == 1
-        assert body["auto_enable"] is False
+        assert "auto_enable" not in body
 
     async def test_status_inactive(self, client, auth_headers) -> None:
         with patch("companion.routes.wireguard._is_interface_up", return_value=False):
