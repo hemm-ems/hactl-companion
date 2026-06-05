@@ -16,7 +16,7 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
-from companion import wg
+from companion import wg, wg_monitor
 
 logger = logging.getLogger(__name__)
 
@@ -120,12 +120,21 @@ async def reconcile(opts: VPNOptions, *, fallback_dir: Path = _FALLBACK_DIR) -> 
         # in sync when it came from vpn.config) and materialize /etc/wireguard.
         wg.save_config(opts.tunnel, conf_text, persist_dir=fallback_dir)
 
+        failed = await wg._resolve_endpoint_hostnames(conf_text)
+        if failed:
+            logger.warning(
+                "DNS resolution failed for endpoint(s): %s; tunnel not started",
+                ", ".join(failed),
+            )
+            return
+
         if not await wg._is_interface_up(opts.tunnel):
             logger.info("vpn.enabled=true; bringing tunnel %s up", opts.tunnel)
             rc, _, stderr = await wg._run_wg_cmd("wg-quick", "up", opts.tunnel)
             if rc != 0:
                 logger.warning("wg-quick up %s failed (rc=%s): %s", opts.tunnel, rc, stderr.strip())
                 return
+            wg_monitor.start_monitor(opts.tunnel, conf_text)
         else:
             logger.info("tunnel %s already up; left in place", opts.tunnel)
     except Exception:

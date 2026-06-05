@@ -21,6 +21,15 @@ PublicKey = bbbb
 AllowedIPs = 0.0.0.0/0
 """
 
+_HOSTNAME_CONF = """[Interface]
+PrivateKey = aaaa
+Address = 10.0.0.2/24
+[Peer]
+PublicKey = bbbb
+Endpoint = home.example.com:51826
+AllowedIPs = 0.0.0.0/0
+"""
+
 
 @pytest.fixture
 def wg_conf_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
@@ -123,6 +132,8 @@ class TestReconcileEnabled:
         with (
             patch("companion.wg_supervisor.wg._is_interface_up", AsyncMock(return_value=False)),
             patch("companion.wg_supervisor.wg._run_wg_cmd", AsyncMock(return_value=(0, "", ""))) as run_cmd,
+            patch("companion.wg_supervisor.wg._resolve_endpoint_hostnames", AsyncMock(return_value=[])),
+            patch("companion.wg_supervisor.wg_monitor.start_monitor"),
         ):
             await reconcile(opts, fallback_dir=fallback_dir)
         conf_path = wg_conf_dir / "wg0.conf"
@@ -142,10 +153,45 @@ class TestReconcileEnabled:
         with (
             patch("companion.wg_supervisor.wg._is_interface_up", AsyncMock(return_value=False)),
             patch("companion.wg_supervisor.wg._run_wg_cmd", AsyncMock(return_value=(0, "", ""))) as run_cmd,
+            patch("companion.wg_supervisor.wg._resolve_endpoint_hostnames", AsyncMock(return_value=[])),
+            patch("companion.wg_supervisor.wg_monitor.start_monitor"),
         ):
             await reconcile(opts, fallback_dir=fallback_dir)
         assert (wg_conf_dir / "wg0.conf").read_text() == _VALID_CONF
         run_cmd.assert_called_with("wg-quick", "up", "wg0")
+
+    async def test_dns_failure_logs_and_skips(
+        self,
+        wg_conf_dir: Path,
+        fallback_dir: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        opts = VPNOptions(enabled=True, tunnel="wg0", config=_HOSTNAME_CONF)
+        with (
+            patch("companion.wg_supervisor.wg._is_interface_up", AsyncMock(return_value=False)),
+            patch("companion.wg_supervisor.wg._run_wg_cmd", AsyncMock(return_value=(0, "", ""))) as run_cmd,
+            patch(
+                "companion.wg_supervisor.wg._resolve_endpoint_hostnames",
+                AsyncMock(return_value=["home.example.com"]),
+            ),
+            caplog.at_level("WARNING", logger=wg_supervisor.logger.name),
+        ):
+            await reconcile(opts, fallback_dir=fallback_dir)
+        # wg-quick must NOT be called
+        assert not any("wg-quick" in str(c.args) for c in run_cmd.call_args_list)
+        assert any("DNS resolution failed" in rec.message for rec in caplog.records)
+
+    async def test_monitor_started_after_tunnel_up(self, wg_conf_dir: Path, fallback_dir: Path) -> None:
+        opts = VPNOptions(enabled=True, tunnel="wg0", config=_HOSTNAME_CONF)
+        with (
+            patch("companion.wg_supervisor.wg._is_interface_up", AsyncMock(return_value=False)),
+            patch("companion.wg_supervisor.wg._run_wg_cmd", AsyncMock(return_value=(0, "", ""))),
+            patch("companion.wg_supervisor.wg._resolve_endpoint_hostnames", AsyncMock(return_value=[])),
+            patch("companion.wg_supervisor.wg_monitor.start_monitor") as start_mock,
+        ):
+            await reconcile(opts, fallback_dir=fallback_dir)
+        start_mock.assert_called_once()
+        assert start_mock.call_args.args[0] == "wg0"
 
     async def test_no_config_anywhere_logs_and_skips(
         self,
@@ -174,6 +220,8 @@ class TestReconcileEnabled:
         with (
             patch("companion.wg_supervisor.wg._is_interface_up", AsyncMock(return_value=True)),
             patch("companion.wg_supervisor.wg._run_wg_cmd", AsyncMock(return_value=(0, "", ""))) as run_cmd,
+            patch("companion.wg_supervisor.wg._resolve_endpoint_hostnames", AsyncMock(return_value=[])),
+            patch("companion.wg_supervisor.wg_monitor.start_monitor"),
         ):
             await reconcile(opts, fallback_dir=fallback_dir)
         assert not any(call.args[:2] == ("wg-quick", "up") for call in run_cmd.call_args_list)

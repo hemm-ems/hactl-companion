@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 import re
+import socket
+from dataclasses import dataclass
 from pathlib import Path
 
 from aiohttp import web
@@ -139,6 +142,9 @@ _WG_KEYS = (
     "Endpoint",
     "PersistentKeepalive",
 )
+_ENDPOINT_RE = re.compile(r"^Endpoint\s*=\s*\[?([^\]]+)\]?:(\d+)\s*$", re.MULTILINE)
+_HOSTPORT_RE = re.compile(r"^\[?([^\]]+)\]?:(\d+)$")
+
 _WG_SECTION_RE = re.compile(r"\s*(\[(?:Interface|Peer)\])\s*", re.IGNORECASE)
 # Match a known key immediately followed by '='. No word-boundary requirement —
 # a value may abut the next key with no separator (e.g. "…:51826AllowedIPs=…").
@@ -227,3 +233,70 @@ async def _is_interface_up(tunnel: str) -> bool:
     """Check if a WireGuard interface is currently active."""
     rc, _, _ = await _run_wg_cmd("wg", "show", tunnel)
     return rc == 0
+
+
+async def _dns_lookup_ip(host: str, *, timeout: float = 5.0) -> str | None:
+    """Resolve a hostname to its first address string; return None on failure."""
+    try:
+        loop = asyncio.get_running_loop()
+        results = await asyncio.wait_for(loop.getaddrinfo(host, None), timeout=timeout)
+        return results[0][4][0]
+    except (TimeoutError, socket.gaierror, OSError, IndexError):
+        return None
+
+
+async def _resolve_endpoint_hostnames(conf_text: str) -> list[str]:
+    """Return list of hostname endpoints that fail DNS resolution (IPs are skipped)."""
+    failed = []
+    for m in _ENDPOINT_RE.finditer(conf_text):
+        host = m.group(1)
+        try:
+            ipaddress.ip_address(host)
+            continue  # literal IP — skip
+        except ValueError:
+            pass
+        if await _dns_lookup_ip(host) is None:
+            failed.append(host)
+    return failed
+
+
+@dataclass
+class _PeerEndpoint:
+    pubkey: str
+    hostname: str
+    port: int
+
+
+def _parse_hostname_peers(conf_text: str) -> list[_PeerEndpoint]:
+    """Return one entry per peer whose Endpoint is a hostname (not a literal IP)."""
+    peers: list[_PeerEndpoint] = []
+    current: dict[str, str] = {}
+    in_peer = False
+    for line in conf_text.splitlines():
+        line = line.strip()
+        if line.lower() == "[peer]":
+            _flush_peer(current, peers)
+            current = {}
+            in_peer = True
+        elif line.lower() == "[interface]":
+            in_peer = False
+        elif in_peer and "=" in line:
+            k, _, v = line.partition("=")
+            current[k.strip()] = v.strip()
+    _flush_peer(current, peers)
+    return peers
+
+
+def _flush_peer(data: dict[str, str], out: list[_PeerEndpoint]) -> None:
+    pubkey = data.get("PublicKey")
+    endpoint = data.get("Endpoint", "")
+    m = _HOSTPORT_RE.match(endpoint)
+    if not pubkey or not m:
+        return
+    host, port = m.group(1), int(m.group(2))
+    try:
+        ipaddress.ip_address(host)
+        return  # literal IP — monitor not needed
+    except ValueError:
+        pass
+    out.append(_PeerEndpoint(pubkey, host, port))
