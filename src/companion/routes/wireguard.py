@@ -8,11 +8,14 @@ from dataclasses import dataclass
 
 from aiohttp import web
 
+from companion import wg_monitor
 from companion.wg import (
     _conf_from_json,
     _is_interface_up,
     _parse_wg_show,
+    _resolve_endpoint_hostnames,
     _run_wg_cmd,
+    _runtime_path,
     _validate_tunnel,
     materialize,
     save_config,
@@ -71,11 +74,18 @@ async def post_start(request: web.Request) -> web.Response:
     if not materialize(tunnel):
         raise web.HTTPNotFound(text=f"No config for tunnel {tunnel} — push one via POST /v1/wireguard/config first")
 
+    conf_text = _runtime_path(tunnel).read_text(encoding="utf-8")
+    failed = await _resolve_endpoint_hostnames(conf_text)
+    if failed:
+        logger.error("DNS resolution failed for endpoint(s): %s", ", ".join(failed))
+        raise web.HTTPBadGateway(text=f"DNS resolution failed for endpoint(s): {', '.join(failed)}")
+
     rc, _, stderr = await _run_wg_cmd("wg-quick", "up", tunnel)
     if rc != 0:
         logger.error("wg-quick up %s failed (rc=%s): %s", tunnel, rc, stderr.strip())
         raise web.HTTPInternalServerError(text=f"Failed to start tunnel: {stderr.strip()}")
 
+    wg_monitor.start_monitor(tunnel, conf_text)
     logger.info("WireGuard tunnel %s started", tunnel)
     return web.json_response({"status": "started", "tunnel": tunnel})
 
@@ -87,6 +97,7 @@ async def post_stop(request: web.Request) -> web.Response:
     if not await _is_interface_up(tunnel):
         raise web.HTTPConflict(text=f"Tunnel {tunnel} is not active")
 
+    wg_monitor.stop_monitor(tunnel)
     rc, _, stderr = await _run_wg_cmd("wg-quick", "down", tunnel)
     if rc != 0:
         logger.error("wg-quick down %s failed (rc=%s): %s", tunnel, rc, stderr.strip())

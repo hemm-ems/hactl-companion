@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import time
 
@@ -26,6 +27,11 @@ def _compose(*args: str, capture: bool = False) -> subprocess.CompletedProcess[s
 def _get_mapped_port(service: str, container_port: int) -> str:
     result = _compose("port", service, str(container_port), capture=True)
     return result.stdout.strip().rsplit(":", maxsplit=1)[-1]
+
+
+def _fresh_companion_url() -> str:
+    """Re-fetch the host port — needed after any container recreate (port mapping may change)."""
+    return f"http://localhost:{_get_mapped_port('companion-wg', 9100)}"
 
 
 def _wait_for_url(url: str, timeout: int = 60) -> None:
@@ -329,3 +335,103 @@ class TestWireGuardFlow:
             timeout=20,
         )
         assert result.returncode == 0, f"ping through reconciled tunnel failed: {result.stderr}"
+
+
+# ---------------------------------------------------------------------------
+# Dyndns: pre-flight check and live re-resolution monitor
+# ---------------------------------------------------------------------------
+
+
+class TestDyndns:
+    """DNS pre-flight gate and background re-resolve monitor."""
+
+    def test_16_preflight_rejects_unresolvable_hostname(self, auth_headers: dict[str, str], client_conf: str) -> None:
+        """POST /start with an unresolvable hostname endpoint returns 502.
+
+        WireGuard would silently start with a broken endpoint; the companion's
+        pre-flight DNS check catches this and returns HTTP 502 before running
+        wg-quick.
+        """
+        url = _fresh_companion_url()
+        bad_host = "host-that-will-never-resolve-xyz.invalid"
+        bad_conf = re.sub(r"Endpoint = \S+", f"Endpoint = {bad_host}:51820", client_conf)
+
+        r = requests.post(
+            f"{url}/v1/wireguard/config?tunnel=wg1",
+            data=bad_conf,
+            headers={**auth_headers, "Content-Type": "text/plain"},
+            timeout=10,
+        )
+        assert r.status_code == 200
+
+        r = requests.post(f"{url}/v1/wireguard/start?tunnel=wg1", headers=auth_headers, timeout=30)
+        assert r.status_code == 502
+        assert bad_host in r.text
+
+    def test_17_monitor_reresolves_after_ip_change(self, auth_headers: dict[str, str]) -> None:
+        """Monitor pushes a corrected endpoint when the IP behind a dyndns hostname changes.
+
+        Simulates a dyndns IP flip by poisoning the companion container's
+        /etc/hosts so that wg-server resolves to a non-routable IP.  The tunnel
+        starts (pre-flight DNS succeeds — hostname resolves, just to the wrong
+        IP) but never handshakes.  After restoring /etc/hosts the monitor's
+        first health check (~30 s) detects the stale handshake, re-resolves,
+        pushes the corrected endpoint via ``wg set``, and the tunnel recovers.
+        Total wait: health_interval (30 s) + first backoff (5 s) + settling ≈ 42 s.
+        """
+        url = _fresh_companion_url()
+
+        # Ensure wg0 is stopped so its monitor is clean.
+        r = requests.get(f"{url}/v1/wireguard/status?tunnel=wg0", headers=auth_headers, timeout=10)
+        if r.status_code == 200 and r.json().get("state") == "active":
+            requests.post(f"{url}/v1/wireguard/stop?tunnel=wg0", headers=auth_headers, timeout=30)
+
+        # Resolve wg-server from inside the companion container.
+        getent = subprocess.run(
+            ["docker", "exec", "companion-wg", "getent", "hosts", "wg-server"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=10,
+        )
+        real_ip = getent.stdout.split()[0]
+        bad_ip = "192.0.2.99"  # TEST-NET (RFC 5737) — guaranteed non-routable
+
+        def _poison() -> None:
+            subprocess.run(
+                ["docker", "exec", "companion-wg", "sh", "-c", f"sed -i 's/{real_ip}/{bad_ip}/g' /etc/hosts"],
+                check=True,
+                timeout=10,
+            )
+
+        def _restore() -> None:
+            subprocess.run(
+                ["docker", "exec", "companion-wg", "sh", "-c", f"sed -i 's/{bad_ip}/{real_ip}/g' /etc/hosts"],
+                check=True,
+                timeout=10,
+            )
+
+        try:
+            # Point wg-server at the bogus IP so wg-quick starts but never handshakes.
+            _poison()
+
+            r = requests.post(f"{url}/v1/wireguard/start?tunnel=wg0", headers=auth_headers, timeout=30)
+            assert r.status_code == 200, f"start failed: {r.text}"
+
+            # Immediately restore real IP — monitor will pick it up on its first re-resolve.
+            time.sleep(2)
+            _restore()
+
+            # Wait for: health_interval (30 s) + first reconnect backoff (5 s) + handshake (~5 s).
+            time.sleep(42)
+
+            result = subprocess.run(
+                ["docker", "exec", "companion-wg", "ping", "-c", "2", "-W", "5", "10.13.13.1"],
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+            assert result.returncode == 0, f"ping after monitor re-resolve failed:\n{result.stderr}"
+        finally:
+            _restore()  # idempotent; safe if already restored
+            requests.post(f"{url}/v1/wireguard/stop?tunnel=wg0", headers=auth_headers, timeout=30)

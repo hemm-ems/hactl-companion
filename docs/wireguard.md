@@ -192,6 +192,33 @@ host reboot the tunnel comes back as soon as the add-on starts. Transient
 `POST /v1/wireguard/start|stop` calls (and `hactl companion wireguard up|down`) only
 affect the live interface — they do not change the persisted `enabled` option.
 
+## Dynamic DNS Endpoints
+
+WireGuard resolves hostnames only once — at tunnel startup — and never re-resolves them. If your VPN server's IP changes (common with dynamic DNS / dyndns providers), the tunnel goes silent without any error.
+
+The companion add-on handles this automatically in two ways:
+
+**1. Pre-flight DNS check**
+
+Before running `wg-quick up`, the add-on verifies that every hostname `Endpoint` in the config resolves. If any hostname fails DNS lookup, the tunnel is **not started** and the API returns `HTTP 502` with the list of failing hostnames:
+
+```
+HTTP 502 Bad Gateway
+DNS resolution failed for endpoint(s): vpn.example.com
+```
+
+This catches typos and DNS outages at startup rather than letting the tunnel come up silently broken.
+
+**2. Live re-resolution monitor**
+
+After a successful start, the add-on runs a background monitor for every peer whose `Endpoint` is a hostname. Every **30 seconds** it checks whether the peer's latest WireGuard handshake is recent. If a handshake is older than **180 seconds**, the add-on re-resolves the hostname and pushes the updated IP via `wg set peer … endpoint <new-ip>:<port>`. Re-resolve attempts follow a backoff schedule (5 s → 10 s → 30 s → 60 s → … up to 1 h) and never give up.
+
+**What this means for operators:**
+
+- A tunnel with a bad hostname in `Endpoint` will be rejected with HTTP 502 instead of starting silently broken.
+- After a dyndns IP change, the tunnel self-heals within ~35 seconds (30 s health check + 5 s first retry). No add-on restart needed.
+- Peers whose `Endpoint` is a bare IP address are unaffected — the monitor only tracks hostname-based endpoints.
+
 ## Security
 
 - **Auth required**: All WireGuard endpoints require Bearer token authentication
@@ -204,19 +231,19 @@ affect the live interface — they do not change the persisted `enabled` option.
 
 ### Unit Tests
 ```bash
-uv run pytest tests/test_wireguard.py -v
+uv run pytest tests/test_wireguard.py tests/test_wg_dns.py tests/test_wg_monitor.py -v
 ```
-30 tests covering: validation, config parsing (raw + JSON), `wg show` output parsing, start/stop/status with mocked subprocess, auth enforcement, command injection prevention.
+226 tests covering: validation, config parsing (raw + JSON), `wg show` output parsing, start/stop/status with mocked subprocess, auth enforcement, command injection prevention, DNS pre-flight check, hostname peer parsing, monitor liveness/backoff/reconnect logic.
 
 ### Integration Tests
 ```bash
 make test-wg
 ```
-14 end-to-end tests using two Docker containers:
+16 end-to-end tests using two Docker containers:
 - **wg-server**: Alpine with WireGuard, generates keypairs, runs as VPN server on `10.13.13.1`
 - **companion-wg**: Full companion image with WireGuard tools, acts as VPN client on `10.13.13.2`
 
-Tests verify: config push (raw + JSON) → tunnel start → status active with peer handshake → actual ping through tunnel → stop → status inactive → ping fails → auth enforcement.
+Tests verify: config push (raw + JSON) → tunnel start → status active with peer handshake → actual ping through tunnel → stop → status inactive → ping fails → auth enforcement → declarative reconcile across container recreate → DNS pre-flight 502 for unresolvable hostname → monitor re-resolve after dyndns IP change (~42 s wait).
 
 Works on **Windows** (Docker Desktop) and **GitHub Actions** (Ubuntu, `ubuntu-latest`).
 

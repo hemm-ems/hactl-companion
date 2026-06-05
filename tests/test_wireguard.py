@@ -291,11 +291,21 @@ class TestPostStart:
             "[Interface]\nPrivateKey = X\nAddress = 10.0.0.1/24\n\n[Peer]\nPublicKey = Y\nAllowedIPs = 0/0\n"
         )
 
+    @staticmethod
+    def _persist_with_hostname(_wg_config_dir, tunnel: str = "wg0") -> None:
+        _wg_config_dir.mkdir(parents=True, exist_ok=True)
+        (_wg_config_dir / f"{tunnel}.conf").write_text(
+            "[Interface]\nPrivateKey = X\nAddress = 10.0.0.1/24\n"
+            "[Peer]\nPublicKey = Y\nEndpoint = vpn.example.com:51820\nAllowedIPs = 0/0\n"
+        )
+
     async def test_start_success(self, client, auth_headers, _wg_config_dir) -> None:
         self._persist(_wg_config_dir)
         with (
             patch("companion.routes.wireguard._is_interface_up", return_value=False),
             patch("companion.routes.wireguard._run_wg_cmd", return_value=(0, "", "")),
+            patch("companion.routes.wireguard._resolve_endpoint_hostnames", AsyncMock(return_value=[])),
+            patch("companion.routes.wireguard.wg_monitor.start_monitor"),
         ):
             resp = await client.post("/v1/wireguard/start?tunnel=wg0", headers=auth_headers)
         assert resp.status == 200
@@ -317,10 +327,41 @@ class TestPostStart:
         self._persist(_wg_config_dir)
         with (
             patch("companion.routes.wireguard._is_interface_up", return_value=False),
+            patch("companion.routes.wireguard._resolve_endpoint_hostnames", AsyncMock(return_value=[])),
             patch("companion.routes.wireguard._run_wg_cmd", return_value=(1, "", "error")),
         ):
             resp = await client.post("/v1/wireguard/start?tunnel=wg0", headers=auth_headers)
         assert resp.status == 500
+
+    async def test_start_dns_failure_returns_502(self, client, auth_headers, _wg_config_dir) -> None:
+        self._persist_with_hostname(_wg_config_dir)
+        with (
+            patch("companion.routes.wireguard._is_interface_up", return_value=False),
+            patch(
+                "companion.routes.wireguard._resolve_endpoint_hostnames",
+                AsyncMock(return_value=["vpn.example.com"]),
+            ),
+            patch("companion.routes.wireguard._run_wg_cmd", return_value=(0, "", "")) as run_cmd,
+        ):
+            resp = await client.post("/v1/wireguard/start?tunnel=wg0", headers=auth_headers)
+        assert resp.status == 502
+        text = await resp.text()
+        assert "vpn.example.com" in text
+        # wg-quick must NOT be called when DNS fails
+        assert not any("wg-quick" in str(c.args) for c in run_cmd.call_args_list)
+
+    async def test_start_monitor_is_started(self, client, auth_headers, _wg_config_dir) -> None:
+        self._persist_with_hostname(_wg_config_dir)
+        with (
+            patch("companion.routes.wireguard._is_interface_up", return_value=False),
+            patch("companion.routes.wireguard._resolve_endpoint_hostnames", AsyncMock(return_value=[])),
+            patch("companion.routes.wireguard._run_wg_cmd", return_value=(0, "", "")),
+            patch("companion.routes.wireguard.wg_monitor.start_monitor") as start_mock,
+        ):
+            resp = await client.post("/v1/wireguard/start?tunnel=wg0", headers=auth_headers)
+        assert resp.status == 200
+        start_mock.assert_called_once()
+        assert start_mock.call_args.args[0] == "wg0"
 
 
 class TestPostStop:
@@ -328,11 +369,13 @@ class TestPostStop:
         with (
             patch("companion.routes.wireguard._is_interface_up", return_value=True),
             patch("companion.routes.wireguard._run_wg_cmd", return_value=(0, "", "")),
+            patch("companion.routes.wireguard.wg_monitor.stop_monitor") as stop_mock,
         ):
             resp = await client.post("/v1/wireguard/stop?tunnel=wg0", headers=auth_headers)
         assert resp.status == 200
         body = await resp.json()
         assert body["status"] == "stopped"
+        stop_mock.assert_called_once_with("wg0")
 
     async def test_stop_not_running(self, client, auth_headers) -> None:
         with patch("companion.routes.wireguard._is_interface_up", return_value=False):
