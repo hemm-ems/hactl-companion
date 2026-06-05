@@ -8,6 +8,7 @@ import pytest
 
 from companion.wg import (
     _conf_from_json,
+    _normalize_conf,
     _parse_wg_show,
     _validate_conf,
     _validate_tunnel,
@@ -387,7 +388,65 @@ class TestGetStatus:
         assert body["state"] == "inactive"
 
 
-_CONF = "[Interface]\nPrivateKey = X\nAddress = 10.0.0.1/24\n\n[Peer]\nPublicKey = Y\nAllowedIPs = 0/0\n"
+# Already in normalized form (no inter-section blank line) so it round-trips
+# byte-for-byte through save_config's normalizer.
+_CONF = "[Interface]\nPrivateKey = X\nAddress = 10.0.0.1/24\n[Peer]\nPublicKey = Y\nAllowedIPs = 0/0\n"
+
+
+class TestNormalizeConf:
+    # The exact value an HA add-on options text field produced from a pasted
+    # multi-line config — all newlines (and spaces) stripped.
+    COLLAPSED = (
+        "[Interface]PrivateKey=yLaRKvrkz+DhPait/rk5OgOV2RGeikMkX/dbK8gxiHo=Address=10.6.0.2/24"
+        "[Peer]PublicKey=FE5OhQCNLLxF1OdDBIDMf5ktc8sEFngHoxy2o5iMhxs="
+        "Endpoint=home.kippings.de:51826AllowedIPs=10.6.0.0/24PersistentKeepalive=25"
+    )
+
+    def test_reconstructs_collapsed_paste(self) -> None:
+        out = _normalize_conf(self.COLLAPSED)
+        _validate_conf(out)  # must not raise
+        assert out.splitlines() == [
+            "[Interface]",
+            "PrivateKey = yLaRKvrkz+DhPait/rk5OgOV2RGeikMkX/dbK8gxiHo=",
+            "Address = 10.6.0.2/24",
+            "[Peer]",
+            "PublicKey = FE5OhQCNLLxF1OdDBIDMf5ktc8sEFngHoxy2o5iMhxs=",
+            "Endpoint = home.kippings.de:51826",
+            "AllowedIPs = 10.6.0.0/24",
+            "PersistentKeepalive = 25",
+        ]
+
+    def test_idempotent_on_well_formed(self) -> None:
+        well_formed = (
+            "[Interface]\nPrivateKey = aaa=\nAddress = 10.0.0.2/24\n\n"
+            "[Peer]\nPublicKey = bbb=\nAllowedIPs = 0.0.0.0/0\n"
+        )
+        once = _normalize_conf(well_formed)
+        assert _normalize_conf(once) == once
+
+    def test_splits_when_value_ends_in_letter(self) -> None:
+        # Endpoint hostname ending in a letter, abutting the next key.
+        collapsed = (
+            "[Interface]PrivateKey=k=Address=10.0.0.2/24[Peer]PublicKey=p=Endpoint=vpn.example.comAllowedIPs=0.0.0.0/0"
+        )
+        out = _normalize_conf(collapsed)
+        assert "Endpoint = vpn.example.com" in out
+        assert "AllowedIPs = 0.0.0.0/0" in out
+
+    def test_preserves_base64_key_values(self) -> None:
+        out = _normalize_conf(self.COLLAPSED)
+        # Key material (incl. '+' '/' '=') must survive verbatim.
+        assert "PrivateKey = yLaRKvrkz+DhPait/rk5OgOV2RGeikMkX/dbK8gxiHo=" in out
+
+    def test_save_config_normalizes(self, tmp_path, monkeypatch) -> None:
+        """A collapsed paste pushed through save_config lands as a valid file."""
+        persist = tmp_path / "persist"
+        monkeypatch.setattr("companion.wg._PERSIST_DIR", persist)
+        monkeypatch.setattr("companion.wg._WG_CONFIG_DIR", tmp_path / "runtime")
+        save_config("wg0", self.COLLAPSED)
+        written = (persist / "wg0.conf").read_text()
+        _validate_conf(written)
+        assert "\nAddress = 10.6.0.2/24\n" in written
 
 
 class TestSaveAndMaterialize:

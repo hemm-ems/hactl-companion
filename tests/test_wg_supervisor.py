@@ -11,10 +11,11 @@ import pytest
 from companion import wg_supervisor
 from companion.wg_supervisor import VPNOptions, load_options, reconcile
 
+# Normalized form (no inter-section blank line) so it round-trips byte-for-byte
+# through save_config's config normalizer.
 _VALID_CONF = """[Interface]
 PrivateKey = aaaa
 Address = 10.0.0.2/24
-
 [Peer]
 PublicKey = bbbb
 AllowedIPs = 0.0.0.0/0

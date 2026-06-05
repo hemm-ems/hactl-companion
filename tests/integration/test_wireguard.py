@@ -286,8 +286,13 @@ class TestWireGuardFlow:
         wiped), and asserts the startup supervisor reconciles the tunnel back up
         from persistent storage — and that the canonical /config/hactl copy
         persisted. This is the scenario the add-on exists for.
+
+        The inline config is newline-stripped to mimic an HA add-on options text
+        field eating the line breaks (the real-world paste failure) — so this
+        also exercises the config normalizer end-to-end.
         """
-        options = {"vpn": {"enabled": True, "autostart": False, "tunnel": "wg0", "config": client_conf}}
+        collapsed = client_conf.replace("\n", "")
+        options = {"vpn": {"enabled": True, "autostart": False, "tunnel": "wg0", "config": collapsed}}
         # Write options.json into the persistent /data volume.
         subprocess.run(
             ["docker", "exec", "-i", "companion-wg", "sh", "-c", "cat > /data/options.json"],
