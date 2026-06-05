@@ -111,4 +111,8 @@ def create_app(config_base_path: str = "/config") -> web.Application:
     register_routes(app, ha)
     register_routes(app, wireguard)
 
+    # Bring up any WireGuard tunnels marked for auto-start (persists across
+    # restarts since configs/markers live on the /data volume).
+    app.on_startup.append(wireguard.restore_tunnels)
+
     return app

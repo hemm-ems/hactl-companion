@@ -38,6 +38,9 @@ services:
       - "9100"
     volumes:
       - wg-shared:/shared:ro
+      # Persistent volume — mirrors the add-on's /data. WireGuard configs and
+      # autostart markers live here and must survive container recreation.
+      - wg-data:/data
     networks:
       wg-net:
         aliases:
@@ -48,6 +51,7 @@ services:
 
 volumes:
   wg-shared:
+  wg-data:
 
 networks:
   wg-net:

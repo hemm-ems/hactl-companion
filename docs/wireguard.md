@@ -6,6 +6,33 @@ The companion add-on now includes a WireGuard VPN **client** that can be fully c
 
 This implements [issue #12](https://github.com/hemm-ems/hactl-companion/issues/12) (add-on side only; HA integration with entities/config flow is deferred).
 
+> ## ✅ Production-ready
+>
+> WireGuard is the remote *lifeline* hactl rides over, so a tunnel must survive
+> restarts and come back up on its own. Two earlier bugs that broke this — found
+> live on a real HA OS install — are now fixed:
+>
+> 1. **Configs are persisted.** Tunnel `.conf` files are written under
+>    `/data/wireguard/` (the add-on's persistent `/data` volume), **not** the
+>    ephemeral `/etc/wireguard`. They now survive add-on restarts, updates, and
+>    host reboots. (`WG_CONFIG_DIR` overrides the directory for tests/dev.)
+>    Previously they lived in the ephemeral container layer and vanished on every
+>    restart, leaving `wg-quick` with no config.
+>
+> 2. **Tunnels auto-start on boot.** `auto_enable=true` now records intent as a
+>    persistent marker (`/data/wireguard/<tunnel>.autostart`) instead of calling
+>    `systemctl` (the Alpine image has no systemd). On startup the companion runs
+>    an `on_startup` hook (`restore_tunnels`) that brings up every marked tunnel —
+>    so the Pi reconnects to the VPN automatically after a reboot.
+>
+> 3. **hactl drives it.** Manage the lifeline end-to-end with
+>    `hactl companion wireguard {status,config,up,down}` — it handles the
+>    Ingress session auth that a plain bearer-token `curl` (which gets `401`)
+>    cannot.
+>
+> These three together mean: push a config + `up --auto` once, and the tunnel
+> comes back on its own across restarts — usable as a real remote lifeline.
+
 ## API Endpoints
 
 All endpoints require `Authorization: Bearer <TOKEN>` (same as other companion endpoints).
@@ -117,7 +144,11 @@ Pass `auto_enable=true` when starting:
 curl -X POST "$HA/v1/wireguard/start?tunnel=wg0&auto_enable=true" -H "$AUTH"
 ```
 
-This uses `systemctl enable wg-quick@wg0` under the hood. Works on systems with systemd (HA OS). On Alpine/Docker (no systemd), auto-enable is silently ignored.
+This drops a persistent marker at `/data/wireguard/wg0.autostart`. On startup the
+companion's `restore_tunnels` hook brings up every marked tunnel — so the tunnel
+reconnects automatically after an add-on restart or host reboot. (No systemd
+required; the marker lives on the persistent `/data` volume alongside the config.)
+Clear it by stopping with `auto_disable=true`.
 
 ## Security
 
@@ -172,7 +203,7 @@ Works on **Windows** (Docker Desktop) and **GitHub Actions** (Ubuntu, `ubuntu-la
 
 1. **Alpine TLS cert issue**: `python:3.12-alpine` has a known issue where `apk` fails with "TLS: server certificate not trusted" behind corporate proxies or with certain Docker Desktop versions. Fixed by switching repos to HTTP (`sed -i 's|https://|http://|g' /etc/apk/repositories`). This is a build-time workaround — the actual WireGuard traffic uses its own encryption.
 
-2. **No systemd on Alpine**: The `wg-quick@` systemd service doesn't exist on Alpine. The auto-enable feature gracefully falls back to no-op. On HA OS (Debian-based), systemd is available and auto-start works.
+2. **No systemd on Alpine** (resolved): The `wg-quick@` systemd service doesn't exist on Alpine, so the original `systemctl enable` approach was always a no-op in the add-on. Auto-start is now driven by a persistent `.autostart` marker + the `restore_tunnels` `on_startup` hook, which needs no systemd and works identically everywhere.
 
 3. **wireguard-go not needed**: Alpine's `wireguard-tools` package uses the kernel WireGuard module when available (Linux 5.6+). Docker Desktop and GitHub Actions both have it. `wireguard-go` (userspace) is not needed unless targeting older kernels.
 
@@ -182,4 +213,17 @@ Works on **Windows** (Docker Desktop) and **GitHub Actions** (Ubuntu, `ubuntu-la
 
 6. **wg-quick stderr is normal**: `wg-quick up` prints its shell trace to stderr (`[#] ip link add...`). This is informational, not an error.
 
-7. **Test ordering**: The integration tests are numbered (`test_01_` through `test_14_`) and run as methods of a single class to ensure execution order. Each test depends on the state left by the previous test (config → start → status → stop).
+7. **Test ordering**: The integration tests are numbered (`test_01_` onward) and run as methods of a single class to ensure execution order. Each test depends on the state left by the previous test (config → start → status → stop).
+
+8. **The bug CI used to miss, and how it's now caught**: the original Docker
+   suite pushed a config and started the tunnel **in the same container
+   lifetime** — it never recreated `companion-wg`, so the ephemeral
+   `/etc/wireguard/wg0.conf` was always present and neither the persistence bug
+   nor the no-auto-start bug ever showed up. Both were only reproducible on a real
+   add-on across a restart/reboot (verified live on HA OS 2026.5 / companion
+   2026.5.12: a full config→start→active→stop cycle succeeded, but `start` after a
+   restart failed with `'/etc/wireguard/wg0.conf' does not exist`). The fix moves
+   configs to the persistent `/data` volume and auto-restores marked tunnels on
+   startup; `test_15_config_and_autostart_survive_recreate` now force-recreates the
+   container mid-suite and asserts the config persists **and** the tunnel
+   auto-reconnects — so this can't regress unnoticed again.

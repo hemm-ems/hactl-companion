@@ -275,3 +275,64 @@ class TestWireGuardFlow:
             assert r.status_code == 401, f"{endpoint} should require auth"
         r = requests.get(f"{companion_url}/v1/wireguard/status", timeout=10)
         assert r.status_code == 401
+
+    def test_15_config_and_autostart_survive_recreate(self, companion_url: str, auth_headers: dict[str, str]) -> None:
+        """Regression for the two real-world bugs (ephemeral config + no boot restore).
+
+        A config pushed earlier must persist on /data, and a tunnel started with
+        ``auto_enable=true`` must come back up automatically after the container
+        is recreated (simulating an add-on restart / host reboot) — with no
+        re-push and no manual start.
+        """
+        # 1. Start with autostart enabled (config wg0.conf already present from
+        #    earlier tests, now living on the persistent /data volume).
+        r = requests.post(
+            f"{companion_url}/v1/wireguard/start?tunnel=wg0&auto_enable=true",
+            headers=auth_headers,
+            timeout=30,
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["auto_enable"] is True
+
+        # 2. Recreate the companion container from its image — new ephemeral
+        #    layer (/etc/wireguard wiped), /data volume preserved. This is what
+        #    an add-on update/restart does, and what the old code couldn't survive.
+        _compose("up", "-d", "--force-recreate", "--no-deps", "companion-wg")
+        new_port = _get_mapped_port("companion-wg", 9100)
+        new_url = f"http://localhost:{new_port}"
+        _wait_for_url(f"{new_url}/v1/health")
+
+        # 3. Config persisted across recreation.
+        check = subprocess.run(
+            ["docker", "exec", "companion-wg", "test", "-f", "/data/wireguard/wg0.conf"],
+            capture_output=True,
+            timeout=10,
+        )
+        assert check.returncode == 0, "wg0.conf did not persist across container recreation"
+
+        # 4. Tunnel auto-restored on boot — active without any manual start.
+        time.sleep(3)
+        r = requests.get(f"{new_url}/v1/wireguard/status?tunnel=wg0", headers=auth_headers, timeout=10)
+        assert r.status_code == 200
+        body = r.json()
+        assert body["state"] == "active", f"tunnel did not auto-restore on boot: {body}"
+        assert body.get("auto_enable") is True
+
+        # 5. And it actually works — ping the server through the restored tunnel.
+        result = subprocess.run(
+            ["docker", "exec", "companion-wg", "ping", "-c", "2", "-W", "5", "10.13.13.1"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        assert result.returncode == 0, f"ping through auto-restored tunnel failed: {result.stderr}"
+
+        # 6. Clean up: stop and clear the autostart marker.
+        r = requests.post(
+            f"{new_url}/v1/wireguard/stop?tunnel=wg0&auto_disable=true",
+            headers=auth_headers,
+            timeout=30,
+        )
+        assert r.status_code == 200
+        r = requests.get(f"{new_url}/v1/wireguard/status?tunnel=wg0", headers=auth_headers, timeout=10)
+        assert r.json()["state"] == "inactive"

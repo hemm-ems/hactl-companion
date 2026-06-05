@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,7 +15,29 @@ from aiohttp import web
 logger = logging.getLogger(__name__)
 
 _TUNNEL_RE = re.compile(r"^[a-zA-Z0-9_]{1,15}$")
-_WG_CONFIG_DIR = Path("/etc/wireguard")
+
+# WireGuard configs live on the add-on's *persistent* volume (/data) so they
+# survive container restarts, updates, and host reboots. /etc/wireguard is the
+# ephemeral container layer and would be wiped every restart, leaving wg-quick
+# with no config to bring the tunnel back up. Overridable via WG_CONFIG_DIR for
+# tests and local dev.
+_DEFAULT_WG_CONFIG_DIR = "/data/wireguard"
+
+
+def _wg_config_dir() -> Path:
+    """Persistent directory holding tunnel `.conf` files and autostart markers."""
+    return Path(os.environ.get("WG_CONFIG_DIR", _DEFAULT_WG_CONFIG_DIR))
+
+
+def _conf_path(tunnel: str) -> Path:
+    """Path of a tunnel's persistent `.conf` file."""
+    return _wg_config_dir() / f"{tunnel}.conf"
+
+
+def _marker_path(tunnel: str) -> Path:
+    """Path of a tunnel's autostart marker (used by boot restore)."""
+    return _wg_config_dir() / f"{tunnel}.autostart"
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -177,10 +200,9 @@ async def post_config(request: web.Request) -> web.Response:
 
     _validate_conf(conf_text)
 
-    # Write config file
-    conf_dir = _WG_CONFIG_DIR
-    conf_dir.mkdir(parents=True, exist_ok=True)
-    conf_path = conf_dir / f"{tunnel}.conf"
+    # Write config to the persistent volume so it survives restarts.
+    conf_path = _conf_path(tunnel)
+    conf_path.parent.mkdir(parents=True, exist_ok=True)
     conf_path.write_text(conf_text, encoding="utf-8")
     conf_path.chmod(0o600)
 
@@ -195,9 +217,15 @@ async def post_start(request: web.Request) -> web.Response:
     if await _is_interface_up(tunnel):
         raise web.HTTPConflict(text=f"Tunnel {tunnel} is already active")
 
+    conf_path = _conf_path(tunnel)
+    if not conf_path.exists():
+        raise web.HTTPNotFound(text=f"No config for tunnel {tunnel} — push one via POST /v1/wireguard/config first")
+
     auto_enable = request.query.get("auto_enable", "false").lower() in ("true", "1", "yes")
 
-    rc, _, stderr = await _run_wg_cmd("wg-quick", "up", tunnel)
+    # Pass the full config path: wg-quick derives the interface name from the
+    # basename, and the config no longer lives in the default /etc/wireguard.
+    rc, _, stderr = await _run_wg_cmd("wg-quick", "up", str(conf_path))
     if rc != 0:
         logger.error("wg-quick up %s failed (rc=%s): %s", tunnel, rc, stderr.strip())
         raise web.HTTPInternalServerError(text=f"Failed to start tunnel: {stderr.strip()}")
@@ -219,7 +247,9 @@ async def post_stop(request: web.Request) -> web.Response:
 
     auto_disable = request.query.get("auto_disable", "false").lower() in ("true", "1", "yes")
 
-    rc, _, stderr = await _run_wg_cmd("wg-quick", "down", tunnel)
+    # wg-quick down also needs the config path (it re-reads it to tear down the
+    # interface), and the config lives on the persistent volume now.
+    rc, _, stderr = await _run_wg_cmd("wg-quick", "down", str(_conf_path(tunnel)))
     if rc != 0:
         logger.error("wg-quick down %s failed (rc=%s): %s", tunnel, rc, stderr.strip())
         raise web.HTTPInternalServerError(text=f"Failed to stop tunnel: {stderr.strip()}")
@@ -255,37 +285,59 @@ async def get_status(request: web.Request) -> web.Response:
 
 
 # ---------------------------------------------------------------------------
-# Auto-enable helpers (systemd-based, best-effort)
+# Auto-start helpers (persistent marker + on_startup restore)
+#
+# The add-on image is Alpine with no systemd, so `systemctl enable wg-quick@`
+# is a silent no-op. Instead we record auto-start intent as a marker file next
+# to the config on the persistent volume, and `restore_tunnels` (an aiohttp
+# on_startup hook) brings up every marked tunnel when the container starts.
 # ---------------------------------------------------------------------------
 
 
 async def _enable_auto_start(tunnel: str) -> None:
-    """Enable wg-quick@<tunnel> systemd service for auto-start on boot."""
-    try:
-        rc, _, stderr = await _run_wg_cmd("systemctl", "enable", f"wg-quick@{tunnel}")
-        if rc != 0:
-            logger.warning("Could not enable auto-start for %s: %s", tunnel, stderr.strip())
-    except web.HTTPBadGateway:
-        logger.warning("systemctl not available — auto-start not supported on this system")
+    """Mark a tunnel for auto-start on boot."""
+    marker = _marker_path(tunnel)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.touch()
 
 
 async def _disable_auto_start(tunnel: str) -> None:
-    """Disable wg-quick@<tunnel> systemd service."""
-    try:
-        rc, _, stderr = await _run_wg_cmd("systemctl", "disable", f"wg-quick@{tunnel}")
-        if rc != 0:
-            logger.warning("Could not disable auto-start for %s: %s", tunnel, stderr.strip())
-    except web.HTTPBadGateway:
-        logger.warning("systemctl not available — auto-start not supported on this system")
+    """Remove a tunnel's auto-start marker."""
+    _marker_path(tunnel).unlink(missing_ok=True)
 
 
 async def _is_auto_enabled(tunnel: str) -> bool:
     """Check if auto-start is enabled for a tunnel."""
-    try:
-        rc, stdout, _ = await _run_wg_cmd("systemctl", "is-enabled", f"wg-quick@{tunnel}")
-        return rc == 0 and "enabled" in stdout.lower()
-    except web.HTTPBadGateway:
-        return False
+    return _marker_path(tunnel).exists()
+
+
+async def restore_tunnels(app: web.Application) -> None:
+    """aiohttp on_startup hook: bring up every tunnel marked for auto-start.
+
+    Best-effort — logs and continues on any failure so a single bad tunnel can
+    never block the companion from starting.
+    """
+    conf_dir = _wg_config_dir()
+    if not conf_dir.is_dir():
+        return
+    for marker in sorted(conf_dir.glob("*.autostart")):
+        tunnel = marker.stem
+        try:
+            conf_path = _conf_path(tunnel)
+            if not conf_path.exists():
+                logger.warning("autostart marker for %s but no config — skipping", tunnel)
+                continue
+            if await _is_interface_up(tunnel):
+                logger.info("tunnel %s already up — skipping autostart", tunnel)
+                continue
+            rc, _, stderr = await _run_wg_cmd("wg-quick", "up", str(conf_path))
+            if rc != 0:
+                logger.error("autostart wg-quick up %s failed (rc=%s): %s", tunnel, rc, stderr.strip())
+            else:
+                logger.info("autostart: tunnel %s brought up", tunnel)
+        except Exception:
+            # Never let one bad tunnel block the companion from starting.
+            logger.exception("autostart for tunnel %s raised", tunnel)
 
 
 # ---------------------------------------------------------------------------
