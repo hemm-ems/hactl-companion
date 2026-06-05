@@ -386,7 +386,17 @@ class TestDyndns:
         if r.status_code == 200 and r.json().get("state") == "active":
             requests.post(f"{url}/v1/wireguard/stop?tunnel=wg0", headers=auth_headers, timeout=30)
 
-        # Resolve wg-server from inside the companion container.
+        # Snapshot /etc/hosts and resolve wg-server from inside the companion container.
+        # BusyBox sed -i creates a temp file in /etc/ which may be read-only on some runners;
+        # read-then-write via stdin avoids the temp-file problem entirely.
+        orig_hosts = subprocess.run(
+            ["docker", "exec", "companion-wg", "cat", "/etc/hosts"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=10,
+        ).stdout
+
         getent = subprocess.run(
             ["docker", "exec", "companion-wg", "getent", "hosts", "wg-server"],
             capture_output=True,
@@ -397,19 +407,20 @@ class TestDyndns:
         real_ip = getent.stdout.split()[0]
         bad_ip = "192.0.2.99"  # TEST-NET (RFC 5737) — guaranteed non-routable
 
-        def _poison() -> None:
+        def _write_hosts(content: str) -> None:
             subprocess.run(
-                ["docker", "exec", "companion-wg", "sh", "-c", f"sed -i 's/{real_ip}/{bad_ip}/g' /etc/hosts"],
+                ["docker", "exec", "-i", "companion-wg", "sh", "-c", "cat > /etc/hosts"],
+                input=content,
+                text=True,
                 check=True,
                 timeout=10,
             )
 
+        def _poison() -> None:
+            _write_hosts(orig_hosts.replace(real_ip, bad_ip))
+
         def _restore() -> None:
-            subprocess.run(
-                ["docker", "exec", "companion-wg", "sh", "-c", f"sed -i 's/{bad_ip}/{real_ip}/g' /etc/hosts"],
-                check=True,
-                timeout=10,
-            )
+            _write_hosts(orig_hosts)
 
         try:
             # Point wg-server at the bogus IP so wg-quick starts but never handshakes.
