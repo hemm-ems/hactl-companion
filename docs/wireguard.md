@@ -30,8 +30,7 @@ Either:
 
 | Field | Meaning |
 |---|---|
-| `enabled` | Master switch. `false` ⇒ tunnel is brought down (and kept down) on add-on (re)start. `true` ⇒ tunnel is brought up. |
-| `autostart` | After `wg-quick up`, also runs `systemctl enable wg-quick@<tunnel>` so the tunnel survives a host reboot before the add-on starts (HA OS only — silently no-op where systemd is absent). |
+| `enabled` | Master switch, persisted across restarts. `true` ⇒ tunnel is brought up on every add-on (re)start (including after a host reboot, since the add-on restarts then). `false` ⇒ tunnel is brought down and kept down. |
 | `tunnel` | Interface name. Must match `^[a-zA-Z0-9_]{1,15}$`. Default `wg0`. |
 | `config` | *Optional* inline config. Leave empty to use the canonical file. When non-empty it is written into `/config/hactl/<tunnel>.conf` on start (takes precedence over an existing file). |
 
@@ -123,16 +122,16 @@ PersistentKeepalive = 25
 
 Response: `{"status": "configured", "tunnel": "wg0"}`
 
-### `POST /v1/wireguard/start?tunnel=wg0&auto_enable=false`
+### `POST /v1/wireguard/start?tunnel=wg0`
 
-Start (bring up) the tunnel. Optional `auto_enable=true` enables auto-start on boot via systemd (if available).
+Start (bring up) the tunnel.
 
-- Returns `200 {"status": "started", "tunnel": "wg0", "auto_enable": false}`
+- Returns `200 {"status": "started", "tunnel": "wg0"}`
 - Returns `409` if already running
 
-### `POST /v1/wireguard/stop?tunnel=wg0&auto_disable=false`
+### `POST /v1/wireguard/stop?tunnel=wg0`
 
-Stop (bring down) the tunnel. Optional `auto_disable=true` disables auto-start.
+Stop (bring down) the tunnel.
 
 - Returns `200 {"status": "stopped", "tunnel": "wg0"}`
 - Returns `409` if not running
@@ -146,7 +145,6 @@ When **active**:
 {
   "tunnel": "wg0",
   "state": "active",
-  "auto_enable": false,
   "interface": {
     "public_key": "...",
     "listening_port": 51820
@@ -186,14 +184,13 @@ curl "$HA/v1/wireguard/status?tunnel=wg0" -H "$AUTH"
 curl -X POST "$HA/v1/wireguard/stop?tunnel=wg0" -H "$AUTH"
 ```
 
-## Auto-Enable on Boot
+## Surviving a reboot
 
-Pass `auto_enable=true` when starting:
-```bash
-curl -X POST "$HA/v1/wireguard/start?tunnel=wg0&auto_enable=true" -H "$AUTH"
-```
-
-This uses `systemctl enable wg-quick@wg0` under the hood. Works on systems with systemd (HA OS). On Alpine/Docker (no systemd), auto-enable is silently ignored.
+There's no separate auto-start switch. Set `vpn.enabled: true` in the add-on
+Configuration tab: the add-on reconciles the tunnel up on every (re)start, so after a
+host reboot the tunnel comes back as soon as the add-on starts. Transient
+`POST /v1/wireguard/start|stop` calls (and `hactl companion wireguard up|down`) only
+affect the live interface — they do not change the persisted `enabled` option.
 
 ## Security
 
@@ -248,14 +245,12 @@ Works on **Windows** (Docker Desktop) and **GitHub Actions** (Ubuntu, `ubuntu-la
 
 1. **Alpine TLS cert issue**: `python:3.12-alpine` has a known issue where `apk` fails with "TLS: server certificate not trusted" behind corporate proxies or with certain Docker Desktop versions. Fixed by switching repos to HTTP (`sed -i 's|https://|http://|g' /etc/apk/repositories`). This is a build-time workaround — the actual WireGuard traffic uses its own encryption.
 
-2. **No systemd on Alpine**: The `wg-quick@` systemd service doesn't exist on Alpine. The auto-enable feature gracefully falls back to no-op. On HA OS (Debian-based), systemd is available and auto-start works.
+2. **wireguard-go not needed**: Alpine's `wireguard-tools` package uses the kernel WireGuard module when available (Linux 5.6+). Docker Desktop and GitHub Actions both have it. `wireguard-go` (userspace) is not needed unless targeting older kernels.
 
-3. **wireguard-go not needed**: Alpine's `wireguard-tools` package uses the kernel WireGuard module when available (Linux 5.6+). Docker Desktop and GitHub Actions both have it. `wireguard-go` (userspace) is not needed unless targeting older kernels.
+3. **`/dev/net/tun` not needed in compose**: Docker Desktop on Windows automatically provides `/dev/net/tun` when `cap_add: NET_ADMIN` is set. No explicit `devices` mapping needed.
 
-4. **`/dev/net/tun` not needed in compose**: Docker Desktop on Windows automatically provides `/dev/net/tun` when `cap_add: NET_ADMIN` is set. No explicit `devices` mapping needed.
+4. **PowerShell stderr noise**: Docker's progress output goes to stderr, causing PowerShell to report "errors" with `RemoteException`. The commands actually succeed — the exit codes in PowerShell are misleading. This is cosmetic only.
 
-5. **PowerShell stderr noise**: Docker's progress output goes to stderr, causing PowerShell to report "errors" with `RemoteException`. The commands actually succeed — the exit codes in PowerShell are misleading. This is cosmetic only.
+5. **wg-quick stderr is normal**: `wg-quick up` prints its shell trace to stderr (`[#] ip link add...`). This is informational, not an error.
 
-6. **wg-quick stderr is normal**: `wg-quick up` prints its shell trace to stderr (`[#] ip link add...`). This is informational, not an error.
-
-7. **Test ordering**: The integration tests are numbered (`test_01_` through `test_14_`) and run as methods of a single class to ensure execution order. Each test depends on the state left by the previous test (config → start → status → stop).
+6. **Test ordering**: The integration tests are numbered (`test_01_` through `test_14_`) and run as methods of a single class to ensure execution order. Each test depends on the state left by the previous test (config → start → status → stop).

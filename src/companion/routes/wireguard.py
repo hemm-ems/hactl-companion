@@ -10,9 +10,6 @@ from aiohttp import web
 
 from companion.wg import (
     _conf_from_json,
-    _disable_auto_start,
-    _enable_auto_start,
-    _is_auto_enabled,
     _is_interface_up,
     _parse_wg_show,
     _run_wg_cmd,
@@ -74,18 +71,13 @@ async def post_start(request: web.Request) -> web.Response:
     if not materialize(tunnel):
         raise web.HTTPNotFound(text=f"No config for tunnel {tunnel} — push one via POST /v1/wireguard/config first")
 
-    auto_enable = request.query.get("auto_enable", "false").lower() in ("true", "1", "yes")
-
     rc, _, stderr = await _run_wg_cmd("wg-quick", "up", tunnel)
     if rc != 0:
         logger.error("wg-quick up %s failed (rc=%s): %s", tunnel, rc, stderr.strip())
         raise web.HTTPInternalServerError(text=f"Failed to start tunnel: {stderr.strip()}")
 
-    if auto_enable:
-        await _enable_auto_start(tunnel)
-
-    logger.info("WireGuard tunnel %s started (auto_enable=%s)", tunnel, auto_enable)
-    return web.json_response({"status": "started", "tunnel": tunnel, "auto_enable": auto_enable})
+    logger.info("WireGuard tunnel %s started", tunnel)
+    return web.json_response({"status": "started", "tunnel": tunnel})
 
 
 async def post_stop(request: web.Request) -> web.Response:
@@ -95,17 +87,12 @@ async def post_stop(request: web.Request) -> web.Response:
     if not await _is_interface_up(tunnel):
         raise web.HTTPConflict(text=f"Tunnel {tunnel} is not active")
 
-    auto_disable = request.query.get("auto_disable", "false").lower() in ("true", "1", "yes")
-
     rc, _, stderr = await _run_wg_cmd("wg-quick", "down", tunnel)
     if rc != 0:
         logger.error("wg-quick down %s failed (rc=%s): %s", tunnel, rc, stderr.strip())
         raise web.HTTPInternalServerError(text=f"Failed to stop tunnel: {stderr.strip()}")
 
-    if auto_disable:
-        await _disable_auto_start(tunnel)
-
-    logger.info("WireGuard tunnel %s stopped (auto_disable=%s)", tunnel, auto_disable)
+    logger.info("WireGuard tunnel %s stopped", tunnel)
     return web.json_response({"status": "stopped", "tunnel": tunnel})
 
 
@@ -121,12 +108,10 @@ async def get_status(request: web.Request) -> web.Response:
         return web.json_response({"tunnel": tunnel, "state": "inactive"})
 
     parsed = _parse_wg_show(stdout)
-    auto = await _is_auto_enabled(tunnel)
     return web.json_response(
         {
             "tunnel": tunnel,
             "state": "active",
-            "auto_enable": auto,
             **parsed,
         }
     )

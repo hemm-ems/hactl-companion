@@ -61,7 +61,6 @@ class TestLoadOptions:
         opts = load_options(p)
         assert opts is not None
         assert opts.enabled is True
-        assert opts.autostart is False
         assert opts.tunnel == "wg0"
         assert opts.config == ""
 
@@ -72,7 +71,6 @@ class TestLoadOptions:
                 {
                     "vpn": {
                         "enabled": True,
-                        "autostart": True,
                         "tunnel": "wg1",
                         "config": _VALID_CONF,
                     }
@@ -82,7 +80,6 @@ class TestLoadOptions:
         opts = load_options(p)
         assert opts is not None
         assert opts.enabled is True
-        assert opts.autostart is True
         assert opts.tunnel == "wg1"
         assert opts.config == _VALID_CONF
 
@@ -100,23 +97,20 @@ class TestLoadOptions:
 @pytest.mark.asyncio
 class TestReconcileDisabled:
     async def test_noop_when_disabled_and_down(self, wg_conf_dir: Path, fallback_dir: Path) -> None:
-        opts = VPNOptions(enabled=False, autostart=False, tunnel="wg0", config="")
+        opts = VPNOptions(enabled=False, tunnel="wg0", config="")
         with (
             patch("companion.wg_supervisor.wg._is_interface_up", AsyncMock(return_value=False)),
             patch("companion.wg_supervisor.wg._run_wg_cmd", AsyncMock(return_value=(0, "", ""))) as run_cmd,
-            patch("companion.wg_supervisor.wg._disable_auto_start", AsyncMock()) as disable_auto,
         ):
             await reconcile(opts, fallback_dir=fallback_dir)
         # wg-quick down should NOT be called when already down
         assert not any(call.args[:2] == ("wg-quick", "down") for call in run_cmd.call_args_list)
-        disable_auto.assert_called_once_with("wg0")
 
     async def test_brings_down_when_disabled_and_up(self, wg_conf_dir: Path, fallback_dir: Path) -> None:
-        opts = VPNOptions(enabled=False, autostart=False, tunnel="wg0", config="")
+        opts = VPNOptions(enabled=False, tunnel="wg0", config="")
         with (
             patch("companion.wg_supervisor.wg._is_interface_up", AsyncMock(return_value=True)),
             patch("companion.wg_supervisor.wg._run_wg_cmd", AsyncMock(return_value=(0, "", ""))) as run_cmd,
-            patch("companion.wg_supervisor.wg._disable_auto_start", AsyncMock()),
         ):
             await reconcile(opts, fallback_dir=fallback_dir)
         run_cmd.assert_called_with("wg-quick", "down", "wg0")
@@ -125,11 +119,10 @@ class TestReconcileDisabled:
 @pytest.mark.asyncio
 class TestReconcileEnabled:
     async def test_starts_with_inline_config(self, wg_conf_dir: Path, fallback_dir: Path) -> None:
-        opts = VPNOptions(enabled=True, autostart=False, tunnel="wg0", config=_VALID_CONF)
+        opts = VPNOptions(enabled=True, tunnel="wg0", config=_VALID_CONF)
         with (
             patch("companion.wg_supervisor.wg._is_interface_up", AsyncMock(return_value=False)),
             patch("companion.wg_supervisor.wg._run_wg_cmd", AsyncMock(return_value=(0, "", ""))) as run_cmd,
-            patch("companion.wg_supervisor.wg._disable_auto_start", AsyncMock()),
         ):
             await reconcile(opts, fallback_dir=fallback_dir)
         conf_path = wg_conf_dir / "wg0.conf"
@@ -145,11 +138,10 @@ class TestReconcileEnabled:
 
     async def test_falls_back_to_file(self, wg_conf_dir: Path, fallback_dir: Path) -> None:
         (fallback_dir / "wg0.conf").write_text(_VALID_CONF)
-        opts = VPNOptions(enabled=True, autostart=False, tunnel="wg0", config="")
+        opts = VPNOptions(enabled=True, tunnel="wg0", config="")
         with (
             patch("companion.wg_supervisor.wg._is_interface_up", AsyncMock(return_value=False)),
             patch("companion.wg_supervisor.wg._run_wg_cmd", AsyncMock(return_value=(0, "", ""))) as run_cmd,
-            patch("companion.wg_supervisor.wg._disable_auto_start", AsyncMock()),
         ):
             await reconcile(opts, fallback_dir=fallback_dir)
         assert (wg_conf_dir / "wg0.conf").read_text() == _VALID_CONF
@@ -161,7 +153,7 @@ class TestReconcileEnabled:
         fallback_dir: Path,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        opts = VPNOptions(enabled=True, autostart=False, tunnel="wg0", config="")
+        opts = VPNOptions(enabled=True, tunnel="wg0", config="")
         with (
             patch("companion.wg_supervisor.wg._is_interface_up", AsyncMock(return_value=False)),
             patch("companion.wg_supervisor.wg._run_wg_cmd", AsyncMock(return_value=(0, "", ""))) as run_cmd,
@@ -173,28 +165,15 @@ class TestReconcileEnabled:
         assert not any("wg-quick" in str(c.args) for c in run_cmd.call_args_list)
         assert any("no config provided" in rec.message for rec in caplog.records)
 
-    async def test_autostart_enables_systemd(self, wg_conf_dir: Path, fallback_dir: Path) -> None:
-        opts = VPNOptions(enabled=True, autostart=True, tunnel="wg0", config=_VALID_CONF)
-        with (
-            patch("companion.wg_supervisor.wg._is_interface_up", AsyncMock(return_value=False)),
-            patch("companion.wg_supervisor.wg._run_wg_cmd", AsyncMock(return_value=(0, "", ""))),
-            patch("companion.wg_supervisor.wg._enable_auto_start", AsyncMock()) as enable_auto,
-            patch("companion.wg_supervisor.wg._disable_auto_start", AsyncMock()) as disable_auto,
-        ):
-            await reconcile(opts, fallback_dir=fallback_dir)
-        enable_auto.assert_called_once_with("wg0")
-        disable_auto.assert_not_called()
-
     async def test_already_up_does_not_call_wg_quick_up(
         self,
         wg_conf_dir: Path,
         fallback_dir: Path,
     ) -> None:
-        opts = VPNOptions(enabled=True, autostart=False, tunnel="wg0", config=_VALID_CONF)
+        opts = VPNOptions(enabled=True, tunnel="wg0", config=_VALID_CONF)
         with (
             patch("companion.wg_supervisor.wg._is_interface_up", AsyncMock(return_value=True)),
             patch("companion.wg_supervisor.wg._run_wg_cmd", AsyncMock(return_value=(0, "", ""))) as run_cmd,
-            patch("companion.wg_supervisor.wg._disable_auto_start", AsyncMock()),
         ):
             await reconcile(opts, fallback_dir=fallback_dir)
         assert not any(call.args[:2] == ("wg-quick", "up") for call in run_cmd.call_args_list)
@@ -205,7 +184,7 @@ class TestReconcileEnabled:
         fallback_dir: Path,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        opts = VPNOptions(enabled=True, autostart=False, tunnel="wg0", config="garbage")
+        opts = VPNOptions(enabled=True, tunnel="wg0", config="garbage")
         with (
             patch("companion.wg_supervisor.wg._is_interface_up", AsyncMock(return_value=False)),
             patch("companion.wg_supervisor.wg._run_wg_cmd", AsyncMock(return_value=(0, "", ""))) as run_cmd,

@@ -135,7 +135,6 @@ _WG_START_RESPONSE = {
     "properties": {
         "status": {"type": "string"},
         "tunnel": {"type": "string"},
-        "auto_enable": {"type": "boolean"},
     },
 }
 _WG_STOP_RESPONSE = {
@@ -147,7 +146,6 @@ _WG_STATUS_RESPONSE = {
     "properties": {
         "tunnel": {"type": "string"},
         "state": {"type": "string", "enum": ["active", "inactive"]},
-        "auto_enable": {"type": "boolean"},
         "interface": {
             "type": "object",
             "properties": {
@@ -470,7 +468,6 @@ ENDPOINT_META: dict[tuple[str, str], dict[str, object]] = {
         "tags": ["wireguard"],
         "parameters": [
             {"name": "tunnel", "in": "query", "required": False, "schema": {"type": "string", "default": "wg0"}},
-            {"name": "auto_enable", "in": "query", "required": False, "schema": {"type": "string", "default": "false"}},
         ],
         "response_schema": _WG_START_RESPONSE,
     },
@@ -479,12 +476,6 @@ ENDPOINT_META: dict[tuple[str, str], dict[str, object]] = {
         "tags": ["wireguard"],
         "parameters": [
             {"name": "tunnel", "in": "query", "required": False, "schema": {"type": "string", "default": "wg0"}},
-            {
-                "name": "auto_disable",
-                "in": "query",
-                "required": False,
-                "schema": {"type": "string", "default": "false"},
-            },
         ],
         "response_schema": _WG_STOP_RESPONSE,
     },

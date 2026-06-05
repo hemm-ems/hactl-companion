@@ -292,7 +292,7 @@ class TestWireGuardFlow:
         also exercises the config normalizer end-to-end.
         """
         collapsed = client_conf.replace("\n", "")
-        options = {"vpn": {"enabled": True, "autostart": False, "tunnel": "wg0", "config": collapsed}}
+        options = {"vpn": {"enabled": True, "tunnel": "wg0", "config": collapsed}}
         # Write options.json into the persistent /data volume.
         subprocess.run(
             ["docker", "exec", "-i", "companion-wg", "sh", "-c", "cat > /data/options.json"],

@@ -47,8 +47,7 @@ Then set the toggles in the **Configuration** tab and restart the add-on:
 
 | Option | Default | Meaning |
 |---|---|---|
-| `vpn.enabled` | `false` | Bring the tunnel up on add-on start when `true`; bring it down when `false`. |
-| `vpn.autostart` | `false` | Also enable `wg-quick@<tunnel>` via systemd (HA OS) so the tunnel survives host reboots. |
+| `vpn.enabled` | `false` | Bring the tunnel up on every add-on (re)start when `true` (so it returns after a host reboot once the add-on starts); bring it down and keep it down when `false`. |
 | `vpn.tunnel` | `wg0` | Interface name (`^[a-zA-Z0-9_]{1,15}$`). |
 | `vpn.config` | `""` | *Optional* inline config. Leave empty to use the file above. When set, it is written into `/config/hactl/<tunnel>.conf` on start (it wins over an existing file). |
 
