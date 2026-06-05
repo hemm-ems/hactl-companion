@@ -230,8 +230,9 @@ class TestStartStopMonitor:
         wg_monitor._monitors.clear()
 
     def teardown_method(self) -> None:
-        for task in wg_monitor._monitors.values():
-            task.cancel()
+        for state in wg_monitor._monitors.values():
+            if state.task:
+                state.task.cancel()
         wg_monitor._monitors.clear()
 
     async def test_no_task_created_for_ip_only_config(self) -> None:
@@ -241,11 +242,12 @@ class TestStartStopMonitor:
     async def test_task_created_for_hostname_config(self) -> None:
         wg_monitor.start_monitor("wg0", _CONF_WITH_HOSTNAME)
         assert "wg0" in wg_monitor._monitors
-        wg_monitor._monitors["wg0"].cancel()
+        assert wg_monitor._monitors["wg0"].hostnames == ["home.example.com"]
+        wg_monitor._monitors["wg0"].task.cancel()
 
     async def test_stop_cancels_and_removes_task(self) -> None:
         wg_monitor.start_monitor("wg0", _CONF_WITH_HOSTNAME)
-        task = wg_monitor._monitors["wg0"]
+        task = wg_monitor._monitors["wg0"].task
         wg_monitor.stop_monitor("wg0")
         assert "wg0" not in wg_monitor._monitors
         await asyncio.sleep(0)
@@ -253,9 +255,9 @@ class TestStartStopMonitor:
 
     async def test_start_replaces_existing_monitor(self) -> None:
         wg_monitor.start_monitor("wg0", _CONF_WITH_HOSTNAME)
-        first = wg_monitor._monitors["wg0"]
+        first = wg_monitor._monitors["wg0"].task
         wg_monitor.start_monitor("wg0", _CONF_WITH_HOSTNAME)
-        second = wg_monitor._monitors["wg0"]
+        second = wg_monitor._monitors["wg0"].task
         assert first is not second
         await asyncio.sleep(0)
         assert first.cancelled() or first.done()
@@ -263,3 +265,54 @@ class TestStartStopMonitor:
 
     def test_stop_noop_when_no_monitor(self) -> None:
         wg_monitor.stop_monitor("wg0")  # must not raise
+
+
+class TestStatus:
+    def setup_method(self) -> None:
+        wg_monitor._monitors.clear()
+
+    def teardown_method(self) -> None:
+        wg_monitor._monitors.clear()
+
+    def test_not_running(self) -> None:
+        assert wg_monitor.status("wg0") == {"running": False}
+
+    def test_running_healthy(self) -> None:
+        wg_monitor._monitors["wg0"] = wg_monitor._MonitorState(
+            tunnel="wg0",
+            hostnames=["home.example.com"],
+            resolved={"home.example.com": "5.6.7.8"},
+            last_reresolve_ts=time.time() - 300,
+        )
+        snap = wg_monitor.status("wg0")
+        assert snap["running"] is True
+        assert snap["healthy"] is True
+        assert snap["resolved"] == {"home.example.com": "5.6.7.8"}
+        assert snap["attempt"] == 0
+        assert 290 <= snap["last_reresolve_secs_ago"] <= 310
+
+    def test_running_in_backoff(self) -> None:
+        wg_monitor._monitors["wg0"] = wg_monitor._MonitorState(
+            tunnel="wg0",
+            hostnames=["home.example.com"],
+            in_backoff=True,
+            attempt=3,
+            next_retry_ts=time.time() + 30,
+            last_error="re-resolve failed for home.example.com",
+        )
+        snap = wg_monitor.status("wg0")
+        assert snap["healthy"] is False
+        assert snap["attempt"] == 3
+        assert 25 <= snap["next_retry_secs"] <= 30
+        assert snap["last_error"] == "re-resolve failed for home.example.com"
+
+    async def test_tick_records_resolved_ip(self) -> None:
+        wg_monitor._monitors["wg0"] = wg_monitor._MonitorState(tunnel="wg0", hostnames=["home.example.com"])
+        with (
+            patch("companion.wg._dns_lookup_ip", AsyncMock(return_value="5.6.7.8")),
+            patch("companion.wg._run_wg_cmd", AsyncMock(return_value=(0, "", ""))),
+        ):
+            ok = await wg_monitor._tick("wg0", [_PEER])
+        assert ok is True
+        assert wg_monitor._monitors["wg0"].resolved == {"home.example.com": "5.6.7.8"}
+        assert wg_monitor._monitors["wg0"].last_reresolve_ts is not None

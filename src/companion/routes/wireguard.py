@@ -12,7 +12,7 @@ from companion import wg_monitor
 from companion.wg import (
     _conf_from_json,
     _is_interface_up,
-    _parse_wg_show,
+    _parse_wg_dump,
     _resolve_endpoint_hostnames,
     _run_wg_cmd,
     _runtime_path,
@@ -114,16 +114,17 @@ async def get_status(request: web.Request) -> web.Response:
     if not await _is_interface_up(tunnel):
         return web.json_response({"tunnel": tunnel, "state": "inactive"})
 
-    rc, stdout, _ = await _run_wg_cmd("wg", "show", tunnel)
+    rc, stdout, _ = await _run_wg_cmd("wg", "show", tunnel, "dump")
     if rc != 0:
         return web.json_response({"tunnel": tunnel, "state": "inactive"})
 
-    parsed = _parse_wg_show(stdout)
+    parsed = _parse_wg_dump(stdout)
     return web.json_response(
         {
             "tunnel": tunnel,
             "state": "active",
             **parsed,
+            "monitor": wg_monitor.status(tunnel),
         }
     )
 

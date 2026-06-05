@@ -162,8 +162,43 @@ _WG_STATUS_RESPONSE = {
                     "endpoint": {"type": "string"},
                     "allowed_ips": {"type": "string"},
                     "latest_handshake": {"type": "string"},
+                    "latest_handshake_secs": {"type": "integer", "nullable": True},
                     "transfer_rx": {"type": "string"},
                     "transfer_tx": {"type": "string"},
+                    "transfer_rx_bytes": {"type": "integer"},
+                    "transfer_tx_bytes": {"type": "integer"},
+                },
+            },
+        },
+        "monitor": {
+            "type": "object",
+            "description": "Live dyndns re-resolution monitor state.",
+            "properties": {
+                "running": {"type": "boolean"},
+                "hostnames": {"type": "array", "items": {"type": "string"}},
+                "healthy": {"type": "boolean"},
+                "resolved": {"type": "object", "additionalProperties": {"type": "string"}},
+                "last_check_secs_ago": {"type": "integer", "nullable": True},
+                "last_reresolve_secs_ago": {"type": "integer", "nullable": True},
+                "attempt": {"type": "integer"},
+                "next_retry_secs": {"type": "integer", "nullable": True},
+                "last_error": {"type": "string", "nullable": True},
+            },
+        },
+    },
+}
+_LOGS_RESPONSE = {
+    "type": "object",
+    "properties": {
+        "entries": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "ts": {"type": "number"},
+                    "level": {"type": "string"},
+                    "name": {"type": "string"},
+                    "message": {"type": "string"},
                 },
             },
         },
@@ -486,6 +521,18 @@ ENDPOINT_META: dict[tuple[str, str], dict[str, object]] = {
             {"name": "tunnel", "in": "query", "required": False, "schema": {"type": "string", "default": "wg0"}},
         ],
         "response_schema": _WG_STATUS_RESPONSE,
+    },
+    # Logs
+    ("GET", "/v1/logs"): {
+        "summary": "Query recent companion log records from the in-memory ring buffer",
+        "tags": ["logs"],
+        "parameters": [
+            {"name": "component", "in": "query", "required": False, "schema": {"type": "string"}},
+            {"name": "level", "in": "query", "required": False, "schema": {"type": "string"}},
+            {"name": "since", "in": "query", "required": False, "schema": {"type": "string"}},
+            {"name": "limit", "in": "query", "required": False, "schema": {"type": "integer"}},
+        ],
+        "response_schema": _LOGS_RESPONSE,
     },
 }
 
