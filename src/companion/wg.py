@@ -7,6 +7,7 @@ import ipaddress
 import logging
 import re
 import socket
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -176,37 +177,74 @@ def _validate_conf(content: str) -> None:
         raise web.HTTPBadRequest(text="Config must contain a PrivateKey in [Interface]")
 
 
-def _parse_wg_show(output: str) -> dict[str, object]:
-    """Parse ``wg show <iface>`` output into structured dict."""
+def _humanize_bytes(n: int) -> str:
+    """Render a byte count like wg does (e.g. '1.23 KiB')."""
+    value = float(n)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if value < 1024 or unit == "TiB":
+            return f"{int(value)} {unit}" if unit == "B" else f"{value:.2f} {unit}"
+        value /= 1024
+    return f"{value:.2f} TiB"  # unreachable, keeps type checkers happy
+
+
+def _humanize_age(secs: int) -> str:
+    """Render an age in seconds compactly (e.g. '1m46s', '2h3m')."""
+    if secs < 60:
+        return f"{secs}s"
+    if secs < 3600:
+        return f"{secs // 60}m{secs % 60}s"
+    if secs < 86400:
+        return f"{secs // 3600}h{(secs % 3600) // 60}m"
+    return f"{secs // 86400}d{(secs % 86400) // 3600}h"
+
+
+def _parse_wg_dump(output: str, *, now: int | None = None) -> dict[str, object]:
+    """Parse ``wg show <iface> dump`` (tab-separated) into a structured dict.
+
+    Unlike the human ``wg show`` output, the dump form gives the handshake as a
+    Unix timestamp and transfer as raw byte counts, so rx/tx and a numeric
+    handshake age are reliable. Field layout:
+
+      interface line: private_key  public_key  listen_port  fwmark
+      peer line:      public_key  preshared_key  endpoint  allowed_ips \
+                      latest_handshake  transfer_rx  transfer_tx  keepalive
+    """
+    now = int(time.time()) if now is None else now
     result: dict[str, object] = {"interface": {}, "peers": []}
-    current_peer: dict[str, object] | None = None
+    lines = output.splitlines()
+    if not lines:
+        return result
 
-    for line in output.splitlines():
-        line = line.strip()
-        if not line:
+    iface_fields = lines[0].split("\t")
+    if len(iface_fields) >= 3:
+        result["interface"] = {
+            "public_key": iface_fields[1],
+            "listening_port": int(iface_fields[2]) if iface_fields[2].isdigit() else iface_fields[2],
+        }
+
+    peers: list[dict[str, object]] = []
+    for line in lines[1:]:
+        f = line.split("\t")
+        if len(f) < 7:
             continue
-        if ":" not in line:
-            continue
-        key, _, value = line.partition(":")
-        key = key.strip().lower().replace(" ", "_")
-        value = value.strip()
-
-        if key == "public_key" and current_peer is None:
-            iface = result["interface"]
-            assert isinstance(iface, dict)
-            iface["public_key"] = value
-        elif key == "listening_port":
-            iface = result["interface"]
-            assert isinstance(iface, dict)
-            iface["listening_port"] = int(value) if value.isdigit() else value
-        elif key == "peer":
-            current_peer = {"public_key": value}
-            peers = result["peers"]
-            assert isinstance(peers, list)
-            peers.append(current_peer)
-        elif current_peer is not None:
-            current_peer[key] = value
-
+        handshake_ts = int(f[4]) if f[4].isdigit() else 0
+        age = now - handshake_ts if handshake_ts > 0 else None
+        rx = int(f[5]) if f[5].isdigit() else 0
+        tx = int(f[6]) if f[6].isdigit() else 0
+        peers.append(
+            {
+                "public_key": f[0],
+                "endpoint": f[2] if f[2] != "(none)" else "",
+                "allowed_ips": f[3],
+                "latest_handshake": _humanize_age(age) if age is not None else "never",
+                "latest_handshake_secs": age,
+                "transfer_rx": _humanize_bytes(rx),
+                "transfer_tx": _humanize_bytes(tx),
+                "transfer_rx_bytes": rx,
+                "transfer_tx_bytes": tx,
+            }
+        )
+    result["peers"] = peers
     return result
 
 

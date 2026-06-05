@@ -153,12 +153,33 @@ When **active**:
     "public_key": "...",
     "endpoint": "1.2.3.4:51820",
     "allowed_ips": "10.0.0.0/24",
-    "latest_handshake": "42 seconds ago",
-    "transfer_rx": "1.23 KiB received",
-    "transfer_tx": "4.56 KiB sent"
-  }]
+    "latest_handshake": "42s",
+    "latest_handshake_secs": 42,
+    "transfer_rx": "1.23 KiB",
+    "transfer_tx": "4.56 KiB",
+    "transfer_rx_bytes": 1260,
+    "transfer_tx_bytes": 4669
+  }],
+  "monitor": {
+    "running": true,
+    "hostnames": ["pi.example.dyndns.org"],
+    "healthy": true,
+    "resolved": {"pi.example.dyndns.org": "87.123.51.187"},
+    "last_check_secs_ago": 12,
+    "last_reresolve_secs_ago": 305,
+    "attempt": 0,
+    "next_retry_secs": null,
+    "last_error": null
+  }
 }
 ```
+
+Status fields are derived from `wg show <tunnel> dump`, so `transfer_rx`/`transfer_tx`
+and the numeric `latest_handshake_secs` are always populated. The `monitor` block
+reflects the live dyndns re-resolution monitor (`{"running": false}` when no
+hostname-endpoint peer is being watched). When `healthy` is `false` the monitor is
+in its backoff loop: `attempt` and `next_retry_secs` show progress and `last_error`
+the most recent failure.
 
 When **inactive**: `{"tunnel": "wg0", "state": "inactive"}`
 

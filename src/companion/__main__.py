@@ -9,7 +9,7 @@ import os
 
 from aiohttp import web
 
-from companion import __version__, wg_supervisor
+from companion import __version__, logbuffer, wg_supervisor
 from companion.server import create_app
 
 logger = logging.getLogger("companion")
@@ -44,11 +44,15 @@ def _parse_host(host_str: str) -> str | list[str]:
 def main(argv: list[str] | None = None) -> None:
     args = _parse_args(argv)
 
+    level = getattr(logging, args.log_level.upper(), logging.INFO)
     logging.basicConfig(
-        level=getattr(logging, args.log_level.upper(), logging.INFO),
+        level=level,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
+    # Capture our own records so `hactl companion logs` can read them back over
+    # Ingress (add-on logs never reach HA core's logger).
+    logbuffer.install(level=level)
 
     host = _parse_host(args.host)
     config_base_path = "/config"
@@ -70,7 +74,9 @@ def main(argv: list[str] | None = None) -> None:
     )
     logger.info("supervisor token: %s", supervisor_token_status)
     logger.info("auth: ingress requests bypass token check; direct requests require SUPERVISOR_TOKEN")
-    web.run_app(app, host=host, port=args.port, print=None)
+    # access_log=None silences aiohttp's built-in access logger; our
+    # access_log_middleware already emits one structured line per request.
+    web.run_app(app, host=host, port=args.port, print=None, access_log=None)
 
 
 if __name__ == "__main__":

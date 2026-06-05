@@ -8,8 +8,10 @@ import pytest
 
 from companion.wg import (
     _conf_from_json,
+    _humanize_age,
+    _humanize_bytes,
     _normalize_conf,
-    _parse_wg_show,
+    _parse_wg_dump,
     _validate_conf,
     _validate_tunnel,
     materialize,
@@ -172,24 +174,16 @@ class TestValidateConf:
 
 
 # ---------------------------------------------------------------------------
-# _parse_wg_show
+# _parse_wg_dump / humanizers
 # ---------------------------------------------------------------------------
 
 
-class TestParseWgShow:
+class TestParseWgDump:
+    # interface: priv pub listen_port fwmark
+    # peer:      pub psk endpoint allowed_ips handshake rx tx keepalive
     def test_full_output(self) -> None:
-        output = (
-            "interface: wg0\n"
-            "  public key: AAAA\n"
-            "  listening port: 51820\n"
-            "\n"
-            "peer: BBBB\n"
-            "  endpoint: 1.2.3.4:51820\n"
-            "  allowed ips: 10.0.0.0/24\n"
-            "  latest handshake: 42 seconds ago\n"
-            "  transfer: 1.23 KiB received, 4.56 KiB sent\n"
-        )
-        result = _parse_wg_show(output)
+        output = "PRIV\tAAAA\t51820\toff\nBBBB\t(none)\t1.2.3.4:51820\t10.0.0.0/24\t1894\t1260\t4669\t25\n"
+        result = _parse_wg_dump(output, now=2000)
         assert result["interface"]["public_key"] == "AAAA"
         assert result["interface"]["listening_port"] == 51820
         assert len(result["peers"]) == 1
@@ -197,18 +191,44 @@ class TestParseWgShow:
         assert peer["public_key"] == "BBBB"
         assert peer["endpoint"] == "1.2.3.4:51820"
         assert peer["allowed_ips"] == "10.0.0.0/24"
-        assert "42 seconds ago" in peer["latest_handshake"]
+        assert peer["latest_handshake_secs"] == 106
+        assert peer["latest_handshake"] == "1m46s"
+        assert peer["transfer_rx_bytes"] == 1260
+        assert peer["transfer_tx_bytes"] == 4669
+        assert peer["transfer_rx"] == "1.23 KiB"
+        assert peer["transfer_tx"] == "4.56 KiB"
+
+    def test_never_handshaked(self) -> None:
+        output = "PRIV\tAAAA\t51820\toff\nBBBB\t(none)\t(none)\t10.0.0.0/24\t0\t0\t0\toff\n"
+        result = _parse_wg_dump(output, now=2000)
+        peer = result["peers"][0]
+        assert peer["latest_handshake_secs"] is None
+        assert peer["latest_handshake"] == "never"
+        assert peer["endpoint"] == ""
 
     def test_no_peers(self) -> None:
-        output = "interface: wg0\n  public key: AAAA\n  listening port: 51820\n"
-        result = _parse_wg_show(output)
+        result = _parse_wg_dump("PRIV\tAAAA\t51820\toff\n", now=2000)
         assert result["interface"]["public_key"] == "AAAA"
         assert result["peers"] == []
 
     def test_empty_output(self) -> None:
-        result = _parse_wg_show("")
+        result = _parse_wg_dump("", now=2000)
         assert result["interface"] == {}
         assert result["peers"] == []
+
+
+class TestHumanizers:
+    def test_bytes(self) -> None:
+        assert _humanize_bytes(0) == "0 B"
+        assert _humanize_bytes(512) == "512 B"
+        assert _humanize_bytes(1260) == "1.23 KiB"
+        assert _humanize_bytes(5 * 1024 * 1024) == "5.00 MiB"
+
+    def test_age(self) -> None:
+        assert _humanize_age(5) == "5s"
+        assert _humanize_age(106) == "1m46s"
+        assert _humanize_age(3700) == "1h1m"
+        assert _humanize_age(90000) == "1d1h"
 
 
 # ---------------------------------------------------------------------------
@@ -385,10 +405,8 @@ class TestPostStop:
 
 class TestGetStatus:
     async def test_status_active(self, client, auth_headers) -> None:
-        wg_output = (
-            "interface: wg0\n  public key: AAAA\n  listening port: 51820\n"
-            "peer: BBBB\n  endpoint: 1.2.3.4:51820\n  allowed ips: 10.0.0.0/24\n"
-        )
+        # `wg show <tunnel> dump`: interface row then one peer row.
+        wg_output = "PRIV\tAAAA\t51820\toff\nBBBB\t(none)\t1.2.3.4:51820\t10.0.0.0/24\t0\t1260\t4669\toff\n"
 
         async def _mock_run(*args: str, timeout: int = 30) -> tuple[int, str, str]:
             return (0, wg_output, "")
@@ -404,6 +422,9 @@ class TestGetStatus:
         assert body["tunnel"] == "wg0"
         assert body["interface"]["public_key"] == "AAAA"
         assert len(body["peers"]) == 1
+        assert body["peers"][0]["transfer_rx"] == "1.23 KiB"
+        # No monitor is running for this tunnel in the test.
+        assert body["monitor"] == {"running": False}
         assert "auto_enable" not in body
 
     async def test_status_inactive(self, client, auth_headers) -> None:
