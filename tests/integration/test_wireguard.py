@@ -275,3 +275,52 @@ class TestWireGuardFlow:
             assert r.status_code == 401, f"{endpoint} should require auth"
         r = requests.get(f"{companion_url}/v1/wireguard/status", timeout=10)
         assert r.status_code == 401
+
+    def test_15_declarative_reconcile_survives_recreate(
+        self, companion_url: str, auth_headers: dict[str, str], client_conf: str
+    ) -> None:
+        """The real declarative path end-to-end across a container recreate.
+
+        Writes vpn options (enabled + inline config) to the persistent /data
+        volume, recreates the container (new ephemeral layer, /etc/wireguard
+        wiped), and asserts the startup supervisor reconciles the tunnel back up
+        from persistent storage — and that the canonical /config/hactl copy
+        persisted. This is the scenario the add-on exists for.
+        """
+        options = {"vpn": {"enabled": True, "autostart": False, "tunnel": "wg0", "config": client_conf}}
+        # Write options.json into the persistent /data volume.
+        subprocess.run(
+            ["docker", "exec", "-i", "companion-wg", "sh", "-c", "cat > /data/options.json"],
+            input=json.dumps(options),
+            text=True,
+            check=True,
+            timeout=15,
+        )
+
+        # Recreate from the image — wipes /etc/wireguard, keeps /data + /config.
+        _compose("up", "-d", "--force-recreate", "--no-deps", "companion-wg")
+        new_url = f"http://localhost:{_get_mapped_port('companion-wg', 9100)}"
+        _wait_for_url(f"{new_url}/v1/health")
+
+        # Supervisor should have brought wg0 up on startup, with no REST call.
+        time.sleep(3)
+        r = requests.get(f"{new_url}/v1/wireguard/status?tunnel=wg0", headers=auth_headers, timeout=10)
+        assert r.status_code == 200
+        assert r.json()["state"] == "active", f"reconcile did not bring tunnel up: {r.json()}"
+
+        # Canonical config persisted to /config/hactl (the source of truth).
+        check = subprocess.run(
+            ["docker", "exec", "companion-wg", "test", "-f", "/config/hactl/wg0.conf"],
+            capture_output=True,
+            timeout=10,
+        )
+        assert check.returncode == 0, "canonical /config/hactl/wg0.conf did not persist"
+
+        # And it actually works — ping the server through the reconciled tunnel.
+        result = subprocess.run(
+            ["docker", "exec", "companion-wg", "ping", "-c", "2", "-W", "5", "10.13.13.1"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        assert result.returncode == 0, f"ping through reconciled tunnel failed: {result.stderr}"

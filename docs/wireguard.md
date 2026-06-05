@@ -9,49 +9,54 @@ The companion add-on includes a WireGuard VPN **client**. It can be driven two w
 
 The declarative path exists because `hactl` normally talks to HA *over* the VPN — it cannot be the thing that brings the tunnel up. The add-on supervises itself.
 
-## Declarative configuration (recommended)
+## Source of truth: `/config/hactl/<tunnel>.conf`
 
-In the HA UI, open **Settings → Add-ons → hactl companion → Configuration** and fill in the `vpn` block:
+The tunnel config lives in **one** persistent place — `/config/hactl/<tunnel>.conf` (in the
+mapped HA `/config` volume). Both the add-on's startup supervisor **and** the `hactl` CLI
+(`POST /v1/wireguard/config`) read and write this file, so they never drift apart.
+`/etc/wireguard/<tunnel>.conf` is *ephemeral* (wiped on every restart) and is regenerated
+from the canonical file on demand — so it's never the source of truth.
 
-```yaml
-vpn:
-  enabled: true
-  autostart: true
-  tunnel: wg0
-  config: |
-    [Interface]
-    PrivateKey = <client-private-key>
-    Address = 10.13.13.2/24
+### Providing the config (recommended — no YAML escaping)
 
-    [Peer]
-    PublicKey = <server-public-key>
-    Endpoint = vpn.example.com:51820
-    AllowedIPs = 0.0.0.0/0
-    PersistentKeepalive = 25
-```
+Either:
 
-Save and restart the add-on. The supervisor reads `/data/options.json` at startup, writes the config to `/etc/wireguard/<tunnel>.conf` (mode `0600`), and runs `wg-quick up <tunnel>`.
+- **From the LAN via hactl:** `hactl companion wireguard config -f wg0.conf` — pushes the
+  raw `.conf`; the add-on stores it canonically. Then `hactl companion wireguard up`, or set
+  `vpn.enabled: true` to have the add-on bring it up on start.
+- **Drop a file:** write `/config/hactl/<tunnel>.conf` via the File Editor / Samba add-on.
 
-### Option semantics
+### Toggles (HA UI → Configuration)
 
 | Field | Meaning |
 |---|---|
 | `enabled` | Master switch. `false` ⇒ tunnel is brought down (and kept down) on add-on (re)start. `true` ⇒ tunnel is brought up. |
 | `autostart` | After `wg-quick up`, also runs `systemctl enable wg-quick@<tunnel>` so the tunnel survives a host reboot before the add-on starts (HA OS only — silently no-op where systemd is absent). |
 | `tunnel` | Interface name. Must match `^[a-zA-Z0-9_]{1,15}$`. Default `wg0`. |
-| `config` | The full `wg.conf` text. Leave empty to fall back to a file (see below). |
+| `config` | *Optional* inline config. Leave empty to use the canonical file. When non-empty it is written into `/config/hactl/<tunnel>.conf` on start (takes precedence over an existing file). |
 
-### File fallback
+Save and restart the add-on. On startup the supervisor resolves the config (`vpn.config` if
+set, else the file), writes it canonically + into `/etc/wireguard/<tunnel>.conf` (mode `0600`),
+and runs `wg-quick up <tunnel>` when `enabled`.
 
-If you'd rather not paste the config into the UI, drop the file at:
-
-```
-/config/hactl/<tunnel>.conf
-```
-
-(reachable from the HA File Editor add-on, Samba share, or any other tool that can write into `/config`). Leave `vpn.config` empty in the add-on Configuration tab. On the next add-on start the supervisor will copy that file into `/etc/wireguard/` and bring the tunnel up.
-
-`vpn.config` takes precedence if both are present.
+> ⚠️ **Inline `vpn.config` is YAML.** A multi-line `wg.conf` must be a block scalar — paste it
+> under `config: |` with every line indented:
+> ```yaml
+> vpn:
+>   enabled: true
+>   config: |
+>     [Interface]
+>     PrivateKey = <client-private-key>
+>     Address = 10.13.13.2/24
+>
+>     [Peer]
+>     PublicKey = <server-public-key>
+>     Endpoint = vpn.example.com:51820
+>     AllowedIPs = 0.0.0.0/0
+>     PersistentKeepalive = 25
+> ```
+> Pasting the raw config without `config: |` + indentation is invalid YAML; HA rejects it with
+> a **syntax error** before the add-on runs. Prefer the file/hactl methods above to avoid this.
 
 ### Verifying
 
@@ -76,7 +81,8 @@ All endpoints require `Authorization: Bearer <TOKEN>` (same as other companion e
 
 ### `POST /v1/wireguard/config?tunnel=wg0`
 
-Push a WireGuard tunnel config. Accepts **two formats**:
+Push a WireGuard tunnel config. It's written to the canonical `/config/hactl/<tunnel>.conf`
+(persists across restarts) and mirrored into `/etc/wireguard`. Accepts **two formats**:
 
 **Raw `.conf`** (`Content-Type: text/plain`):
 ```

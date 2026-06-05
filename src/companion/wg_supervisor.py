@@ -87,16 +87,6 @@ def _resolve_conf_text(opts: VPNOptions, fallback_dir: Path) -> str:
     return ""
 
 
-def _write_conf(tunnel: str, conf_text: str) -> Path:
-    """Write conf_text to /etc/wireguard/<tunnel>.conf with mode 0600."""
-    conf_dir = wg._WG_CONFIG_DIR
-    conf_dir.mkdir(parents=True, exist_ok=True)
-    conf_path = conf_dir / f"{tunnel}.conf"
-    conf_path.write_text(conf_text, encoding="utf-8")
-    conf_path.chmod(0o600)
-    return conf_path
-
-
 async def reconcile(opts: VPNOptions, *, fallback_dir: Path = _FALLBACK_DIR) -> None:
     """Bring the tunnel state into line with ``opts``.
 
@@ -130,7 +120,9 @@ async def reconcile(opts: VPNOptions, *, fallback_dir: Path = _FALLBACK_DIR) -> 
             logger.warning("vpn config rejected: %s; tunnel not started", exc)
             return
 
-        _write_conf(opts.tunnel, conf_text)
+        # Persist the resolved config to the canonical location (keeps the file
+        # in sync when it came from vpn.config) and materialize /etc/wireguard.
+        wg.save_config(opts.tunnel, conf_text, persist_dir=fallback_dir)
 
         if not await wg._is_interface_up(opts.tunnel):
             logger.info("vpn.enabled=true; bringing tunnel %s up", opts.tunnel)

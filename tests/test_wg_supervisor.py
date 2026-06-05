@@ -136,6 +136,11 @@ class TestReconcileEnabled:
         assert conf_path.read_text() == _VALID_CONF
         assert conf_path.stat().st_mode & 0o777 == 0o600
         run_cmd.assert_called_with("wg-quick", "up", "wg0")
+        # Inline vpn.config is now synced into the canonical persistent file, so
+        # it survives and stays consistent with what hactl would read/write.
+        persisted = fallback_dir / "wg0.conf"
+        assert persisted.read_text() == _VALID_CONF
+        assert persisted.stat().st_mode & 0o777 == 0o600
 
     async def test_falls_back_to_file(self, wg_conf_dir: Path, fallback_dir: Path) -> None:
         (fallback_dir / "wg0.conf").write_text(_VALID_CONF)

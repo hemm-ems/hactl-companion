@@ -12,7 +12,60 @@ from aiohttp import web
 logger = logging.getLogger(__name__)
 
 _TUNNEL_RE = re.compile(r"^[a-zA-Z0-9_]{1,15}$")
+
+# Runtime location wg-quick reads from. Ephemeral (container layer) — wiped on
+# every add-on restart, so it must never be the source of truth.
 _WG_CONFIG_DIR = Path("/etc/wireguard")
+
+# Source of truth: persistent, lives in the mapped HA /config volume so it
+# survives restarts and is viewable/editable via the File Editor add-on. Both
+# the REST endpoint (hactl) and the startup supervisor read/write here, which
+# keeps the two in sync. /etc/wireguard is regenerated from this on demand.
+_PERSIST_DIR = Path("/config/hactl")
+
+
+def _persist_path(tunnel: str, persist_dir: Path = _PERSIST_DIR) -> Path:
+    """Path of a tunnel's canonical (persistent) config."""
+    return persist_dir / f"{tunnel}.conf"
+
+
+def _runtime_path(tunnel: str) -> Path:
+    """Path of a tunnel's runtime config in /etc/wireguard."""
+    return _WG_CONFIG_DIR / f"{tunnel}.conf"
+
+
+def materialize(tunnel: str, persist_dir: Path | None = None) -> bool:
+    """Copy the persistent config into /etc/wireguard so wg-quick can use it.
+
+    Returns False when no persistent config exists for the tunnel. ``persist_dir``
+    resolves to the module default at call time so tests can monkeypatch it.
+    """
+    persist_dir = persist_dir if persist_dir is not None else _PERSIST_DIR
+    src = _persist_path(tunnel, persist_dir)
+    if not src.exists():
+        return False
+    _WG_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    dst = _runtime_path(tunnel)
+    dst.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+    dst.chmod(0o600)
+    return True
+
+
+def save_config(tunnel: str, conf_text: str, persist_dir: Path | None = None) -> Path:
+    """Validate, persist, and materialize a tunnel config.
+
+    Writes the canonical copy to the persistent ``persist_dir`` (the source of
+    truth, shared by the REST endpoint and the startup supervisor) and mirrors
+    it into /etc/wireguard for wg-quick. Raises HTTPBadRequest on invalid input.
+    """
+    persist_dir = persist_dir if persist_dir is not None else _PERSIST_DIR
+    _validate_conf(conf_text)
+    persist_dir.mkdir(parents=True, exist_ok=True)
+    persist = _persist_path(tunnel, persist_dir)
+    persist.write_text(conf_text, encoding="utf-8")
+    persist.chmod(0o600)
+    materialize(tunnel, persist_dir)
+    return persist
 
 
 def _validate_tunnel(name: str) -> str:
