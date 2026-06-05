@@ -85,16 +85,40 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.PACKAGES_TOKEN }}
 
+      # Bump the version FIRST and push to main, so the tag cut next points at
+      # the bumped commit. Otherwise the image (built from the tag) is built from
+      # pre-bump code and self-reports the previous version.
+      - name: Bump version on main
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_TOKEN }}
+        run: |
+          VER="${{ needs.versions.outputs.next-version }}"
+          tag="${{ needs.versions.outputs.next-tag }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          sed -i "s/^version = .*/version = \"${VER}\"/" pyproject.toml
+          sed -i "s/^  version: .*/  version: ${VER}/" openapi/companion-v1.yaml
+          sed -i "s/^version: .*/version: \"${VER}\"/" hactl_companion/config.yaml
+          sed -i "s/^__version__ = .*/__version__ = \"${VER}\"/" src/companion/__init__.py
+          # Generate notes via the API (no release exists yet — created below).
+          NOTES=$(gh api --method POST "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+            -f tag_name="${tag}" -f target_commitish=main --jq '.body' | sed '/^---$/,$d')
+          {
+            printf "## %s\n\n%s\n\n" "${VER}" "${NOTES}"
+            cat hactl_companion/CHANGELOG.md
+          } > /tmp/changelog_new.md
+          mv /tmp/changelog_new.md hactl_companion/CHANGELOG.md
+          git add pyproject.toml openapi/companion-v1.yaml hactl_companion/config.yaml src/companion/__init__.py hactl_companion/CHANGELOG.md
+          git commit -m "release: bump version to ${VER}"
+          git push origin HEAD:main
+
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # --target main now resolves to the bump commit pushed above, so the
+          # tag (and the image built from it) carry the correct version.
           tag="${{ needs.versions.outputs.next-tag }}"
-          reason="${{ inputs.reason }}"
-          notes="Patch release ${tag}"
-          if [ -n "$reason" ]; then
-            notes="${notes} — ${reason}"
-          fi
           gh release create "${tag}" \
             --title "${tag}" \
             --generate-notes \
@@ -108,25 +132,3 @@ jobs:
           tag="${{ needs.versions.outputs.next-tag }}"
           gh workflow run release.yml --ref "${tag}"
           echo "::notice::Docker build triggered for ${tag} via release.yml"
-
-      - name: Bump version on main
-        env:
-          GH_TOKEN: ${{ secrets.PACKAGES_TOKEN }}
-        run: |
-          VER="${{ needs.versions.outputs.next-version }}"
-          tag="${{ needs.versions.outputs.next-tag }}"
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          sed -i "s/^version = .*/version = \"${VER}\"/" pyproject.toml
-          sed -i "s/^  version: .*/  version: ${VER}/" openapi/companion-v1.yaml
-          sed -i "s/^version: .*/version: \"${VER}\"/" hactl_companion/config.yaml
-          sed -i "s/^__version__ = .*/__version__ = \"${VER}\"/" src/companion/__init__.py
-          NOTES=$(gh release view "${tag}" --json body -q '.body' | sed '/^---$/,$d')
-          {
-            printf "## %s\n\n%s\n\n" "${VER}" "${NOTES}"
-            cat hactl_companion/CHANGELOG.md
-          } > /tmp/changelog_new.md
-          mv /tmp/changelog_new.md hactl_companion/CHANGELOG.md
-          git add pyproject.toml openapi/companion-v1.yaml hactl_companion/config.yaml src/companion/__init__.py hactl_companion/CHANGELOG.md
-          git commit -m "release: bump version to ${VER}"
-          git push origin HEAD:main
