@@ -1,3 +1,16 @@
+## 2026.6.1
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+## What's Changed
+### 🔧 Maintenance
+* release: bump version to 2026.6.0 by @github-actions[bot] in https://github.com/hemm-ems/hactl-companion/pull/35
+
+## New Contributors
+* @github-actions[bot] made their first contribution in https://github.com/hemm-ems/hactl-companion/pull/35
+
+**Full Changelog**: https://github.com/hemm-ems/hactl-companion/compare/v2026.6.0...v2026.6.1
+
 ## 2026.6.0
 
 <!-- Release notes generated using configuration in .github/release.yml at main -->
