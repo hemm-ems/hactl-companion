@@ -33,14 +33,39 @@ No secret is needed. hactl auto-discovers the companion URL via the Supervisor W
 
 ## VPN client (optional)
 
-The add-on can manage a WireGuard tunnel for you. Fill in the `vpn` block in the **Configuration** tab:
+The add-on can manage a WireGuard tunnel for you. The tunnel config is stored in a
+single **source of truth** — the file `/config/hactl/<tunnel>.conf` — which both the
+add-on and the `hactl` CLI read and write, so the two never drift apart. `/etc/wireguard`
+is regenerated from it on every start, so the tunnel survives restarts/reboots.
+
+**Recommended — provide the config as a file (no YAML escaping):**
+
+- `hactl companion wireguard config -f wg0.conf` (from the LAN), **or**
+- drop the file at `/config/hactl/<tunnel>.conf` via the File Editor / Samba add-on.
+
+Then set the toggles in the **Configuration** tab and restart the add-on:
 
 | Option | Default | Meaning |
 |---|---|---|
 | `vpn.enabled` | `false` | Bring the tunnel up on add-on start when `true`; bring it down when `false`. |
 | `vpn.autostart` | `false` | Also enable `wg-quick@<tunnel>` via systemd (HA OS) so the tunnel survives host reboots. |
 | `vpn.tunnel` | `wg0` | Interface name (`^[a-zA-Z0-9_]{1,15}$`). |
-| `vpn.config` | `""` | The full `wg.conf` text. Paste it here, *or* leave empty and drop a file at `/config/hactl/<tunnel>.conf`. |
+| `vpn.config` | `""` | *Optional* inline config. Leave empty to use the file above. When set, it is written into `/config/hactl/<tunnel>.conf` on start (it wins over an existing file). |
+
+> ⚠️ **Pasting into `vpn.config`:** add-on options are YAML, so a multi-line `wg.conf`
+> must use a block scalar — paste it under `config: |` with each line indented:
+> ```yaml
+> vpn:
+>   enabled: true
+>   config: |
+>     [Interface]
+>     PrivateKey = …
+>     [Peer]
+>     …
+> ```
+> Pasting the raw config without `config: |` / indentation is invalid YAML and HA will
+> reject it with a syntax error before the add-on ever sees it. The file methods above
+> avoid this entirely and are preferred.
 
 Restart the add-on after changing the config. See `docs/wireguard.md` for the full feature manual, including the REST API for multi-tunnel or scripted setups.
 

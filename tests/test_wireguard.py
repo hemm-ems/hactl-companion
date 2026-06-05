@@ -6,11 +6,13 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from companion.routes.wireguard import (
+from companion.wg import (
     _conf_from_json,
     _parse_wg_show,
     _validate_conf,
     _validate_tunnel,
+    materialize,
+    save_config,
 )
 
 # ---------------------------------------------------------------------------
@@ -235,6 +237,11 @@ class TestPostConfig:
         body = await resp.json()
         assert body["status"] == "configured"
         assert body["tunnel"] == "wg0"
+        # Persisted to the source-of-truth dir (not just /etc/wireguard).
+        persisted = _wg_config_dir / "wg0.conf"
+        assert persisted.exists()
+        assert "PrivateKey = X" in persisted.read_text()
+        assert (persisted.stat().st_mode & 0o077) == 0  # 0600 — key not group/world readable
 
     @pytest.mark.usefixtures("_wg_config_dir")
     async def test_json_conf(self, client, auth_headers, _wg_config_dir) -> None:
@@ -251,6 +258,7 @@ class TestPostConfig:
         assert resp.status == 200
         body = await resp.json()
         assert body["tunnel"] == "vpn1"
+        assert (_wg_config_dir / "vpn1.conf").exists()
 
     async def test_empty_body(self, client, auth_headers) -> None:
         resp = await client.post(
@@ -273,8 +281,17 @@ class TestPostConfig:
         assert resp.status == 401
 
 
+@pytest.mark.usefixtures("_wg_config_dir")
 class TestPostStart:
-    async def test_start_success(self, client, auth_headers) -> None:
+    @staticmethod
+    def _persist(_wg_config_dir, tunnel: str = "wg0") -> None:
+        _wg_config_dir.mkdir(parents=True, exist_ok=True)
+        (_wg_config_dir / f"{tunnel}.conf").write_text(
+            "[Interface]\nPrivateKey = X\nAddress = 10.0.0.1/24\n\n[Peer]\nPublicKey = Y\nAllowedIPs = 0/0\n"
+        )
+
+    async def test_start_success(self, client, auth_headers, _wg_config_dir) -> None:
+        self._persist(_wg_config_dir)
         with (
             patch("companion.routes.wireguard._is_interface_up", return_value=False),
             patch("companion.routes.wireguard._run_wg_cmd", return_value=(0, "", "")),
@@ -285,7 +302,14 @@ class TestPostStart:
         assert body["status"] == "started"
         assert body["auto_enable"] is False
 
-    async def test_start_with_auto_enable(self, client, auth_headers) -> None:
+    async def test_start_missing_config(self, client, auth_headers) -> None:
+        """No persistent config → 404, not a confusing wg-quick 500."""
+        with patch("companion.routes.wireguard._is_interface_up", return_value=False):
+            resp = await client.post("/v1/wireguard/start?tunnel=wg0", headers=auth_headers)
+        assert resp.status == 404
+
+    async def test_start_with_auto_enable(self, client, auth_headers, _wg_config_dir) -> None:
+        self._persist(_wg_config_dir)
         with (
             patch("companion.routes.wireguard._is_interface_up", return_value=False),
             patch("companion.routes.wireguard._run_wg_cmd", return_value=(0, "", "")),
@@ -302,7 +326,8 @@ class TestPostStart:
             resp = await client.post("/v1/wireguard/start?tunnel=wg0", headers=auth_headers)
         assert resp.status == 409
 
-    async def test_start_failure(self, client, auth_headers) -> None:
+    async def test_start_failure(self, client, auth_headers, _wg_config_dir) -> None:
+        self._persist(_wg_config_dir)
         with (
             patch("companion.routes.wireguard._is_interface_up", return_value=False),
             patch("companion.routes.wireguard._run_wg_cmd", return_value=(1, "", "error")),
@@ -362,13 +387,61 @@ class TestGetStatus:
         assert body["state"] == "inactive"
 
 
+_CONF = "[Interface]\nPrivateKey = X\nAddress = 10.0.0.1/24\n\n[Peer]\nPublicKey = Y\nAllowedIPs = 0/0\n"
+
+
+class TestSaveAndMaterialize:
+    def test_save_persists_and_materializes(self, tmp_path, monkeypatch) -> None:
+        persist = tmp_path / "persist"
+        runtime = tmp_path / "runtime"
+        monkeypatch.setattr("companion.wg._PERSIST_DIR", persist)
+        monkeypatch.setattr("companion.wg._WG_CONFIG_DIR", runtime)
+
+        save_config("wg0", _CONF)
+        # canonical persistent copy + materialized runtime copy, both 0600
+        assert (persist / "wg0.conf").read_text() == _CONF
+        assert (runtime / "wg0.conf").read_text() == _CONF
+        assert (persist / "wg0.conf").stat().st_mode & 0o077 == 0
+        assert (runtime / "wg0.conf").stat().st_mode & 0o077 == 0
+
+    def test_save_rejects_invalid(self, tmp_path, monkeypatch) -> None:
+        from aiohttp.web import HTTPBadRequest
+
+        monkeypatch.setattr("companion.wg._PERSIST_DIR", tmp_path / "persist")
+        monkeypatch.setattr("companion.wg._WG_CONFIG_DIR", tmp_path / "runtime")
+        with pytest.raises(HTTPBadRequest):
+            save_config("wg0", "not a wg config")
+
+    def test_materialize_regenerates_after_runtime_wiped(self, tmp_path, monkeypatch) -> None:
+        """The whole point: a wiped /etc/wireguard is rebuilt from the persistent copy."""
+        persist = tmp_path / "persist"
+        runtime = tmp_path / "runtime"
+        monkeypatch.setattr("companion.wg._PERSIST_DIR", persist)
+        monkeypatch.setattr("companion.wg._WG_CONFIG_DIR", runtime)
+
+        save_config("wg0", _CONF)
+        # simulate a restart wiping the ephemeral runtime dir
+        (runtime / "wg0.conf").unlink()
+        assert materialize("wg0") is True
+        assert (runtime / "wg0.conf").read_text() == _CONF
+
+    def test_materialize_missing_returns_false(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr("companion.wg._PERSIST_DIR", tmp_path / "persist")
+        monkeypatch.setattr("companion.wg._WG_CONFIG_DIR", tmp_path / "runtime")
+        assert materialize("wg0") is False
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
 
 
 @pytest.fixture
-def _wg_config_dir(tmp_path, monkeypatch) -> None:
-    """Redirect WG config dir to temp path for safe writes."""
-    monkeypatch.setattr("companion.routes.wireguard._WG_CONFIG_DIR", tmp_path)
-    return tmp_path
+def _wg_config_dir(tmp_path, monkeypatch):
+    """Redirect both the persistent (source-of-truth) and runtime WG dirs to
+    temp paths so writes don't escape the sandbox. Returns the persistent dir."""
+    persist = tmp_path / "persist"
+    runtime = tmp_path / "runtime"
+    monkeypatch.setattr("companion.wg._PERSIST_DIR", persist)
+    monkeypatch.setattr("companion.wg._WG_CONFIG_DIR", runtime)
+    return persist

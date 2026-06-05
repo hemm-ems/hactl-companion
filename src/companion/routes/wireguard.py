@@ -9,7 +9,6 @@ from dataclasses import dataclass
 from aiohttp import web
 
 from companion.wg import (
-    _WG_CONFIG_DIR,
     _conf_from_json,
     _disable_auto_start,
     _enable_auto_start,
@@ -17,8 +16,9 @@ from companion.wg import (
     _is_interface_up,
     _parse_wg_show,
     _run_wg_cmd,
-    _validate_conf,
     _validate_tunnel,
+    materialize,
+    save_config,
 )
 
 logger = logging.getLogger(__name__)
@@ -54,13 +54,9 @@ async def post_config(request: web.Request) -> web.Response:
     else:
         conf_text = body.decode("utf-8", errors="replace")
 
-    _validate_conf(conf_text)
-
-    conf_dir = _WG_CONFIG_DIR
-    conf_dir.mkdir(parents=True, exist_ok=True)
-    conf_path = conf_dir / f"{tunnel}.conf"
-    conf_path.write_text(conf_text, encoding="utf-8")
-    conf_path.chmod(0o600)
+    # Persist to the canonical location (survives restarts; shared with the
+    # startup supervisor) and mirror into /etc/wireguard. save_config validates.
+    save_config(tunnel, conf_text)
 
     logger.info("WireGuard config written for tunnel %s", tunnel)
     return web.json_response({"status": "configured", "tunnel": tunnel})
@@ -72,6 +68,11 @@ async def post_start(request: web.Request) -> web.Response:
 
     if await _is_interface_up(tunnel):
         raise web.HTTPConflict(text=f"Tunnel {tunnel} is already active")
+
+    # Regenerate /etc/wireguard from the persistent config (it may have been
+    # wiped by a restart). No persistent config → nothing to start.
+    if not materialize(tunnel):
+        raise web.HTTPNotFound(text=f"No config for tunnel {tunnel} — push one via POST /v1/wireguard/config first")
 
     auto_enable = request.query.get("auto_enable", "false").lower() in ("true", "1", "yes")
 

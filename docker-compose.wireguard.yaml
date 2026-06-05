@@ -38,6 +38,10 @@ services:
       - "9100"
     volumes:
       - wg-shared:/shared:ro
+      # Persistent volumes mirroring the real add-on: /data (options.json) and
+      # /config (canonical /config/hactl/<tunnel>.conf). Must survive recreation.
+      - wg-data:/data
+      - wg-config:/config
     networks:
       wg-net:
         aliases:
@@ -48,6 +52,8 @@ services:
 
 volumes:
   wg-shared:
+  wg-data:
+  wg-config:
 
 networks:
   wg-net:
