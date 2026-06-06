@@ -53,15 +53,7 @@ async def access_log_middleware(
         raise
     finally:
         duration_ms = int((time.monotonic() - start) * 1000)
-        # Health/status pings (auth-exempt) are high-frequency noise — log them
-        # at DEBUG so real API calls stand out in the add-on log. Keep 401s at
-        # WARNING so auth problems are always visible.
-        if status == 401:
-            level = logging.WARNING
-        elif request.path in AUTH_EXEMPT_PATHS:
-            level = logging.DEBUG
-        else:
-            level = logging.INFO
+        level = logging.WARNING if status == 401 else logging.INFO
         logger.log(
             level,
             "%s %s status=%d duration=%dms auth=%s",
