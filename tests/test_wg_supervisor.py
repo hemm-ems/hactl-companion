@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from aiohttp import web
 
 from companion import wg_supervisor
 from companion.wg_supervisor import VPNOptions, load_options, reconcile
@@ -121,8 +124,9 @@ class TestReconcileDisabled:
             patch("companion.wg_supervisor.wg._is_interface_up", AsyncMock(return_value=True)),
             patch("companion.wg_supervisor.wg._run_wg_cmd", AsyncMock(return_value=(0, "", ""))) as run_cmd,
         ):
-            await reconcile(opts, fallback_dir=fallback_dir)
+            result = await reconcile(opts, fallback_dir=fallback_dir)
         run_cmd.assert_called_with("wg-quick", "down", "wg0")
+        assert result is None  # disabled → nothing for the server loop to watch
 
 
 @pytest.mark.asyncio
@@ -181,7 +185,7 @@ class TestReconcileEnabled:
         assert not any("wg-quick" in str(c.args) for c in run_cmd.call_args_list)
         assert any("DNS resolution failed" in rec.message for rec in caplog.records)
 
-    async def test_logs_wg_summary_after_up(
+    async def test_logs_up_summary_and_returns_result(
         self,
         wg_conf_dir: Path,
         fallback_dir: Path,
@@ -199,17 +203,22 @@ class TestReconcileEnabled:
             patch("companion.wg_supervisor.wg._is_interface_up", AsyncMock(return_value=False)),
             patch("companion.wg_supervisor.wg._run_wg_cmd", AsyncMock(side_effect=fake_run)),
             patch("companion.wg_supervisor.wg._resolve_endpoint_hostnames", AsyncMock(return_value=[])),
-            patch("companion.wg_supervisor.wg_monitor.start_monitor"),
             caplog.at_level("INFO", logger=wg_supervisor.logger.name),
         ):
-            await reconcile(opts, fallback_dir=fallback_dir)
-        summary = [r.message for r in caplog.records if r.message.startswith("wg wg0 active")]
-        assert summary, f"no wg summary logged; got {[r.message for r in caplog.records]}"
+            result = await reconcile(opts, fallback_dir=fallback_dir)
+        # Honest "interface configured" line — no connectivity claim here.
+        summary = [r.message for r in caplog.records if r.message.startswith("wg wg0 up")]
+        assert summary, f"no up-summary logged; got {[r.message for r in caplog.records]}"
         assert "peer 1.2.3.4:51826" in summary[0]
-        assert "rx=184 B tx=584 B" in summary[0]
-        assert "monitor off" in summary[0]
+        # reconcile no longer claims "active"/"connected"
+        assert not any("connected" in r.message or "active" in r.message for r in caplog.records)
+        assert result is not None
+        assert result.tunnel == "wg0"
+        assert result.conf_text == _VALID_CONF
 
-    async def test_monitor_started_after_tunnel_up(self, wg_conf_dir: Path, fallback_dir: Path) -> None:
+    async def test_reconcile_does_not_start_monitor(self, wg_conf_dir: Path, fallback_dir: Path) -> None:
+        # Monitor start now happens in the server loop (register_startup_tasks),
+        # not in reconcile (whose asyncio.run loop would cancel it).
         opts = VPNOptions(enabled=True, tunnel="wg0", config=_HOSTNAME_CONF)
         with (
             patch("companion.wg_supervisor.wg._is_interface_up", AsyncMock(return_value=False)),
@@ -217,9 +226,9 @@ class TestReconcileEnabled:
             patch("companion.wg_supervisor.wg._resolve_endpoint_hostnames", AsyncMock(return_value=[])),
             patch("companion.wg_supervisor.wg_monitor.start_monitor") as start_mock,
         ):
-            await reconcile(opts, fallback_dir=fallback_dir)
-        start_mock.assert_called_once()
-        assert start_mock.call_args.args[0] == "wg0"
+            result = await reconcile(opts, fallback_dir=fallback_dir)
+        start_mock.assert_not_called()
+        assert result is not None and result.tunnel == "wg0"
 
     async def test_no_config_anywhere_logs_and_skips(
         self,
@@ -266,7 +275,63 @@ class TestReconcileEnabled:
             patch("companion.wg_supervisor.wg._run_wg_cmd", AsyncMock(return_value=(0, "", ""))) as run_cmd,
             caplog.at_level("WARNING", logger=wg_supervisor.logger.name),
         ):
-            await reconcile(opts, fallback_dir=fallback_dir)
+            result = await reconcile(opts, fallback_dir=fallback_dir)
         assert not (wg_conf_dir / "wg0.conf").exists()
         assert not any("wg-quick" in str(c.args) for c in run_cmd.call_args_list)
         assert any("rejected" in rec.message for rec in caplog.records)
+        assert result is None
+
+
+_HANDSHAKE_DUMP = "PRIV\tIFACE\t51820\toff\nPEER\t(none)\t1.2.3.4:51826\t10.6.0.0/24\t{hs}\t184\t584\toff\n"
+
+
+@pytest.mark.asyncio
+class TestWatchConnection:
+    async def test_logs_connected_on_handshake(self, caplog: pytest.LogCaptureFixture) -> None:
+        import time
+
+        recent = int(time.time())  # fresh handshake → within staleness window
+        dump = _HANDSHAKE_DUMP.format(hs=recent)
+        with (
+            patch("companion.wg_supervisor.wg._run_wg_cmd", AsyncMock(return_value=(0, dump, ""))),
+            caplog.at_level("INFO", logger=wg_supervisor.logger.name),
+        ):
+            await wg_supervisor._watch_connection("wg0", timeout=2.0, interval=0.01)
+        connected = [r.message for r in caplog.records if "connected" in r.message]
+        assert connected, f"no connected line; got {[r.message for r in caplog.records]}"
+        assert "rx=184 B tx=584 B" in connected[0]
+
+    async def test_warns_when_no_handshake(self, caplog: pytest.LogCaptureFixture) -> None:
+        dump = _HANDSHAKE_DUMP.format(hs=0)  # never handshaked
+        with (
+            patch("companion.wg_supervisor.wg._run_wg_cmd", AsyncMock(return_value=(0, dump, ""))),
+            caplog.at_level("WARNING", logger=wg_supervisor.logger.name),
+        ):
+            await wg_supervisor._watch_connection("wg0", timeout=0.05, interval=0.01)
+        warnings = [r.message for r in caplog.records if "NOT connected" in r.message]
+        assert warnings, f"no not-connected warning; got {[r.message for r in caplog.records]}"
+        assert "1.2.3.4:51826" in warnings[0]
+
+
+@pytest.mark.asyncio
+class TestRegisterStartupTasks:
+    async def test_on_startup_starts_monitor_and_watcher(self) -> None:
+        app = web.Application()
+        wg_supervisor.register_startup_tasks(app, "wg0", _VALID_CONF)
+        assert app.on_startup and app.on_cleanup
+
+        with (
+            patch("companion.wg_supervisor.wg_monitor.start_monitor") as start_mock,
+            patch("companion.wg_supervisor.wg_monitor.stop_monitor") as stop_mock,
+            patch("companion.wg_supervisor._watch_connection", AsyncMock()),
+        ):
+            for handler in app.on_startup:
+                await handler(app)
+            start_mock.assert_called_once_with("wg0", _VALID_CONF)
+            assert "_wg_watch" in app and isinstance(app["_wg_watch"], asyncio.Task)
+            for handler in app.on_cleanup:
+                await handler(app)
+            stop_mock.assert_called_once_with("wg0")
+            with contextlib.suppress(asyncio.CancelledError):
+                await app["_wg_watch"]
+            assert app["_wg_watch"].cancelled() or app["_wg_watch"].done()
