@@ -99,8 +99,16 @@ class TestAccessLog:
         # The structured access_log_middleware must emit exactly one line per
         # request; aiohttp's built-in access logger (disabled via run_app
         # access_log=None in __main__) would otherwise duplicate it.
-        with caplog.at_level(logging.INFO, logger="companion.access"):
+        with caplog.at_level(logging.DEBUG, logger="companion.access"):
             await client.get("/v1/health", headers=auth_headers)
         access_records = [r for r in caplog.records if r.name == "companion.access"]
         assert len(access_records) == 1
         assert "GET /v1/health" in access_records[0].message
+
+    async def test_health_access_logged_at_debug(self, client, auth_headers, caplog) -> None:
+        # Auth-exempt health/status pings are high-frequency noise → DEBUG, so
+        # they don't drown real API calls in the add-on log.
+        with caplog.at_level(logging.DEBUG, logger="companion.access"):
+            await client.get("/v1/health", headers=auth_headers)
+        rec = next(r for r in caplog.records if r.name == "companion.access")
+        assert rec.levelno == logging.DEBUG

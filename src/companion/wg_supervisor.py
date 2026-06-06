@@ -137,5 +137,49 @@ async def reconcile(opts: VPNOptions, *, fallback_dir: Path = _FALLBACK_DIR) -> 
             wg_monitor.start_monitor(opts.tunnel, conf_text)
         else:
             logger.info("tunnel %s already up; left in place", opts.tunnel)
+        await _log_tunnel_summary(opts.tunnel)
     except Exception:
         logger.exception("VPN reconcile failed for tunnel %s", opts.tunnel)
+
+
+async def _log_tunnel_summary(tunnel: str) -> None:
+    """Log a one-line WireGuard summary so the add-on log shows tunnel state.
+
+    Best-effort: never raises. Covers IP-endpoint tunnels too, which have no
+    dyndns monitor and would otherwise leave no WG trace in the log.
+    """
+    try:
+        rc, stdout, _ = await wg._run_wg_cmd("wg", "show", tunnel, "dump")
+        if rc != 0:
+            return
+        parsed = wg._parse_wg_dump(stdout)
+        peers = parsed.get("peers")
+        peers = peers if isinstance(peers, list) else []
+
+        mon = wg_monitor.status(tunnel)
+        if mon.get("running"):
+            hostnames = mon.get("hostnames")
+            count = len(hostnames) if isinstance(hostnames, list) else 0
+            mon_str = f"monitor watching {count} hostname(s)"
+        else:
+            mon_str = "monitor off (no hostname endpoint)"
+
+        if not peers:
+            logger.info("wg %s active — no peers; %s", tunnel, mon_str)
+            return
+        peer = peers[0] if isinstance(peers[0], dict) else {}
+        more = f" (+{len(peers) - 1} more)" if len(peers) > 1 else ""
+        hs = peer.get("latest_handshake")
+        hs_str = f"handshake {hs} ago" if hs and hs != "never" else "no handshake yet"
+        logger.info(
+            "wg %s active — peer %s%s, %s, rx=%s tx=%s; %s",
+            tunnel,
+            peer.get("endpoint") or "(none)",
+            more,
+            hs_str,
+            peer.get("transfer_rx"),
+            peer.get("transfer_tx"),
+            mon_str,
+        )
+    except Exception:
+        logger.debug("could not build wg summary for %s", tunnel, exc_info=True)
