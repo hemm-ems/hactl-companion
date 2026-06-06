@@ -45,10 +45,13 @@ def main(argv: list[str] | None = None) -> None:
     args = _parse_args(argv)
 
     level = getattr(logging, args.log_level.upper(), logging.INFO)
+    # No timestamp in the format: the HA add-on log viewer (journald) already
+    # prefixes each line with its own time. Adding %(asctime)s here produced a
+    # confusing double timestamp. `hactl companion logs` still shows times — it
+    # formats them from each record's epoch, captured by the ring buffer below.
     logging.basicConfig(
         level=level,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
+        format="%(levelname)s %(name)s: %(message)s",
     )
     # Capture our own records so `hactl companion logs` can read them back over
     # Ingress (add-on logs never reach HA core's logger).

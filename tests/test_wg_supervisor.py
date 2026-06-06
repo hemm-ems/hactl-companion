@@ -140,7 +140,7 @@ class TestReconcileEnabled:
         assert conf_path.exists()
         assert conf_path.read_text() == _VALID_CONF
         assert conf_path.stat().st_mode & 0o777 == 0o600
-        run_cmd.assert_called_with("wg-quick", "up", "wg0")
+        run_cmd.assert_any_call("wg-quick", "up", "wg0")
         # Inline vpn.config is now synced into the canonical persistent file, so
         # it survives and stays consistent with what hactl would read/write.
         persisted = fallback_dir / "wg0.conf"
@@ -158,7 +158,7 @@ class TestReconcileEnabled:
         ):
             await reconcile(opts, fallback_dir=fallback_dir)
         assert (wg_conf_dir / "wg0.conf").read_text() == _VALID_CONF
-        run_cmd.assert_called_with("wg-quick", "up", "wg0")
+        run_cmd.assert_any_call("wg-quick", "up", "wg0")
 
     async def test_dns_failure_logs_and_skips(
         self,
@@ -180,6 +180,34 @@ class TestReconcileEnabled:
         # wg-quick must NOT be called
         assert not any("wg-quick" in str(c.args) for c in run_cmd.call_args_list)
         assert any("DNS resolution failed" in rec.message for rec in caplog.records)
+
+    async def test_logs_wg_summary_after_up(
+        self,
+        wg_conf_dir: Path,
+        fallback_dir: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        opts = VPNOptions(enabled=True, tunnel="wg0", config=_VALID_CONF)
+        dump = "PRIV\tIFACE\t51820\toff\nPEER\t(none)\t1.2.3.4:51826\t10.6.0.0/24\t0\t184\t584\toff\n"
+
+        async def fake_run(*args: str, timeout: int = 30) -> tuple[int, str, str]:
+            if args[:2] == ("wg", "show"):
+                return (0, dump, "")
+            return (0, "", "")
+
+        with (
+            patch("companion.wg_supervisor.wg._is_interface_up", AsyncMock(return_value=False)),
+            patch("companion.wg_supervisor.wg._run_wg_cmd", AsyncMock(side_effect=fake_run)),
+            patch("companion.wg_supervisor.wg._resolve_endpoint_hostnames", AsyncMock(return_value=[])),
+            patch("companion.wg_supervisor.wg_monitor.start_monitor"),
+            caplog.at_level("INFO", logger=wg_supervisor.logger.name),
+        ):
+            await reconcile(opts, fallback_dir=fallback_dir)
+        summary = [r.message for r in caplog.records if r.message.startswith("wg wg0 active")]
+        assert summary, f"no wg summary logged; got {[r.message for r in caplog.records]}"
+        assert "peer 1.2.3.4:51826" in summary[0]
+        assert "rx=184 B tx=584 B" in summary[0]
+        assert "monitor off" in summary[0]
 
     async def test_monitor_started_after_tunnel_up(self, wg_conf_dir: Path, fallback_dir: Path) -> None:
         opts = VPNOptions(enabled=True, tunnel="wg0", config=_HOSTNAME_CONF)
