@@ -60,23 +60,30 @@ def main(argv: list[str] | None = None) -> None:
     host = _parse_host(args.host)
     config_base_path = "/config"
 
-    # Reconcile VPN tunnel state from HA add-on options before serving.
-    # A failure here must never block the rest of the add-on from starting.
-    try:
-        opts = wg_supervisor.load_options()
-        if opts is not None:
-            asyncio.run(wg_supervisor.reconcile(opts))
-    except Exception:
-        logger.exception("VPN reconcile failed; continuing add-on startup")
-
-    app = create_app(config_base_path)
-    logger.info("hactl-companion v%s starting on %s:%s", __version__, args.host, args.port)
-    logger.info("config path: %s", config_base_path)
+    # Announce ourselves first, before doing any tunnel work, so the log reads
+    # top-to-bottom in the order things actually happen.
+    logger.info("hactl-companion v%s starting (port %s)", __version__, args.port)
     supervisor_token_status = (
         "present" if os.environ.get("SUPERVISOR_TOKEN") else "MISSING (direct access via SUPERVISOR_TOKEN will fail)"
     )
     logger.info("supervisor token: %s", supervisor_token_status)
-    logger.info("auth: ingress requests bypass token check; direct requests require SUPERVISOR_TOKEN")
+
+    # Reconcile VPN tunnel state from HA add-on options before serving.
+    # A failure here must never block the rest of the add-on from starting.
+    reconciled = None
+    try:
+        opts = wg_supervisor.load_options()
+        if opts is not None:
+            reconciled = asyncio.run(wg_supervisor.reconcile(opts))
+    except Exception:
+        logger.exception("VPN reconcile failed; continuing add-on startup")
+
+    app = create_app(config_base_path)
+    # Post-up WG work (dyndns monitor + connection confirmation) must run in the
+    # server's event loop, not reconcile's throwaway one — see wg_supervisor.
+    if reconciled is not None:
+        wg_supervisor.register_startup_tasks(app, reconciled.tunnel, reconciled.conf_text)
+
     # access_log=None silences aiohttp's built-in access logger; our
     # access_log_middleware already emits one structured line per request.
     web.run_app(app, host=host, port=args.port, print=None, access_log=None)
