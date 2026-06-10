@@ -9,7 +9,7 @@ import os
 
 from aiohttp import web
 
-from companion import __version__, logbuffer, wg_supervisor
+from companion import __version__, logbuffer, paths, wg_supervisor
 from companion.server import create_app
 
 logger = logging.getLogger("companion")
@@ -58,11 +58,12 @@ def main(argv: list[str] | None = None) -> None:
     logbuffer.install(level=level)
 
     host = _parse_host(args.host)
-    config_base_path = "/config"
+    config_base_path = str(paths.config_base())
 
     # Announce ourselves first, before doing any tunnel work, so the log reads
     # top-to-bottom in the order things actually happen.
     logger.info("hactl-companion v%s starting (port %s)", __version__, args.port)
+    logger.info("HA config dir: %s", config_base_path)
     supervisor_token_status = (
         "present" if os.environ.get("SUPERVISOR_TOKEN") else "MISSING (direct access via SUPERVISOR_TOKEN will fail)"
     )
