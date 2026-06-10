@@ -13,6 +13,8 @@ from pathlib import Path
 
 from aiohttp import web
 
+from companion import paths
+
 logger = logging.getLogger(__name__)
 
 _TUNNEL_RE = re.compile(r"^[a-zA-Z0-9_]{1,15}$")
@@ -21,11 +23,12 @@ _TUNNEL_RE = re.compile(r"^[a-zA-Z0-9_]{1,15}$")
 # every add-on restart, so it must never be the source of truth.
 _WG_CONFIG_DIR = Path("/etc/wireguard")
 
-# Source of truth: persistent, lives in the mapped HA /config volume so it
+# Source of truth: persistent, lives in the mapped HA config volume (mounted
+# at /homeassistant on Supervisor, /config in the dev/integration stack) so it
 # survives restarts and is viewable/editable via the File Editor add-on. Both
 # the REST endpoint (hactl) and the startup supervisor read/write here, which
 # keeps the two in sync. /etc/wireguard is regenerated from this on demand.
-_PERSIST_DIR = Path("/config/hactl")
+_PERSIST_DIR = paths.hactl_dir()
 
 
 def _persist_path(tunnel: str, persist_dir: Path = _PERSIST_DIR) -> Path:

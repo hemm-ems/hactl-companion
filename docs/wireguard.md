@@ -12,8 +12,13 @@ The declarative path exists because `hactl` normally talks to HA *over* the VPN 
 ## Source of truth: `/config/hactl/<tunnel>.conf`
 
 The tunnel config lives in **one** persistent place — `/config/hactl/<tunnel>.conf` (in the
-mapped HA `/config` volume). Both the add-on's startup supervisor **and** the `hactl` CLI
+mapped HA config volume, as the user sees it via File Editor / Samba). Both the add-on's
+startup supervisor **and** the `hactl` CLI
 (`POST /v1/wireguard/config`) read and write this file, so they never drift apart.
+Note for developers: *inside* the add-on container, Supervisor mounts the HA config volume
+at `/homeassistant` (the `homeassistant_config` map type); `/config` is the add-on's own
+config folder. `companion.paths` detects the right mount at startup — the dev/integration
+stack, which mounts HA config at `/config`, keeps working via the fallback.
 `/etc/wireguard/<tunnel>.conf` is *ephemeral* (wiped on every restart) and is regenerated
 from the canonical file on demand — so it's never the source of truth.
 

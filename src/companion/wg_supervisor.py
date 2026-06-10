@@ -20,12 +20,12 @@ from pathlib import Path
 
 from aiohttp import web
 
-from companion import wg, wg_monitor
+from companion import paths, wg, wg_monitor
 
 logger = logging.getLogger(__name__)
 
 _OPTIONS_PATH = Path("/data/options.json")
-_FALLBACK_DIR = Path("/config/hactl")
+_FALLBACK_DIR = paths.hactl_dir()
 
 # How long to wait for the first handshake before warning the tunnel didn't connect.
 _CONNECT_TIMEOUT: float = 15.0
