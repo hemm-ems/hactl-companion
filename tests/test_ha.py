@@ -6,6 +6,8 @@ from unittest.mock import patch
 
 from aiohttp.test_utils import TestClient
 
+from companion import core_api
+
 
 async def test_reload_valid_domain(
     client: TestClient, auth_headers: dict[str, str], core_api_calls: list[tuple[str, str]]
@@ -48,15 +50,32 @@ async def test_check_config_ok(client: TestClient, auth_headers: dict[str, str])
     assert resp.status == 200
     data = await resp.json()
     assert data["status"] == "ok"
+    assert data["valid"] is True
+    assert data["errors"] == ""
 
 
 async def test_check_config_invalid(client: TestClient, auth_headers: dict[str, str]) -> None:
-    """Invalid config should return 502 with the error text."""
+    """An invalid config is a completed check: 200 with valid=false, not 5xx."""
 
     async def _invalid() -> tuple[bool, str]:
         return False, "broken automation"
 
     with patch("companion.core_api.check_config", _invalid):
         resp = await client.post("/v1/ha/check-config", headers=auth_headers)
+        assert resp.status == 200
+        data = await resp.json()
+        assert data["status"] == "invalid"
+        assert data["valid"] is False
+        assert "broken automation" in data["errors"]
+
+
+async def test_check_config_core_unreachable(client: TestClient, auth_headers: dict[str, str]) -> None:
+    """Core API transport failure should return 502 with the reason."""
+
+    async def _unreachable() -> tuple[bool, str]:
+        raise core_api.CoreAPIUnavailableError("connection refused")
+
+    with patch("companion.core_api.check_config", _unreachable):
+        resp = await client.post("/v1/ha/check-config", headers=auth_headers)
         assert resp.status == 502
-        assert "broken automation" in await resp.text()
+        assert "connection refused" in await resp.text()

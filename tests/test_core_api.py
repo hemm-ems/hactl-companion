@@ -9,7 +9,7 @@ from aiohttp import web
 
 # Bind the real implementations at import time: the autouse core_api_calls
 # fixture replaces the module attributes, but these references stay intact.
-from companion.core_api import call_service, check_config
+from companion.core_api import CoreAPIUnavailableError, call_service, check_config
 
 TOKEN = "core-api-test-token"
 
@@ -89,6 +89,11 @@ async def test_check_config_invalid(aiohttp_server: Any, core_env: pytest.Monkey
 
 async def test_check_config_no_token(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("SUPERVISOR_TOKEN", raising=False)
-    valid, errors = await check_config()
-    assert valid is False
-    assert "SUPERVISOR_TOKEN" in errors
+    with pytest.raises(CoreAPIUnavailableError, match="SUPERVISOR_TOKEN"):
+        await check_config()
+
+
+async def test_check_config_unreachable(core_env: pytest.MonkeyPatch) -> None:
+    core_env.setenv("CORE_API_URL", "http://127.0.0.1:1")
+    with pytest.raises(CoreAPIUnavailableError):
+        await check_config()

@@ -54,12 +54,18 @@ async def post_reload(request: web.Request) -> web.Response:
 
 
 async def post_check_config(request: web.Request) -> web.Response:
-    """POST /v1/ha/check-config — validate HA configuration via the core API."""
-    valid, errors = await core_api.check_config()
-    if not valid:
-        raise web.HTTPBadGateway(text=f"Config check failed: {errors}")
+    """POST /v1/ha/check-config — validate HA configuration via the core API.
 
-    return web.json_response({"status": "ok"})
+    200 with {"valid": ...} whenever the check itself completed; 502 only
+    when the core API was unreachable. An invalid config is a result, not a
+    gateway error — clients retry 5xx, and the check is expensive.
+    """
+    try:
+        valid, errors = await core_api.check_config()
+    except core_api.CoreAPIUnavailableError as exc:
+        raise web.HTTPBadGateway(text=f"Config check failed: {exc}") from exc
+
+    return web.json_response({"status": "ok" if valid else "invalid", "valid": valid, "errors": errors})
 
 
 routes: list[RouteDef] = [

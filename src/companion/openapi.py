@@ -97,6 +97,14 @@ _RELOAD_SCHEMA = {
     "type": "object",
     "properties": {"status": {"type": "string"}, "domain": {"type": "string"}},
 }
+_CHECK_CONFIG_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "status": {"type": "string"},
+        "valid": {"type": "boolean"},
+        "errors": {"type": "string"},
+    },
+}
 _CREATED_SCHEMA = {
     "type": "object",
     "properties": {"status": {"type": "string"}, "id": {"type": "string"}},
@@ -486,7 +494,7 @@ ENDPOINT_META: dict[tuple[str, str], dict[str, object]] = {
     ("POST", "/v1/ha/check-config"): {
         "summary": "Validate HA configuration via the core API",
         "tags": ["ha"],
-        "response_schema": _SIMPLE_STATUS_SCHEMA,
+        "response_schema": _CHECK_CONFIG_SCHEMA,
     },
     # WireGuard
     ("POST", "/v1/wireguard/config"): {

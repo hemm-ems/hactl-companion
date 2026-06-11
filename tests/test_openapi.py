@@ -120,7 +120,6 @@ _SIMPLE_STATUS_ENDPOINTS = [
     ("DELETE", "/v1/config/automation"),
     ("PUT", "/v1/config/helper"),
     ("DELETE", "/v1/config/helper"),
-    ("POST", "/v1/ha/check-config"),
 ]
 
 
