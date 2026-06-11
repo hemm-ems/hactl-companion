@@ -664,7 +664,7 @@ paths:
           type: string
   /v1/ha/check-config:
     post:
-      summary: Validate HA configuration via ha CLI
+      summary: Validate HA configuration via the core API
       tags:
       - ha
       responses:

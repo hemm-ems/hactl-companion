@@ -131,12 +131,19 @@ async def test_update_helper_not_found(client: TestClient, auth_headers: dict[st
     assert resp.status == 404
 
 
-async def test_delete_helper(client: TestClient, auth_headers: dict[str, str], config_dir: Path) -> None:
-    """DELETE should remove a helper and create backup."""
+async def test_delete_helper(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    config_dir: Path,
+    core_api_calls: list[tuple[str, str]],
+) -> None:
+    """DELETE should remove a helper and trigger a domain reload."""
     resp = await client.delete("/v1/config/helper?id=vacation_mode", headers=auth_headers)
     assert resp.status == 200
     data = await resp.json()
     assert data["status"] == "deleted"
+    assert data["reloaded"] is True
+    assert ("input_boolean", "reload") in core_api_calls
 
     # Verify it's gone
     resp2 = await client.get("/v1/config/helper?id=vacation_mode", headers=auth_headers)
