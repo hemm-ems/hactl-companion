@@ -20,6 +20,10 @@ DEFAULT_CORE_API_URL = "http://supervisor/core/api"
 _TIMEOUT = aiohttp.ClientTimeout(total=30)
 
 
+class CoreAPIUnavailableError(Exception):
+    """The HA core API could not be reached (transport failure, not a result)."""
+
+
 async def call_service(domain: str, service: str, data: dict[str, Any] | None = None) -> bool:
     """Call an HA service via the core API. Returns True on success."""
     token = os.environ.get("SUPERVISOR_TOKEN", "")
@@ -58,11 +62,13 @@ async def reload_domain(domain: str) -> bool:
 async def check_config() -> tuple[bool, str]:
     """Validate HA core configuration via POST /config/core/check_config.
 
-    Returns (valid, errors). On transport failure, returns (False, <reason>).
+    Returns (valid, errors) when the check completed. Raises
+    CoreAPIUnavailableError when the core API itself could not be reached,
+    so callers can distinguish "config is invalid" from "could not check".
     """
     token = os.environ.get("SUPERVISOR_TOKEN", "")
     if not token:
-        return False, "SUPERVISOR_TOKEN not set"
+        raise CoreAPIUnavailableError("SUPERVISOR_TOKEN not set")
 
     base = os.environ.get("CORE_API_URL", DEFAULT_CORE_API_URL).rstrip("/")
     url = f"{base}/config/core/check_config"
@@ -73,10 +79,10 @@ async def check_config() -> tuple[bool, str]:
         ):
             if resp.status >= 400:
                 body = await resp.text()
-                return False, f"HTTP {resp.status}: {body[:200]}"
+                raise CoreAPIUnavailableError(f"HTTP {resp.status}: {body[:200]}")
             result = await resp.json()
     except (aiohttp.ClientError, TimeoutError, OSError) as exc:
-        return False, str(exc)
+        raise CoreAPIUnavailableError(str(exc)) from exc
 
     if result.get("result") == "valid":
         return True, ""

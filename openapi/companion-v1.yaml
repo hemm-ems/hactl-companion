@@ -672,7 +672,15 @@ paths:
           description: Successful response
           content:
             application/json:
-              schema: *id001
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  valid:
+                    type: boolean
+                  errors:
+                    type: string
   /v1/wireguard/config:
     post:
       summary: Push WireGuard tunnel configuration
