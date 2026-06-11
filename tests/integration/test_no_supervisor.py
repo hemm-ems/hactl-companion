@@ -1,17 +1,17 @@
-"""Integration tests — endpoints that require ha CLI (should return 502 gracefully)."""
+"""Integration tests — endpoints that need the HA core API (should return 502 gracefully without a Supervisor)."""
 
 from __future__ import annotations
 
 import requests
 
 
-class TestHaCli502:
-    """HA CLI bridge endpoints should return 502 when ha CLI is not available in the container."""
+class TestCoreApi502:
+    """Core-API-backed endpoints should return 502 when no Supervisor proxy is reachable."""
 
     def test_reload_automation(self, companion_url: str, auth_headers: dict[str, str]) -> None:
         r = requests.post(f"{companion_url}/v1/ha/reload/automation", headers=auth_headers, timeout=10)
         assert r.status_code == 502
-        assert "ha CLI not available" in r.text
+        assert "Reload failed" in r.text
 
     def test_reload_script(self, companion_url: str, auth_headers: dict[str, str]) -> None:
         r = requests.post(f"{companion_url}/v1/ha/reload/script", headers=auth_headers, timeout=10)

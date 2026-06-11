@@ -13,6 +13,7 @@ from typing import Any
 from aiohttp import web
 from ruamel.yaml import YAML
 
+from companion import core_api
 from companion.routes.config import _resolve_config_path
 
 yaml = YAML()
@@ -161,7 +162,8 @@ async def post_helper(request: web.Request) -> web.Response:
 
     data[helper_id] = helper_body
     _save_helpers(target, data)
-    return web.json_response({"status": "created", "id": helper_id}, status=201)
+    reloaded = await core_api.reload_domain(domain)
+    return web.json_response({"status": "created", "id": helper_id, "reloaded": reloaded}, status=201)
 
 
 async def put_helper(request: web.Request) -> web.Response:
@@ -189,7 +191,8 @@ async def put_helper(request: web.Request) -> web.Response:
         if helper_id in data:
             data[helper_id] = new_body
             _save_helpers(target, data)
-            return web.json_response({"status": "applied"})
+            reloaded = await core_api.reload_domain(domain)
+            return web.json_response({"status": "applied", "reloaded": reloaded})
 
     raise web.HTTPNotFound(text=f"Helper not found: {helper_id}")
 
@@ -207,7 +210,8 @@ async def delete_helper(request: web.Request) -> web.Response:
         if helper_id in data:
             del data[helper_id]
             _save_helpers(target, data)
-            return web.json_response({"status": "deleted"})
+            reloaded = await core_api.reload_domain(domain)
+            return web.json_response({"status": "deleted", "reloaded": reloaded})
 
     raise web.HTTPNotFound(text=f"Helper not found: {helper_id}")
 

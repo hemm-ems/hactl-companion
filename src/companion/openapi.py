@@ -474,7 +474,7 @@ ENDPOINT_META: dict[tuple[str, str], dict[str, object]] = {
         ],
         "response_schema": _SIMPLE_STATUS_SCHEMA,
     },
-    # HA CLI
+    # HA core API
     ("POST", "/v1/ha/reload/{domain}"): {
         "summary": "Reload an HA integration domain",
         "tags": ["ha"],
@@ -484,7 +484,7 @@ ENDPOINT_META: dict[tuple[str, str], dict[str, object]] = {
         "response_schema": _RELOAD_SCHEMA,
     },
     ("POST", "/v1/ha/check-config"): {
-        "summary": "Validate HA configuration via ha CLI",
+        "summary": "Validate HA configuration via the core API",
         "tags": ["ha"],
         "response_schema": _SIMPLE_STATUS_SCHEMA,
     },

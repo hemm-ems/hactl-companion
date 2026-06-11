@@ -93,6 +93,7 @@ action:
     assert resp.status == 200
     data = await resp.json()
     assert data["status"] == "applied"
+    assert data["reloaded"] is True
 
     # Verify backup
     backups = list(config_dir.glob("automations.yaml.bak.*"))
@@ -104,8 +105,10 @@ action:
     assert "Updated" in data2["content"]
 
 
-async def test_create_automation(client: TestClient, auth_headers: dict[str, str]) -> None:
-    """POST should create a new automation."""
+async def test_create_automation(
+    client: TestClient, auth_headers: dict[str, str], core_api_calls: list[tuple[str, str]]
+) -> None:
+    """POST should create a new automation and trigger a reload."""
     new_body = """id: automation.new_test
 alias: New Test Automation
 trigger:
@@ -124,6 +127,8 @@ action:
     assert resp.status == 201
     data = await resp.json()
     assert data["id"] == "automation.new_test"
+    assert data["reloaded"] is True
+    assert ("automation", "reload") in core_api_calls
 
 
 async def test_create_automation_duplicate(client: TestClient, auth_headers: dict[str, str]) -> None:
@@ -153,12 +158,16 @@ action: []
     assert resp.status == 400
 
 
-async def test_delete_automation(client: TestClient, auth_headers: dict[str, str]) -> None:
-    """DELETE should remove the automation."""
+async def test_delete_automation(
+    client: TestClient, auth_headers: dict[str, str], core_api_calls: list[tuple[str, str]]
+) -> None:
+    """DELETE should remove the automation and trigger a reload."""
     resp = await client.delete("/v1/config/automation?id=automation.sunset_lights", headers=auth_headers)
     assert resp.status == 200
     data = await resp.json()
     assert data["status"] == "deleted"
+    assert data["reloaded"] is True
+    assert ("automation", "reload") in core_api_calls
 
     resp2 = await client.get("/v1/config/automation?id=automation.sunset_lights", headers=auth_headers)
     assert resp2.status == 404

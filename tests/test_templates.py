@@ -136,12 +136,16 @@ state: "{{ 0 }}"
     assert resp.status == 400
 
 
-async def test_delete_template(client: TestClient, auth_headers: dict[str, str]) -> None:
-    """DELETE should remove the template."""
+async def test_delete_template(
+    client: TestClient, auth_headers: dict[str, str], core_api_calls: list[tuple[str, str]]
+) -> None:
+    """DELETE should remove the template and trigger a reload."""
     resp = await client.delete("/v1/config/template?id=tpl_avg_temperature", headers=auth_headers)
     assert resp.status == 200
     data = await resp.json()
     assert data["status"] == "deleted"
+    assert data["reloaded"] is True
+    assert ("template", "reload") in core_api_calls
 
     # Verify it's gone
     resp2 = await client.get("/v1/config/template?id=tpl_avg_temperature", headers=auth_headers)
