@@ -9,6 +9,7 @@ from typing import Any
 from aiohttp import web
 from ruamel.yaml import YAML
 
+from companion import core_api
 from companion.routes.config import _resolve_config_path
 
 yaml = YAML()
@@ -168,7 +169,8 @@ async def put_template(request: web.Request) -> web.Response:
 
             data[s["group_idx"]][s["domain"]][s["item_idx"]] = new_item
             _save_templates(target, data)
-            return web.json_response({"status": "applied"})
+            reloaded = await core_api.reload_domain("template")
+            return web.json_response({"status": "applied", "reloaded": reloaded})
 
     raise web.HTTPNotFound(text=f"Template not found: {uid}")
 
@@ -207,13 +209,17 @@ async def post_template(request: web.Request) -> web.Response:
     for group in data:
         if isinstance(group, dict) and domain in group:
             group[domain].append(new_item)
-            _save_templates(target, data)
-            return web.json_response({"status": "created", "unique_id": new_item["unique_id"]}, status=201)
+            break
+    else:
+        # No existing group for this domain — create one
+        data.append({domain: [new_item]})
 
-    # No existing group for this domain — create one
-    data.append({domain: [new_item]})
     _save_templates(target, data)
-    return web.json_response({"status": "created", "unique_id": new_item["unique_id"]}, status=201)
+    reloaded = await core_api.reload_domain("template")
+    return web.json_response(
+        {"status": "created", "unique_id": new_item["unique_id"], "reloaded": reloaded},
+        status=201,
+    )
 
 
 async def delete_template(request: web.Request) -> web.Response:
@@ -236,7 +242,8 @@ async def delete_template(request: web.Request) -> web.Response:
                 if not group:
                     data.pop(s["group_idx"])
             _save_templates(target, data)
-            return web.json_response({"status": "deleted"})
+            reloaded = await core_api.reload_domain("template")
+            return web.json_response({"status": "deleted", "reloaded": reloaded})
 
     raise web.HTTPNotFound(text=f"Template not found: {uid}")
 

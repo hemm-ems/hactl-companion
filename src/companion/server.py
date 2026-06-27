@@ -11,7 +11,19 @@ from typing import Any
 from aiohttp import web
 
 from companion import __version__
-from companion.routes import automations, config, ha, health, helpers, root, scripts, status, templates, wireguard
+from companion.routes import (
+    automations,
+    config,
+    ha,
+    health,
+    helpers,
+    logs,
+    root,
+    scripts,
+    status,
+    templates,
+    wireguard,
+)
 
 logger = logging.getLogger("companion.access")
 
@@ -110,5 +122,6 @@ def create_app(config_base_path: str = "/config") -> web.Application:
     register_routes(app, helpers)
     register_routes(app, ha)
     register_routes(app, wireguard)
+    register_routes(app, logs)
 
     return app

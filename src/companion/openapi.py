@@ -97,6 +97,14 @@ _RELOAD_SCHEMA = {
     "type": "object",
     "properties": {"status": {"type": "string"}, "domain": {"type": "string"}},
 }
+_CHECK_CONFIG_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "status": {"type": "string"},
+        "valid": {"type": "boolean"},
+        "errors": {"type": "string"},
+    },
+}
 _CREATED_SCHEMA = {
     "type": "object",
     "properties": {"status": {"type": "string"}, "id": {"type": "string"}},
@@ -135,7 +143,6 @@ _WG_START_RESPONSE = {
     "properties": {
         "status": {"type": "string"},
         "tunnel": {"type": "string"},
-        "auto_enable": {"type": "boolean"},
     },
 }
 _WG_STOP_RESPONSE = {
@@ -147,7 +154,6 @@ _WG_STATUS_RESPONSE = {
     "properties": {
         "tunnel": {"type": "string"},
         "state": {"type": "string", "enum": ["active", "inactive"]},
-        "auto_enable": {"type": "boolean"},
         "interface": {
             "type": "object",
             "properties": {
@@ -164,8 +170,43 @@ _WG_STATUS_RESPONSE = {
                     "endpoint": {"type": "string"},
                     "allowed_ips": {"type": "string"},
                     "latest_handshake": {"type": "string"},
+                    "latest_handshake_secs": {"type": "integer", "nullable": True},
                     "transfer_rx": {"type": "string"},
                     "transfer_tx": {"type": "string"},
+                    "transfer_rx_bytes": {"type": "integer"},
+                    "transfer_tx_bytes": {"type": "integer"},
+                },
+            },
+        },
+        "monitor": {
+            "type": "object",
+            "description": "Live dyndns re-resolution monitor state.",
+            "properties": {
+                "running": {"type": "boolean"},
+                "hostnames": {"type": "array", "items": {"type": "string"}},
+                "healthy": {"type": "boolean"},
+                "resolved": {"type": "object", "additionalProperties": {"type": "string"}},
+                "last_check_secs_ago": {"type": "integer", "nullable": True},
+                "last_reresolve_secs_ago": {"type": "integer", "nullable": True},
+                "attempt": {"type": "integer"},
+                "next_retry_secs": {"type": "integer", "nullable": True},
+                "last_error": {"type": "string", "nullable": True},
+            },
+        },
+    },
+}
+_LOGS_RESPONSE = {
+    "type": "object",
+    "properties": {
+        "entries": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "ts": {"type": "number"},
+                    "level": {"type": "string"},
+                    "name": {"type": "string"},
+                    "message": {"type": "string"},
                 },
             },
         },
@@ -441,7 +482,7 @@ ENDPOINT_META: dict[tuple[str, str], dict[str, object]] = {
         ],
         "response_schema": _SIMPLE_STATUS_SCHEMA,
     },
-    # HA CLI
+    # HA core API
     ("POST", "/v1/ha/reload/{domain}"): {
         "summary": "Reload an HA integration domain",
         "tags": ["ha"],
@@ -451,9 +492,9 @@ ENDPOINT_META: dict[tuple[str, str], dict[str, object]] = {
         "response_schema": _RELOAD_SCHEMA,
     },
     ("POST", "/v1/ha/check-config"): {
-        "summary": "Validate HA configuration via ha CLI",
+        "summary": "Validate HA configuration via the core API",
         "tags": ["ha"],
-        "response_schema": _SIMPLE_STATUS_SCHEMA,
+        "response_schema": _CHECK_CONFIG_SCHEMA,
     },
     # WireGuard
     ("POST", "/v1/wireguard/config"): {
@@ -470,7 +511,6 @@ ENDPOINT_META: dict[tuple[str, str], dict[str, object]] = {
         "tags": ["wireguard"],
         "parameters": [
             {"name": "tunnel", "in": "query", "required": False, "schema": {"type": "string", "default": "wg0"}},
-            {"name": "auto_enable", "in": "query", "required": False, "schema": {"type": "string", "default": "false"}},
         ],
         "response_schema": _WG_START_RESPONSE,
     },
@@ -479,12 +519,6 @@ ENDPOINT_META: dict[tuple[str, str], dict[str, object]] = {
         "tags": ["wireguard"],
         "parameters": [
             {"name": "tunnel", "in": "query", "required": False, "schema": {"type": "string", "default": "wg0"}},
-            {
-                "name": "auto_disable",
-                "in": "query",
-                "required": False,
-                "schema": {"type": "string", "default": "false"},
-            },
         ],
         "response_schema": _WG_STOP_RESPONSE,
     },
@@ -495,6 +529,18 @@ ENDPOINT_META: dict[tuple[str, str], dict[str, object]] = {
             {"name": "tunnel", "in": "query", "required": False, "schema": {"type": "string", "default": "wg0"}},
         ],
         "response_schema": _WG_STATUS_RESPONSE,
+    },
+    # Logs
+    ("GET", "/v1/logs"): {
+        "summary": "Query recent companion log records from the in-memory ring buffer",
+        "tags": ["logs"],
+        "parameters": [
+            {"name": "component", "in": "query", "required": False, "schema": {"type": "string"}},
+            {"name": "level", "in": "query", "required": False, "schema": {"type": "string"}},
+            {"name": "since", "in": "query", "required": False, "schema": {"type": "string"}},
+            {"name": "limit", "in": "query", "required": False, "schema": {"type": "integer"}},
+        ],
+        "response_schema": _LOGS_RESPONSE,
     },
 }
 

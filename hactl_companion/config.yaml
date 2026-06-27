@@ -1,6 +1,6 @@
 # https://developers.home-assistant.io/docs/apps/configuration
 name: "hactl companion"
-version: "2026.5.12"
+version: "2026.6.7"
 slug: hactl_companion
 description: "Bridge for the hactl CLI — config file access, Supervisor API, and HA CLI commands"
 url: "https://github.com/hemm-ems/hactl-companion/blob/main/hactl_companion/DOCS.md"
@@ -22,13 +22,11 @@ map:
 options:
   vpn:
     enabled: false
-    autostart: false
     tunnel: wg0
     config: ""
 schema:
   vpn:
     enabled: bool
-    autostart: bool
     tunnel: "match(^[a-zA-Z0-9_]{1,15}$)"
     config: str?
 image: "ghcr.io/hemm-ems/hactl-companion"

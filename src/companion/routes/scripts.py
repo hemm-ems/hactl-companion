@@ -9,6 +9,7 @@ from typing import Any
 from aiohttp import web
 from ruamel.yaml import YAML
 
+from companion import core_api
 from companion.routes.config import _resolve_config_path
 
 yaml = YAML()
@@ -185,7 +186,8 @@ async def put_script(request: web.Request) -> web.Response:
 
     data[script_id] = script_body
     _save_scripts(target, data)
-    return web.json_response({"status": "applied"})
+    reloaded = await core_api.reload_domain("script")
+    return web.json_response({"status": "applied", "reloaded": reloaded})
 
 
 async def post_script(request: web.Request) -> web.Response:
@@ -212,7 +214,8 @@ async def post_script(request: web.Request) -> web.Response:
 
     data[script_id] = script_body
     _save_scripts(target, data)
-    return web.json_response({"status": "created", "id": script_id}, status=201)
+    reloaded = await core_api.reload_domain("script")
+    return web.json_response({"status": "created", "id": script_id, "reloaded": reloaded}, status=201)
 
 
 async def delete_script(request: web.Request) -> web.Response:
@@ -228,7 +231,8 @@ async def delete_script(request: web.Request) -> web.Response:
 
     del data[script_id]
     _save_scripts(target, data)
-    return web.json_response({"status": "deleted"})
+    reloaded = await core_api.reload_domain("script")
+    return web.json_response({"status": "deleted", "reloaded": reloaded})
 
 
 routes: list[RouteDef] = [

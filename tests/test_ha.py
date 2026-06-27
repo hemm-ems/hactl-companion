@@ -1,25 +1,24 @@
-"""Tests for HA CLI reload endpoint."""
+"""Tests for HA reload and check-config endpoints (core API backed)."""
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 from aiohttp.test_utils import TestClient
 
+from companion import core_api
 
-async def test_reload_valid_domain(client: TestClient, auth_headers: dict[str, str]) -> None:
-    """POST /v1/ha/reload/{domain} should call ha CLI and return ok."""
-    mock_proc = AsyncMock()
-    mock_proc.returncode = 0
-    mock_proc.communicate.return_value = (b"", b"")
 
-    with patch("companion.routes.ha.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
-        resp = await client.post("/v1/ha/reload/automation", headers=auth_headers)
-        assert resp.status == 200
-        data = await resp.json()
-        assert data["status"] == "ok"
-        assert data["domain"] == "automation"
-        mock_exec.assert_called_once()
+async def test_reload_valid_domain(
+    client: TestClient, auth_headers: dict[str, str], core_api_calls: list[tuple[str, str]]
+) -> None:
+    """POST /v1/ha/reload/{domain} should call the core API and return ok."""
+    resp = await client.post("/v1/ha/reload/automation", headers=auth_headers)
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["status"] == "ok"
+    assert data["domain"] == "automation"
+    assert ("automation", "reload") in core_api_calls
 
 
 async def test_reload_disallowed_domain(client: TestClient, auth_headers: dict[str, str]) -> None:
@@ -34,19 +33,49 @@ async def test_reload_invalid_domain_chars(client: TestClient, auth_headers: dic
     assert resp.status == 400
 
 
-async def test_reload_subprocess_failure(client: TestClient, auth_headers: dict[str, str]) -> None:
-    """Non-zero exit code from ha CLI should return 502."""
-    mock_proc = AsyncMock()
-    mock_proc.returncode = 1
-    mock_proc.communicate.return_value = (b"", b"reload failed\n")
+async def test_reload_core_api_failure(client: TestClient, auth_headers: dict[str, str]) -> None:
+    """Failed reload service call should return 502."""
 
-    with patch("companion.routes.ha.asyncio.create_subprocess_exec", return_value=mock_proc):
+    async def _fail(domain: str, service: str, data: object = None) -> bool:
+        return False
+
+    with patch("companion.core_api.call_service", _fail):
         resp = await client.post("/v1/ha/reload/automation", headers=auth_headers)
         assert resp.status == 502
 
 
-async def test_reload_ha_cli_not_available(client: TestClient, auth_headers: dict[str, str]) -> None:
-    """Missing ha CLI should return 502."""
-    with patch("companion.routes.ha.asyncio.create_subprocess_exec", side_effect=FileNotFoundError):
-        resp = await client.post("/v1/ha/reload/automation", headers=auth_headers)
+async def test_check_config_ok(client: TestClient, auth_headers: dict[str, str]) -> None:
+    """POST /v1/ha/check-config should return ok when config is valid."""
+    resp = await client.post("/v1/ha/check-config", headers=auth_headers)
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["status"] == "ok"
+    assert data["valid"] is True
+    assert data["errors"] == ""
+
+
+async def test_check_config_invalid(client: TestClient, auth_headers: dict[str, str]) -> None:
+    """An invalid config is a completed check: 200 with valid=false, not 5xx."""
+
+    async def _invalid() -> tuple[bool, str]:
+        return False, "broken automation"
+
+    with patch("companion.core_api.check_config", _invalid):
+        resp = await client.post("/v1/ha/check-config", headers=auth_headers)
+        assert resp.status == 200
+        data = await resp.json()
+        assert data["status"] == "invalid"
+        assert data["valid"] is False
+        assert "broken automation" in data["errors"]
+
+
+async def test_check_config_core_unreachable(client: TestClient, auth_headers: dict[str, str]) -> None:
+    """Core API transport failure should return 502 with the reason."""
+
+    async def _unreachable() -> tuple[bool, str]:
+        raise core_api.CoreAPIUnavailableError("connection refused")
+
+    with patch("companion.core_api.check_config", _unreachable):
+        resp = await client.post("/v1/ha/check-config", headers=auth_headers)
         assert resp.status == 502
+        assert "connection refused" in await resp.text()

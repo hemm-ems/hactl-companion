@@ -9,10 +9,31 @@ from pathlib import Path
 import pytest
 from aiohttp.test_utils import TestClient
 
+from companion import core_api
 from companion.server import create_app
 
 FIXTURES_DIR = Path(__file__).parent.parent / "testdata" / "fixtures"
 TEST_TOKEN = "test-supervisor-token-12345"
+
+
+@pytest.fixture(autouse=True)
+def core_api_calls(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
+    """Fake the HA core API so tests never make real network calls.
+
+    Records (domain, service) tuples; returns success for everything.
+    """
+    calls: list[tuple[str, str]] = []
+
+    async def _fake_call_service(domain: str, service: str, data: object = None) -> bool:
+        calls.append((domain, service))
+        return True
+
+    async def _fake_check_config() -> tuple[bool, str]:
+        return True, ""
+
+    monkeypatch.setattr(core_api, "call_service", _fake_call_service)
+    monkeypatch.setattr(core_api, "check_config", _fake_check_config)
+    return calls
 
 
 @pytest.fixture

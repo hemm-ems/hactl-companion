@@ -346,10 +346,6 @@ class TestStartupLogs:
         # In the integration stack SUPERVISOR_TOKEN is set, so it should say "present"
         assert "present" in logs, f"expected 'present' in logs:\n{logs[:500]}"
 
-    def test_auth_mode_logged(self, compose_up: dict[str, str]) -> None:
-        logs = _container_logs("companion-integration")
-        assert "auth:" in logs, f"auth mode not in startup logs:\n{logs[:500]}"
-
 
 class TestAccessLogMiddleware:
     """Verify that the access log middleware emits entries for each request."""

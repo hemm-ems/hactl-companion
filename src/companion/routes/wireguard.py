@@ -8,17 +8,17 @@ from dataclasses import dataclass
 
 from aiohttp import web
 
+from companion import wg_monitor
 from companion.wg import (
-    _WG_CONFIG_DIR,
     _conf_from_json,
-    _disable_auto_start,
-    _enable_auto_start,
-    _is_auto_enabled,
     _is_interface_up,
-    _parse_wg_show,
+    _parse_wg_dump,
+    _resolve_endpoint_hostnames,
     _run_wg_cmd,
-    _validate_conf,
+    _runtime_path,
     _validate_tunnel,
+    materialize,
+    save_config,
 )
 
 logger = logging.getLogger(__name__)
@@ -54,13 +54,9 @@ async def post_config(request: web.Request) -> web.Response:
     else:
         conf_text = body.decode("utf-8", errors="replace")
 
-    _validate_conf(conf_text)
-
-    conf_dir = _WG_CONFIG_DIR
-    conf_dir.mkdir(parents=True, exist_ok=True)
-    conf_path = conf_dir / f"{tunnel}.conf"
-    conf_path.write_text(conf_text, encoding="utf-8")
-    conf_path.chmod(0o600)
+    # Persist to the canonical location (survives restarts; shared with the
+    # startup supervisor) and mirror into /etc/wireguard. save_config validates.
+    save_config(tunnel, conf_text)
 
     logger.info("WireGuard config written for tunnel %s", tunnel)
     return web.json_response({"status": "configured", "tunnel": tunnel})
@@ -73,18 +69,25 @@ async def post_start(request: web.Request) -> web.Response:
     if await _is_interface_up(tunnel):
         raise web.HTTPConflict(text=f"Tunnel {tunnel} is already active")
 
-    auto_enable = request.query.get("auto_enable", "false").lower() in ("true", "1", "yes")
+    # Regenerate /etc/wireguard from the persistent config (it may have been
+    # wiped by a restart). No persistent config → nothing to start.
+    if not materialize(tunnel):
+        raise web.HTTPNotFound(text=f"No config for tunnel {tunnel} — push one via POST /v1/wireguard/config first")
+
+    conf_text = _runtime_path(tunnel).read_text(encoding="utf-8")
+    failed = await _resolve_endpoint_hostnames(conf_text)
+    if failed:
+        logger.error("DNS resolution failed for endpoint(s): %s", ", ".join(failed))
+        raise web.HTTPBadGateway(text=f"DNS resolution failed for endpoint(s): {', '.join(failed)}")
 
     rc, _, stderr = await _run_wg_cmd("wg-quick", "up", tunnel)
     if rc != 0:
         logger.error("wg-quick up %s failed (rc=%s): %s", tunnel, rc, stderr.strip())
         raise web.HTTPInternalServerError(text=f"Failed to start tunnel: {stderr.strip()}")
 
-    if auto_enable:
-        await _enable_auto_start(tunnel)
-
-    logger.info("WireGuard tunnel %s started (auto_enable=%s)", tunnel, auto_enable)
-    return web.json_response({"status": "started", "tunnel": tunnel, "auto_enable": auto_enable})
+    wg_monitor.start_monitor(tunnel, conf_text)
+    logger.info("WireGuard tunnel %s started", tunnel)
+    return web.json_response({"status": "started", "tunnel": tunnel})
 
 
 async def post_stop(request: web.Request) -> web.Response:
@@ -94,17 +97,13 @@ async def post_stop(request: web.Request) -> web.Response:
     if not await _is_interface_up(tunnel):
         raise web.HTTPConflict(text=f"Tunnel {tunnel} is not active")
 
-    auto_disable = request.query.get("auto_disable", "false").lower() in ("true", "1", "yes")
-
+    wg_monitor.stop_monitor(tunnel)
     rc, _, stderr = await _run_wg_cmd("wg-quick", "down", tunnel)
     if rc != 0:
         logger.error("wg-quick down %s failed (rc=%s): %s", tunnel, rc, stderr.strip())
         raise web.HTTPInternalServerError(text=f"Failed to stop tunnel: {stderr.strip()}")
 
-    if auto_disable:
-        await _disable_auto_start(tunnel)
-
-    logger.info("WireGuard tunnel %s stopped (auto_disable=%s)", tunnel, auto_disable)
+    logger.info("WireGuard tunnel %s stopped", tunnel)
     return web.json_response({"status": "stopped", "tunnel": tunnel})
 
 
@@ -115,18 +114,17 @@ async def get_status(request: web.Request) -> web.Response:
     if not await _is_interface_up(tunnel):
         return web.json_response({"tunnel": tunnel, "state": "inactive"})
 
-    rc, stdout, _ = await _run_wg_cmd("wg", "show", tunnel)
+    rc, stdout, _ = await _run_wg_cmd("wg", "show", tunnel, "dump")
     if rc != 0:
         return web.json_response({"tunnel": tunnel, "state": "inactive"})
 
-    parsed = _parse_wg_show(stdout)
-    auto = await _is_auto_enabled(tunnel)
+    parsed = _parse_wg_dump(stdout)
     return web.json_response(
         {
             "tunnel": tunnel,
             "state": "active",
-            "auto_enable": auto,
             **parsed,
+            "monitor": wg_monitor.status(tunnel),
         }
     )
 

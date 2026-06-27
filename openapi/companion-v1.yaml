@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: hactl-companion API
-  version: 2026.5.12
+  version: 2026.6.7
   description: YAML file access API for Home Assistant. Provides structured CRUD
     for templates, scripts, and automations, plus raw config file read/write 
     with !include resolution.
@@ -664,7 +664,7 @@ paths:
           type: string
   /v1/ha/check-config:
     post:
-      summary: Validate HA configuration via ha CLI
+      summary: Validate HA configuration via the core API
       tags:
       - ha
       responses:
@@ -672,7 +672,15 @@ paths:
           description: Successful response
           content:
             application/json:
-              schema: *id001
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  valid:
+                    type: boolean
+                  errors:
+                    type: string
   /v1/wireguard/config:
     post:
       summary: Push WireGuard tunnel configuration
@@ -755,8 +763,6 @@ paths:
                     type: string
                   tunnel:
                     type: string
-                  auto_enable:
-                    type: boolean
       parameters:
       - name: tunnel
         in: query
@@ -764,12 +770,6 @@ paths:
         schema:
           type: string
           default: wg0
-      - name: auto_enable
-        in: query
-        required: false
-        schema:
-          type: string
-          default: 'false'
   /v1/wireguard/stop:
     post:
       summary: Stop a WireGuard tunnel
@@ -794,12 +794,6 @@ paths:
         schema:
           type: string
           default: wg0
-      - name: auto_disable
-        in: query
-        required: false
-        schema:
-          type: string
-          default: 'false'
   /v1/wireguard/status:
     get:
       summary: Get WireGuard tunnel status
@@ -820,8 +814,6 @@ paths:
                     enum:
                     - active
                     - inactive
-                  auto_enable:
-                    type: boolean
                   interface:
                     type: object
                     properties:
@@ -842,10 +834,47 @@ paths:
                           type: string
                         latest_handshake:
                           type: string
+                        latest_handshake_secs:
+                          type: integer
+                          nullable: true
                         transfer_rx:
                           type: string
                         transfer_tx:
                           type: string
+                        transfer_rx_bytes:
+                          type: integer
+                        transfer_tx_bytes:
+                          type: integer
+                  monitor:
+                    type: object
+                    description: Live dyndns re-resolution monitor state.
+                    properties:
+                      running:
+                        type: boolean
+                      hostnames:
+                        type: array
+                        items:
+                          type: string
+                      healthy:
+                        type: boolean
+                      resolved:
+                        type: object
+                        additionalProperties:
+                          type: string
+                      last_check_secs_ago:
+                        type: integer
+                        nullable: true
+                      last_reresolve_secs_ago:
+                        type: integer
+                        nullable: true
+                      attempt:
+                        type: integer
+                      next_retry_secs:
+                        type: integer
+                        nullable: true
+                      last_error:
+                        type: string
+                        nullable: true
       parameters:
       - name: tunnel
         in: query
@@ -853,6 +882,53 @@ paths:
         schema:
           type: string
           default: wg0
+  /v1/logs:
+    get:
+      summary: Query recent companion log records from the in-memory ring buffer
+      tags:
+      - logs
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  entries:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        ts:
+                          type: number
+                        level:
+                          type: string
+                        name:
+                          type: string
+                        message:
+                          type: string
+      parameters:
+      - name: component
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: level
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: since
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
 components:
   securitySchemes:
     bearerAuth:

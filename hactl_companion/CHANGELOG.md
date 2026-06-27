@@ -1,3 +1,112 @@
+## 2026.6.7
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+
+
+**Full Changelog**: https://github.com/hemm-ems/hactl-companion/compare/v2026.6.6...v2026.6.7
+
+## 2026.6.6
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+
+
+**Full Changelog**: https://github.com/hemm-ems/hactl-companion/compare/v2026.6.5...v2026.6.6
+
+## 2026.6.5
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+
+
+**Full Changelog**: https://github.com/hemm-ems/hactl-companion/compare/v2026.6.4...v2026.6.5
+
+## 2026.6.4
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+
+
+**Full Changelog**: https://github.com/hemm-ems/hactl-companion/compare/v2026.6.3...v2026.6.4
+
+## 2026.6.3
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+
+
+**Full Changelog**: https://github.com/hemm-ems/hactl-companion/compare/v2026.6.2...v2026.6.3
+
+## 2026.6.2
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+
+
+**Full Changelog**: https://github.com/hemm-ems/hactl-companion/compare/v2026.6.1...v2026.6.2
+
+## 2026.6.1
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+## What's Changed
+### 🔧 Maintenance
+* release: bump version to 2026.6.0 by @github-actions[bot] in https://github.com/hemm-ems/hactl-companion/pull/35
+
+## New Contributors
+* @github-actions[bot] made their first contribution in https://github.com/hemm-ems/hactl-companion/pull/35
+
+**Full Changelog**: https://github.com/hemm-ems/hactl-companion/compare/v2026.6.0...v2026.6.1
+
+## 2026.6.0
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+
+
+**Full Changelog**: https://github.com/hemm-ems/hactl-companion/compare/v2026.5.17...v2026.6.0
+
+## 2026.5.17
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+
+
+**Full Changelog**: https://github.com/hemm-ems/hactl-companion/compare/v2026.5.16...v2026.5.17
+
+## 2026.5.16
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+
+
+**Full Changelog**: https://github.com/hemm-ems/hactl-companion/compare/v2026.5.15...v2026.5.16
+
+## 2026.5.15
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+
+
+**Full Changelog**: https://github.com/hemm-ems/hactl-companion/compare/v2026.5.14...v2026.5.15
+
+## 2026.5.14
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+
+
+**Full Changelog**: https://github.com/hemm-ems/hactl-companion/compare/v2026.5.13...v2026.5.14
+
+## 2026.5.13
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+
+
+**Full Changelog**: https://github.com/hemm-ems/hactl-companion/compare/v2026.5.12...v2026.5.13
+
 ## 2026.5.13
 
 ### WireGuard VPN client — declarative configuration

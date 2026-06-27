@@ -6,11 +6,16 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from companion.routes.wireguard import (
+from companion.wg import (
     _conf_from_json,
-    _parse_wg_show,
+    _humanize_age,
+    _humanize_bytes,
+    _normalize_conf,
+    _parse_wg_dump,
     _validate_conf,
     _validate_tunnel,
+    materialize,
+    save_config,
 )
 
 # ---------------------------------------------------------------------------
@@ -169,24 +174,16 @@ class TestValidateConf:
 
 
 # ---------------------------------------------------------------------------
-# _parse_wg_show
+# _parse_wg_dump / humanizers
 # ---------------------------------------------------------------------------
 
 
-class TestParseWgShow:
+class TestParseWgDump:
+    # interface: priv pub listen_port fwmark
+    # peer:      pub psk endpoint allowed_ips handshake rx tx keepalive
     def test_full_output(self) -> None:
-        output = (
-            "interface: wg0\n"
-            "  public key: AAAA\n"
-            "  listening port: 51820\n"
-            "\n"
-            "peer: BBBB\n"
-            "  endpoint: 1.2.3.4:51820\n"
-            "  allowed ips: 10.0.0.0/24\n"
-            "  latest handshake: 42 seconds ago\n"
-            "  transfer: 1.23 KiB received, 4.56 KiB sent\n"
-        )
-        result = _parse_wg_show(output)
+        output = "PRIV\tAAAA\t51820\toff\nBBBB\t(none)\t1.2.3.4:51820\t10.0.0.0/24\t1894\t1260\t4669\t25\n"
+        result = _parse_wg_dump(output, now=2000)
         assert result["interface"]["public_key"] == "AAAA"
         assert result["interface"]["listening_port"] == 51820
         assert len(result["peers"]) == 1
@@ -194,18 +191,44 @@ class TestParseWgShow:
         assert peer["public_key"] == "BBBB"
         assert peer["endpoint"] == "1.2.3.4:51820"
         assert peer["allowed_ips"] == "10.0.0.0/24"
-        assert "42 seconds ago" in peer["latest_handshake"]
+        assert peer["latest_handshake_secs"] == 106
+        assert peer["latest_handshake"] == "1m46s"
+        assert peer["transfer_rx_bytes"] == 1260
+        assert peer["transfer_tx_bytes"] == 4669
+        assert peer["transfer_rx"] == "1.23 KiB"
+        assert peer["transfer_tx"] == "4.56 KiB"
+
+    def test_never_handshaked(self) -> None:
+        output = "PRIV\tAAAA\t51820\toff\nBBBB\t(none)\t(none)\t10.0.0.0/24\t0\t0\t0\toff\n"
+        result = _parse_wg_dump(output, now=2000)
+        peer = result["peers"][0]
+        assert peer["latest_handshake_secs"] is None
+        assert peer["latest_handshake"] == "never"
+        assert peer["endpoint"] == ""
 
     def test_no_peers(self) -> None:
-        output = "interface: wg0\n  public key: AAAA\n  listening port: 51820\n"
-        result = _parse_wg_show(output)
+        result = _parse_wg_dump("PRIV\tAAAA\t51820\toff\n", now=2000)
         assert result["interface"]["public_key"] == "AAAA"
         assert result["peers"] == []
 
     def test_empty_output(self) -> None:
-        result = _parse_wg_show("")
+        result = _parse_wg_dump("", now=2000)
         assert result["interface"] == {}
         assert result["peers"] == []
+
+
+class TestHumanizers:
+    def test_bytes(self) -> None:
+        assert _humanize_bytes(0) == "0 B"
+        assert _humanize_bytes(512) == "512 B"
+        assert _humanize_bytes(1260) == "1.23 KiB"
+        assert _humanize_bytes(5 * 1024 * 1024) == "5.00 MiB"
+
+    def test_age(self) -> None:
+        assert _humanize_age(5) == "5s"
+        assert _humanize_age(106) == "1m46s"
+        assert _humanize_age(3700) == "1h1m"
+        assert _humanize_age(90000) == "1d1h"
 
 
 # ---------------------------------------------------------------------------
@@ -235,6 +258,11 @@ class TestPostConfig:
         body = await resp.json()
         assert body["status"] == "configured"
         assert body["tunnel"] == "wg0"
+        # Persisted to the source-of-truth dir (not just /etc/wireguard).
+        persisted = _wg_config_dir / "wg0.conf"
+        assert persisted.exists()
+        assert "PrivateKey = X" in persisted.read_text()
+        assert (persisted.stat().st_mode & 0o077) == 0  # 0600 — key not group/world readable
 
     @pytest.mark.usefixtures("_wg_config_dir")
     async def test_json_conf(self, client, auth_headers, _wg_config_dir) -> None:
@@ -251,6 +279,7 @@ class TestPostConfig:
         assert resp.status == 200
         body = await resp.json()
         assert body["tunnel"] == "vpn1"
+        assert (_wg_config_dir / "vpn1.conf").exists()
 
     async def test_empty_body(self, client, auth_headers) -> None:
         resp = await client.post(
@@ -273,42 +302,86 @@ class TestPostConfig:
         assert resp.status == 401
 
 
+@pytest.mark.usefixtures("_wg_config_dir")
 class TestPostStart:
-    async def test_start_success(self, client, auth_headers) -> None:
+    @staticmethod
+    def _persist(_wg_config_dir, tunnel: str = "wg0") -> None:
+        _wg_config_dir.mkdir(parents=True, exist_ok=True)
+        (_wg_config_dir / f"{tunnel}.conf").write_text(
+            "[Interface]\nPrivateKey = X\nAddress = 10.0.0.1/24\n\n[Peer]\nPublicKey = Y\nAllowedIPs = 0/0\n"
+        )
+
+    @staticmethod
+    def _persist_with_hostname(_wg_config_dir, tunnel: str = "wg0") -> None:
+        _wg_config_dir.mkdir(parents=True, exist_ok=True)
+        (_wg_config_dir / f"{tunnel}.conf").write_text(
+            "[Interface]\nPrivateKey = X\nAddress = 10.0.0.1/24\n"
+            "[Peer]\nPublicKey = Y\nEndpoint = vpn.example.com:51820\nAllowedIPs = 0/0\n"
+        )
+
+    async def test_start_success(self, client, auth_headers, _wg_config_dir) -> None:
+        self._persist(_wg_config_dir)
         with (
             patch("companion.routes.wireguard._is_interface_up", return_value=False),
             patch("companion.routes.wireguard._run_wg_cmd", return_value=(0, "", "")),
+            patch("companion.routes.wireguard._resolve_endpoint_hostnames", AsyncMock(return_value=[])),
+            patch("companion.routes.wireguard.wg_monitor.start_monitor"),
         ):
             resp = await client.post("/v1/wireguard/start?tunnel=wg0", headers=auth_headers)
         assert resp.status == 200
         body = await resp.json()
         assert body["status"] == "started"
-        assert body["auto_enable"] is False
 
-    async def test_start_with_auto_enable(self, client, auth_headers) -> None:
-        with (
-            patch("companion.routes.wireguard._is_interface_up", return_value=False),
-            patch("companion.routes.wireguard._run_wg_cmd", return_value=(0, "", "")),
-            patch("companion.routes.wireguard._enable_auto_start") as mock_enable,
-        ):
-            resp = await client.post("/v1/wireguard/start?tunnel=wg0&auto_enable=true", headers=auth_headers)
-        assert resp.status == 200
-        body = await resp.json()
-        assert body["auto_enable"] is True
-        mock_enable.assert_called_once_with("wg0")
+    async def test_start_missing_config(self, client, auth_headers) -> None:
+        """No persistent config → 404, not a confusing wg-quick 500."""
+        with patch("companion.routes.wireguard._is_interface_up", return_value=False):
+            resp = await client.post("/v1/wireguard/start?tunnel=wg0", headers=auth_headers)
+        assert resp.status == 404
 
     async def test_start_already_up(self, client, auth_headers) -> None:
         with patch("companion.routes.wireguard._is_interface_up", return_value=True):
             resp = await client.post("/v1/wireguard/start?tunnel=wg0", headers=auth_headers)
         assert resp.status == 409
 
-    async def test_start_failure(self, client, auth_headers) -> None:
+    async def test_start_failure(self, client, auth_headers, _wg_config_dir) -> None:
+        self._persist(_wg_config_dir)
         with (
             patch("companion.routes.wireguard._is_interface_up", return_value=False),
+            patch("companion.routes.wireguard._resolve_endpoint_hostnames", AsyncMock(return_value=[])),
             patch("companion.routes.wireguard._run_wg_cmd", return_value=(1, "", "error")),
         ):
             resp = await client.post("/v1/wireguard/start?tunnel=wg0", headers=auth_headers)
         assert resp.status == 500
+
+    async def test_start_dns_failure_returns_502(self, client, auth_headers, _wg_config_dir) -> None:
+        self._persist_with_hostname(_wg_config_dir)
+        with (
+            patch("companion.routes.wireguard._is_interface_up", return_value=False),
+            patch(
+                "companion.routes.wireguard._resolve_endpoint_hostnames",
+                AsyncMock(return_value=["vpn.example.com"]),
+            ),
+            patch("companion.routes.wireguard._run_wg_cmd", return_value=(0, "", "")) as run_cmd,
+        ):
+            resp = await client.post("/v1/wireguard/start?tunnel=wg0", headers=auth_headers)
+        assert resp.status == 502
+        text = await resp.text()
+        assert "vpn.example.com" in text
+        # wg-quick must NOT be called when DNS fails
+        assert not any("wg-quick" in str(c.args) for c in run_cmd.call_args_list)
+
+    async def test_start_monitor_is_started(self, client, auth_headers, _wg_config_dir) -> None:
+        self._persist_with_hostname(_wg_config_dir)
+        with (
+            patch("companion.routes.wireguard._is_interface_up", return_value=False),
+            patch("companion.routes.wireguard._resolve_endpoint_hostnames", AsyncMock(return_value=[])),
+            patch("companion.routes.wireguard._run_wg_cmd", return_value=(0, "", "")),
+            patch("companion.routes.wireguard.wg_monitor.start_monitor") as start_mock,
+        ):
+            resp = await client.post("/v1/wireguard/start?tunnel=wg0", headers=auth_headers)
+        assert resp.status == 200
+        start_mock.assert_called_once()
+        assert start_mock.call_args.args[0] == "wg0"
 
 
 class TestPostStop:
@@ -316,11 +389,13 @@ class TestPostStop:
         with (
             patch("companion.routes.wireguard._is_interface_up", return_value=True),
             patch("companion.routes.wireguard._run_wg_cmd", return_value=(0, "", "")),
+            patch("companion.routes.wireguard.wg_monitor.stop_monitor") as stop_mock,
         ):
             resp = await client.post("/v1/wireguard/stop?tunnel=wg0", headers=auth_headers)
         assert resp.status == 200
         body = await resp.json()
         assert body["status"] == "stopped"
+        stop_mock.assert_called_once_with("wg0")
 
     async def test_stop_not_running(self, client, auth_headers) -> None:
         with patch("companion.routes.wireguard._is_interface_up", return_value=False):
@@ -330,20 +405,15 @@ class TestPostStop:
 
 class TestGetStatus:
     async def test_status_active(self, client, auth_headers) -> None:
-        wg_output = (
-            "interface: wg0\n  public key: AAAA\n  listening port: 51820\n"
-            "peer: BBBB\n  endpoint: 1.2.3.4:51820\n  allowed ips: 10.0.0.0/24\n"
-        )
+        # `wg show <tunnel> dump`: interface row then one peer row.
+        wg_output = "PRIV\tAAAA\t51820\toff\nBBBB\t(none)\t1.2.3.4:51820\t10.0.0.0/24\t0\t1260\t4669\toff\n"
 
         async def _mock_run(*args: str, timeout: int = 30) -> tuple[int, str, str]:
-            if args[1] == "show":
-                return (0, wg_output, "")
-            return (1, "", "not enabled")  # systemctl is-enabled
+            return (0, wg_output, "")
 
         with (
             patch("companion.routes.wireguard._is_interface_up", return_value=True),
             patch("companion.routes.wireguard._run_wg_cmd", side_effect=_mock_run),
-            patch("companion.routes.wireguard._is_auto_enabled", return_value=False),
         ):
             resp = await client.get("/v1/wireguard/status?tunnel=wg0", headers=auth_headers)
         assert resp.status == 200
@@ -352,7 +422,10 @@ class TestGetStatus:
         assert body["tunnel"] == "wg0"
         assert body["interface"]["public_key"] == "AAAA"
         assert len(body["peers"]) == 1
-        assert body["auto_enable"] is False
+        assert body["peers"][0]["transfer_rx"] == "1.23 KiB"
+        # No monitor is running for this tunnel in the test.
+        assert body["monitor"] == {"running": False}
+        assert "auto_enable" not in body
 
     async def test_status_inactive(self, client, auth_headers) -> None:
         with patch("companion.routes.wireguard._is_interface_up", return_value=False):
@@ -362,13 +435,119 @@ class TestGetStatus:
         assert body["state"] == "inactive"
 
 
+# Already in normalized form (no inter-section blank line) so it round-trips
+# byte-for-byte through save_config's normalizer.
+_CONF = "[Interface]\nPrivateKey = X\nAddress = 10.0.0.1/24\n[Peer]\nPublicKey = Y\nAllowedIPs = 0/0\n"
+
+
+class TestNormalizeConf:
+    # The exact value an HA add-on options text field produced from a pasted
+    # multi-line config — all newlines (and spaces) stripped.
+    COLLAPSED = (
+        "[Interface]PrivateKey=yLaRKvrkz+DhPait/rk5OgOV2RGeikMkX/dbK8gxiHo=Address=10.6.0.2/24"
+        "[Peer]PublicKey=FE5OhQCNLLxF1OdDBIDMf5ktc8sEFngHoxy2o5iMhxs="
+        "Endpoint=home.kippings.de:51826AllowedIPs=10.6.0.0/24PersistentKeepalive=25"
+    )
+
+    def test_reconstructs_collapsed_paste(self) -> None:
+        out = _normalize_conf(self.COLLAPSED)
+        _validate_conf(out)  # must not raise
+        assert out.splitlines() == [
+            "[Interface]",
+            "PrivateKey = yLaRKvrkz+DhPait/rk5OgOV2RGeikMkX/dbK8gxiHo=",
+            "Address = 10.6.0.2/24",
+            "[Peer]",
+            "PublicKey = FE5OhQCNLLxF1OdDBIDMf5ktc8sEFngHoxy2o5iMhxs=",
+            "Endpoint = home.kippings.de:51826",
+            "AllowedIPs = 10.6.0.0/24",
+            "PersistentKeepalive = 25",
+        ]
+
+    def test_idempotent_on_well_formed(self) -> None:
+        well_formed = (
+            "[Interface]\nPrivateKey = aaa=\nAddress = 10.0.0.2/24\n\n"
+            "[Peer]\nPublicKey = bbb=\nAllowedIPs = 0.0.0.0/0\n"
+        )
+        once = _normalize_conf(well_formed)
+        assert _normalize_conf(once) == once
+
+    def test_splits_when_value_ends_in_letter(self) -> None:
+        # Endpoint hostname ending in a letter, abutting the next key.
+        collapsed = (
+            "[Interface]PrivateKey=k=Address=10.0.0.2/24[Peer]PublicKey=p=Endpoint=vpn.example.comAllowedIPs=0.0.0.0/0"
+        )
+        out = _normalize_conf(collapsed)
+        assert "Endpoint = vpn.example.com" in out
+        assert "AllowedIPs = 0.0.0.0/0" in out
+
+    def test_preserves_base64_key_values(self) -> None:
+        out = _normalize_conf(self.COLLAPSED)
+        # Key material (incl. '+' '/' '=') must survive verbatim.
+        assert "PrivateKey = yLaRKvrkz+DhPait/rk5OgOV2RGeikMkX/dbK8gxiHo=" in out
+
+    def test_save_config_normalizes(self, tmp_path, monkeypatch) -> None:
+        """A collapsed paste pushed through save_config lands as a valid file."""
+        persist = tmp_path / "persist"
+        monkeypatch.setattr("companion.wg._PERSIST_DIR", persist)
+        monkeypatch.setattr("companion.wg._WG_CONFIG_DIR", tmp_path / "runtime")
+        save_config("wg0", self.COLLAPSED)
+        written = (persist / "wg0.conf").read_text()
+        _validate_conf(written)
+        assert "\nAddress = 10.6.0.2/24\n" in written
+
+
+class TestSaveAndMaterialize:
+    def test_save_persists_and_materializes(self, tmp_path, monkeypatch) -> None:
+        persist = tmp_path / "persist"
+        runtime = tmp_path / "runtime"
+        monkeypatch.setattr("companion.wg._PERSIST_DIR", persist)
+        monkeypatch.setattr("companion.wg._WG_CONFIG_DIR", runtime)
+
+        save_config("wg0", _CONF)
+        # canonical persistent copy + materialized runtime copy, both 0600
+        assert (persist / "wg0.conf").read_text() == _CONF
+        assert (runtime / "wg0.conf").read_text() == _CONF
+        assert (persist / "wg0.conf").stat().st_mode & 0o077 == 0
+        assert (runtime / "wg0.conf").stat().st_mode & 0o077 == 0
+
+    def test_save_rejects_invalid(self, tmp_path, monkeypatch) -> None:
+        from aiohttp.web import HTTPBadRequest
+
+        monkeypatch.setattr("companion.wg._PERSIST_DIR", tmp_path / "persist")
+        monkeypatch.setattr("companion.wg._WG_CONFIG_DIR", tmp_path / "runtime")
+        with pytest.raises(HTTPBadRequest):
+            save_config("wg0", "not a wg config")
+
+    def test_materialize_regenerates_after_runtime_wiped(self, tmp_path, monkeypatch) -> None:
+        """The whole point: a wiped /etc/wireguard is rebuilt from the persistent copy."""
+        persist = tmp_path / "persist"
+        runtime = tmp_path / "runtime"
+        monkeypatch.setattr("companion.wg._PERSIST_DIR", persist)
+        monkeypatch.setattr("companion.wg._WG_CONFIG_DIR", runtime)
+
+        save_config("wg0", _CONF)
+        # simulate a restart wiping the ephemeral runtime dir
+        (runtime / "wg0.conf").unlink()
+        assert materialize("wg0") is True
+        assert (runtime / "wg0.conf").read_text() == _CONF
+
+    def test_materialize_missing_returns_false(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr("companion.wg._PERSIST_DIR", tmp_path / "persist")
+        monkeypatch.setattr("companion.wg._WG_CONFIG_DIR", tmp_path / "runtime")
+        assert materialize("wg0") is False
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
 
 
 @pytest.fixture
-def _wg_config_dir(tmp_path, monkeypatch) -> None:
-    """Redirect WG config dir to temp path for safe writes."""
-    monkeypatch.setattr("companion.routes.wireguard._WG_CONFIG_DIR", tmp_path)
-    return tmp_path
+def _wg_config_dir(tmp_path, monkeypatch):
+    """Redirect both the persistent (source-of-truth) and runtime WG dirs to
+    temp paths so writes don't escape the sandbox. Returns the persistent dir."""
+    persist = tmp_path / "persist"
+    runtime = tmp_path / "runtime"
+    monkeypatch.setattr("companion.wg._PERSIST_DIR", persist)
+    monkeypatch.setattr("companion.wg._WG_CONFIG_DIR", runtime)
+    return persist

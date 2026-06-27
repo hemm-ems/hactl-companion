@@ -160,12 +160,16 @@ async def test_create_script_duplicate(client: TestClient, auth_headers: dict[st
     assert resp.status == 409
 
 
-async def test_delete_script(client: TestClient, auth_headers: dict[str, str]) -> None:
-    """DELETE should remove the script."""
+async def test_delete_script(
+    client: TestClient, auth_headers: dict[str, str], core_api_calls: list[tuple[str, str]]
+) -> None:
+    """DELETE should remove the script and trigger a reload."""
     resp = await client.delete("/v1/config/script?id=goodnight", headers=auth_headers)
     assert resp.status == 200
     data = await resp.json()
     assert data["status"] == "deleted"
+    assert data["reloaded"] is True
+    assert ("script", "reload") in core_api_calls
 
     resp2 = await client.get("/v1/config/script?id=goodnight", headers=auth_headers)
     assert resp2.status == 404

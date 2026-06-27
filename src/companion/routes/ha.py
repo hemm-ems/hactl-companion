@@ -1,15 +1,13 @@
-"""POST /v1/ha/reload/{domain} — reload an HA integration via ha CLI."""
+"""POST /v1/ha/reload/{domain} — reload an HA integration via the core API."""
 
 from __future__ import annotations
 
-import asyncio
-import logging
 import re
 from dataclasses import dataclass
 
 from aiohttp import web
 
-logger = logging.getLogger(__name__)
+from companion import core_api
 
 ALLOWED_DOMAINS: set[str] = {
     "automation",
@@ -49,53 +47,25 @@ async def post_reload(request: web.Request) -> web.Response:
     if not _DOMAIN_RE.fullmatch(domain) or domain not in ALLOWED_DOMAINS:
         raise web.HTTPBadRequest(text=f"Domain not allowed: {domain}")
 
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "ha",
-            "core",
-            "reload",
-            domain,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        _stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
-    except FileNotFoundError as exc:
-        raise web.HTTPBadGateway(text="ha CLI not available") from exc
-    except TimeoutError as exc:
-        raise web.HTTPGatewayTimeout(text="Reload timed out") from exc
+    if not await core_api.reload_domain(domain):
+        raise web.HTTPBadGateway(text=f"Reload failed: {domain}")
 
-    if proc.returncode != 0:
-        err = stderr.decode("utf-8", errors="replace").strip()
-        logger.error("ha core reload %s failed (rc=%s): %s", domain, proc.returncode, err)
-        raise web.HTTPBadGateway(text=f"Reload failed: {err}")
-
-    logger.info("Reloaded domain: %s", domain)
     return web.json_response({"status": "ok", "domain": domain})
 
 
 async def post_check_config(request: web.Request) -> web.Response:
-    """POST /v1/ha/check-config — validate HA configuration via ha CLI."""
+    """POST /v1/ha/check-config — validate HA configuration via the core API.
+
+    200 with {"valid": ...} whenever the check itself completed; 502 only
+    when the core API was unreachable. An invalid config is a result, not a
+    gateway error — clients retry 5xx, and the check is expensive.
+    """
     try:
-        proc = await asyncio.create_subprocess_exec(
-            "ha",
-            "core",
-            "check",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        _stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
-    except FileNotFoundError as exc:
-        raise web.HTTPBadGateway(text="ha CLI not available") from exc
-    except TimeoutError as exc:
-        raise web.HTTPGatewayTimeout(text="Check timed out") from exc
+        valid, errors = await core_api.check_config()
+    except core_api.CoreAPIUnavailableError as exc:
+        raise web.HTTPBadGateway(text=f"Config check failed: {exc}") from exc
 
-    if proc.returncode != 0:
-        err = stderr.decode("utf-8", errors="replace").strip()
-        logger.error("ha core check failed (rc=%s): %s", proc.returncode, err)
-        raise web.HTTPBadGateway(text=f"Config check failed: {err}")
-
-    logger.info("HA config check passed")
-    return web.json_response({"status": "ok"})
+    return web.json_response({"status": "ok" if valid else "invalid", "valid": valid, "errors": errors})
 
 
 routes: list[RouteDef] = [
