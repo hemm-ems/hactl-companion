@@ -75,6 +75,35 @@ def _extract_fields(script: dict[str, Any]) -> list[dict[str, Any]]:
     return result
 
 
+def _is_script_definition_key(key: str) -> bool:
+    return key in {
+        "alias",
+        "description",
+        "sequence",
+        "mode",
+        "fields",
+        "variables",
+        "icon",
+        "max",
+        "max_exceeded",
+        "trace",
+    }
+
+
+def _normalize_script_body(script_id: str, new_data: dict[str, Any]) -> dict[str, Any]:
+    """Accept UI-style script YAML or scripts.yaml wrapper form."""
+    if len(new_data) == 1:
+        key = next(iter(new_data))
+        value = new_data[key]
+        if key == script_id:
+            if not isinstance(value, dict):
+                raise web.HTTPBadRequest(text=f"Script {key} must be a YAML mapping")
+            return value
+        if not _is_script_definition_key(key):
+            raise web.HTTPBadRequest(text=f"Script wrapper id {key} does not match target {script_id}")
+    return new_data
+
+
 async def get_scripts(request: web.Request) -> web.Response:
     """GET /v1/config/scripts — list all script definitions."""
     base = request.app["config_base_path"]
@@ -132,6 +161,7 @@ async def put_script(request: web.Request) -> web.Response:
 
     if not isinstance(new_data, dict):
         raise web.HTTPBadRequest(text="Script must be a YAML mapping")
+    script_body = _normalize_script_body(script_id, new_data)
 
     data, target = _load_scripts(base)
     if script_id not in data:
@@ -143,7 +173,7 @@ async def put_script(request: web.Request) -> web.Response:
         old_stream = StringIO()
         yaml.dump({script_id: data[script_id]}, old_stream)
         new_stream = StringIO()
-        yaml.dump({script_id: new_data}, new_stream)
+        yaml.dump({script_id: script_body}, new_stream)
         diff = "".join(
             difflib.unified_diff(
                 old_stream.getvalue().splitlines(keepends=True),
@@ -154,7 +184,7 @@ async def put_script(request: web.Request) -> web.Response:
         )
         return web.json_response({"status": "dry_run", "diff": diff})
 
-    data[script_id] = new_data
+    data[script_id] = script_body
     _save_scripts(target, data)
     reloaded = await core_api.reload_domain("script")
     return web.json_response({"status": "applied", "reloaded": reloaded})
