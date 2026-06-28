@@ -1,0 +1,131 @@
+"""Tests for the generic related-entity graph endpoint."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from aiohttp.test_utils import TestClient
+
+from tests.related_fixture import (
+    EMBEDDED_ENTITY_ID,
+    GENERATED_CONFIG_ENTRY_ID,
+    GENERATED_ENTITY_ID,
+    SOURCE_ENTITY_ID,
+    UNKNOWN_ENTITY_ID,
+    YAML_PEER_ENTITY_ID,
+    seed_related_fixture,
+)
+
+
+async def test_related_entity_from_config_entry_reference(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    config_dir: Path,
+) -> None:
+    seed_related_fixture(config_dir)
+
+    resp = await client.get(f"/v1/related/entity?entity_id={SOURCE_ENTITY_ID}", headers=auth_headers)
+
+    assert resp.status == 200
+    data = await resp.json()
+    related = data["related"]
+    assert {
+        "entity_id": GENERATED_ENTITY_ID,
+        "relationship": "config-entry-reference",
+        "detail": f"config_entry={GENERATED_CONFIG_ENTRY_ID}",
+    } in related
+
+
+async def test_related_entity_reverse_includes_source_and_config_entry_detail(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    config_dir: Path,
+) -> None:
+    seed_related_fixture(config_dir)
+
+    resp = await client.get(f"/v1/related/entity?entity_id={GENERATED_ENTITY_ID}", headers=auth_headers)
+
+    assert resp.status == 200
+    data = await resp.json()
+    related = data["related"]
+    assert {
+        "entity_id": SOURCE_ENTITY_ID,
+        "relationship": "referenced-entity",
+        "detail": f"config_entry={GENERATED_CONFIG_ENTRY_ID}",
+    } in related
+
+
+async def test_related_entity_yaml_exact_value_relation(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    config_dir: Path,
+) -> None:
+    seed_related_fixture(config_dir)
+
+    resp = await client.get(f"/v1/related/entity?entity_id={SOURCE_ENTITY_ID}", headers=auth_headers)
+
+    assert resp.status == 200
+    data = await resp.json()
+    assert {
+        "entity_id": YAML_PEER_ENTITY_ID,
+        "relationship": "yaml-reference",
+        "detail": "configuration.yaml",
+    } in data["related"]
+
+
+async def test_related_entity_does_not_match_embedded_strings_or_unknown_ids(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    config_dir: Path,
+) -> None:
+    seed_related_fixture(config_dir)
+
+    resp = await client.get(f"/v1/related/entity?entity_id={SOURCE_ENTITY_ID}", headers=auth_headers)
+
+    assert resp.status == 200
+    data = await resp.json()
+    related_ids = {item["entity_id"] for item in data["related"]}
+    assert EMBEDDED_ENTITY_ID not in related_ids
+    assert UNKNOWN_ENTITY_ID not in related_ids
+
+
+async def test_related_entity_auth_missing_token(client: TestClient, config_dir: Path) -> None:
+    seed_related_fixture(config_dir)
+
+    resp = await client.get(f"/v1/related/entity?entity_id={SOURCE_ENTITY_ID}")
+
+    assert resp.status == 401
+
+
+async def test_related_entity_auth_invalid_token(client: TestClient, config_dir: Path) -> None:
+    seed_related_fixture(config_dir)
+
+    resp = await client.get(
+        f"/v1/related/entity?entity_id={SOURCE_ENTITY_ID}",
+        headers={"Authorization": "Bearer wrong-token"},
+    )
+
+    assert resp.status == 401
+
+
+async def test_related_entity_ingress_header_bypasses_token(client: TestClient, config_dir: Path) -> None:
+    seed_related_fixture(config_dir)
+
+    resp = await client.get(
+        f"/v1/related/entity?entity_id={SOURCE_ENTITY_ID}",
+        headers={"X-Ingress-Path": "/api/hassio_ingress/abc123"},
+    )
+
+    assert resp.status == 200
+
+
+async def test_related_entity_rejects_unknown_entity_id(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    config_dir: Path,
+) -> None:
+    seed_related_fixture(config_dir)
+
+    resp = await client.get(f"/v1/related/entity?entity_id={UNKNOWN_ENTITY_ID}", headers=auth_headers)
+
+    assert resp.status == 404

@@ -23,6 +23,25 @@ _CONFIG_WRITE_DRY_SCHEMA = {
     "type": "object",
     "properties": {"status": {"type": "string"}, "diff": {"type": "string"}},
 }
+_RELATED_ENTITY_SCHEMA = {
+    "type": "object",
+    "required": ["entity_id", "related"],
+    "properties": {
+        "entity_id": {"type": "string"},
+        "related": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["entity_id", "relationship", "detail"],
+                "properties": {
+                    "entity_id": {"type": "string"},
+                    "relationship": {"type": "string"},
+                    "detail": {"type": "string"},
+                },
+            },
+        },
+    },
+}
 
 _TEMPLATE_LIST_SCHEMA = {
     "type": "object",
@@ -312,6 +331,15 @@ ENDPOINT_META: dict[tuple[str, str], dict[str, object]] = {
             "required": True,
         },
         "response_schema": _CONFIG_WRITE_DRY_SCHEMA,
+    },
+    # Related graph
+    ("GET", "/v1/related/entity"): {
+        "summary": "Find entities related to an entity from HA config and storage metadata",
+        "tags": ["related"],
+        "parameters": [
+            {"name": "entity_id", "in": "query", "required": True, "schema": {"type": "string"}},
+        ],
+        "response_schema": _RELATED_ENTITY_SCHEMA,
     },
     # Templates
     ("GET", "/v1/config/templates"): {

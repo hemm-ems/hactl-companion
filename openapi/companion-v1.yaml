@@ -173,6 +173,46 @@ paths:
         required: true
         schema:
           type: string
+  /v1/related/entity:
+    get:
+      summary: Find entities related to an entity from HA config and storage 
+        metadata
+      tags:
+      - related
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - entity_id
+                - related
+                properties:
+                  entity_id:
+                    type: string
+                  related:
+                    type: array
+                    items:
+                      type: object
+                      required:
+                      - entity_id
+                      - relationship
+                      - detail
+                      properties:
+                        entity_id:
+                          type: string
+                        relationship:
+                          type: string
+                        detail:
+                          type: string
+      parameters:
+      - name: entity_id
+        in: query
+        required: true
+        schema:
+          type: string
   /v1/config/templates:
     get:
       summary: List all template sensor definitions
