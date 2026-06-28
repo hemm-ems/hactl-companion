@@ -1,3 +1,13 @@
+## 2026.6.9
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+
+## New Contributors
+* @swifty99 made their first contribution in https://github.com/hemm-ems/hactl-companion/pull/53
+
+**Full Changelog**: https://github.com/hemm-ems/hactl-companion/compare/v2026.6.8...v2026.6.9
+
 ## 2026.6.8
 
 <!-- Release notes generated using configuration in .github/release.yml at main -->
