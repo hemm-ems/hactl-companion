@@ -67,6 +67,39 @@ sequence:
     assert "diff" in data
 
 
+async def test_update_script_dry_run_wrapper_form(client: TestClient, auth_headers: dict[str, str]) -> None:
+    """PUT should accept scripts.yaml top-level-key form without nesting."""
+    new_body = """welcome_home:
+  alias: Welcome Home Wrapped
+  sequence:
+    - service: light.turn_on
+      target:
+        entity_id: light.kitchen
+"""
+    resp = await client.put(
+        "/v1/config/script?id=welcome_home&dry_run=true",
+        data=new_body,
+        headers={**auth_headers, "Content-Type": "text/plain"},
+    )
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["status"] == "dry_run"
+    assert "Welcome Home Wrapped" in data["diff"]
+
+
+async def test_update_script_wrapper_id_mismatch(client: TestClient, auth_headers: dict[str, str]) -> None:
+    body = """other_script:
+  alias: Wrong Target
+  sequence: []
+"""
+    resp = await client.put(
+        "/v1/config/script?id=welcome_home&dry_run=true",
+        data=body,
+        headers={**auth_headers, "Content-Type": "text/plain"},
+    )
+    assert resp.status == 400
+
+
 async def test_update_script_apply(client: TestClient, auth_headers: dict[str, str], config_dir: Path) -> None:
     """PUT with dry_run=false should update and create backup."""
     new_body = """alias: Welcome Home Updated
