@@ -5,10 +5,13 @@ from __future__ import annotations
 import json
 import subprocess
 import time
+from collections.abc import Iterator
 
 import pytest
 import requests
 import websocket
+
+from tests.related_fixture import docker_seed_script
 
 COMPOSE_FILE = "docker-compose.integration.yaml"
 COMPANION_TOKEN = "integration-test-token-12345"
@@ -19,9 +22,9 @@ CLIENT_ID = "http://hactl-test"
 # ---------------------------------------------------------------------------
 
 
-def _compose(*args: str, capture: bool = False) -> subprocess.CompletedProcess[str]:
+def _compose(*args: str, capture: bool = False, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
     cmd = ["docker", "compose", "-f", COMPOSE_FILE, *args]
-    return subprocess.run(cmd, capture_output=capture, text=True, check=True, timeout=360)
+    return subprocess.run(cmd, capture_output=capture, input=input_text, text=True, check=True, timeout=360)
 
 
 def _get_mapped_port(service: str, container_port: int) -> str:
@@ -198,4 +201,32 @@ def _ha_ready(companion_url: str, ha_token: str) -> None:
             pass
         time.sleep(2)
     msg = "Companion never saw config files in /config"
+    raise TimeoutError(msg)
+
+
+@pytest.fixture(scope="session")
+def related_fixture_seeded(companion_url: str, _ha_ready: None) -> Iterator[None]:
+    """Seed the disposable Docker /config volume with related graph fixture data."""
+    _compose("exec", "-T", "companion", "python3", "-", input_text=docker_seed_script())
+    _wait_for_related_fixture(companion_url)
+    yield
+
+
+def _wait_for_related_fixture(companion_url: str) -> None:
+    headers = {"Authorization": f"Bearer {COMPANION_TOKEN}"}
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        try:
+            r = requests.get(
+                f"{companion_url}/v1/related/entity",
+                params={"entity_id": "sensor.hactl_related_source"},
+                headers=headers,
+                timeout=5,
+            )
+            if r.status_code == 200:
+                return
+        except requests.ConnectionError:
+            pass
+        time.sleep(1)
+    msg = "Related graph fixture was not visible through companion"
     raise TimeoutError(msg)
