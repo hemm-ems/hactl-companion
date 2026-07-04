@@ -206,6 +206,96 @@ class TestConfigWrite:
         assert r.status_code == 400
 
 
+class TestRefReplace:
+    """Real cross-file literal scan + replace against the live /config volume.
+
+    A mock can't prove the file on disk was actually rewritten, so this drives
+    the whole path: seed a reference into automations.yaml (already in HA's
+    default !include graph), scan for it, dry-run (must not write), then apply
+    (must write) — verifying every step by reading the file back through the
+    companion. Uses a unique literal so it never collides with other tests.
+    """
+
+    STALE = "binary_sensor.refscan_probe_stale"
+    FRESH = "binary_sensor.refscan_probe_fresh"
+    _SEED = (
+        "- id: refscan_probe\n"
+        "  alias: refscan probe\n"
+        "  trigger:\n"
+        "    - platform: state\n"
+        f"      entity_id: {STALE}\n"
+        "  action:\n"
+        '    - delay: "00:00:01"\n'
+    )
+
+    def _read(self, companion_url: str, auth_headers: dict[str, str]) -> str:
+        r = requests.get(
+            f"{companion_url}/v1/config/file",
+            params={"path": "automations.yaml", "resolve": "false"},
+            headers=auth_headers,
+            timeout=10,
+        )
+        assert r.status_code == 200, r.text
+        return r.json()["content"]
+
+    def _seed(self, companion_url: str, auth_headers: dict[str, str]) -> None:
+        r = requests.put(
+            f"{companion_url}/v1/config/file",
+            params={"path": "automations.yaml", "dry_run": "false"},
+            data=self._SEED,
+            headers=auth_headers,
+            timeout=15,
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "applied"
+
+    def test_scan_dry_run_then_apply(self, companion_url: str, auth_headers: dict[str, str], _ha_ready: None) -> None:
+        self._seed(companion_url, auth_headers)
+
+        # Scan finds the literal in the file it actually lives in.
+        r = requests.get(
+            f"{companion_url}/v1/ref/scan",
+            params={"target": self.STALE},
+            headers=auth_headers,
+            timeout=10,
+        )
+        assert r.status_code == 200, r.text
+        hits = r.json()["hits"]
+        assert {"location": "automations.yaml", "path": "[0].trigger[0].entity_id", "matched_value": self.STALE} in hits
+
+        # Dry-run reports the change but must not touch the file.
+        r = requests.post(
+            f"{companion_url}/v1/ref/replace",
+            json={"old": self.STALE, "new": self.FRESH, "dry_run": True},
+            headers=auth_headers,
+            timeout=10,
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["status"] == "dry_run"
+        assert {
+            "location": "automations.yaml",
+            "path": "[0].trigger[0].entity_id",
+            "before": self.STALE,
+            "after": self.FRESH,
+        } in body["changes"]
+        assert self.STALE in self._read(companion_url, auth_headers)
+
+        # Apply actually rewrites the on-disk file.
+        r = requests.post(
+            f"{companion_url}/v1/ref/replace",
+            json={"old": self.STALE, "new": self.FRESH, "dry_run": False},
+            headers=auth_headers,
+            timeout=10,
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "applied"
+
+        after = self._read(companion_url, auth_headers)
+        assert self.FRESH in after
+        assert self.STALE not in after
+
+
 class TestHaReload:
     """Integration tests for POST /v1/ha/reload/{domain} against real HA.
 
