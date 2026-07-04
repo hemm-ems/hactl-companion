@@ -13,7 +13,7 @@ from dataclasses import dataclass
 
 from aiohttp import web
 
-from companion.refscan import replace_yaml_literal, scan_yaml_for_literal
+from companion.refscan import replace_yaml_literal, scan_yaml_for_entities, scan_yaml_for_literal
 
 
 @dataclass
@@ -35,6 +35,25 @@ async def get_ref_scan(request: web.Request) -> web.Response:
         {
             "target": target,
             "hits": [{"location": hit.location, "path": hit.path, "matched_value": hit.matched_value} for hit in hits],
+        }
+    )
+
+
+async def get_ref_entities(request: web.Request) -> web.Response:
+    """GET /v1/ref/entities — every entity_id-shaped leaf across config files.
+
+    Bulk enumeration for reference validation: the caller diffs the returned
+    values against the live entity set to find dangling references. Unfiltered
+    by design (service names share the entity_id shape).
+    """
+    base = request.app["config_base_path"]
+    entities = scan_yaml_for_entities(base)
+    return web.json_response(
+        {
+            "entities": [
+                {"location": ref.location, "path": ref.path, "key": ref.key, "matched_value": ref.matched_value}
+                for ref in entities
+            ],
         }
     )
 
@@ -72,5 +91,6 @@ async def post_ref_replace(request: web.Request) -> web.Response:
 
 routes: list[RouteDef] = [
     RouteDef("GET", "/v1/ref/scan", get_ref_scan),
+    RouteDef("GET", "/v1/ref/entities", get_ref_entities),
     RouteDef("POST", "/v1/ref/replace", post_ref_replace),
 ]

@@ -13,6 +13,7 @@ so a caller can merge YAML and dashboard hits into one uniform result set.
 
 from __future__ import annotations
 
+import re
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,6 +22,12 @@ from typing import Any
 from ruamel.yaml.scalarstring import ScalarString
 
 from companion.yaml_resolver import CircularIncludeError, YamlResolver
+
+# An entity_id is domain.object_id: a lowercase/underscore domain, a dot, then a
+# lowercase/digit/underscore object id. Deliberately shape-only — a service name
+# (e.g. light.turn_on) matches too; separating services from entities is the
+# caller's job (it can key off the path terminal, e.g. `.service`).
+_ENTITY_ID_RE = re.compile(r"^[a-z_]+\.[a-z0-9_]+$")
 
 _INCLUDE_DIR_TAGS = {
     "!include_dir_named",
@@ -36,6 +43,15 @@ class ScanHit:
     location: str  # config-relative file, e.g. "automations.yaml"
     path: str  # dotted/bracketed path within that file, e.g. "[3].trigger[0].entity_id"
     matched_value: str
+
+
+@dataclass(frozen=True)
+class EntityRef:
+    location: str  # config-relative file, e.g. "automations.yaml"
+    path: str  # dotted/bracketed path within that file
+    key: str  # nearest enclosing mapping key (e.g. "entity_id" vs "service") — lets the
+    # caller tell a true entity position from a same-shaped service name
+    matched_value: str  # the entity_id-shaped value found at this leaf
 
 
 def scan_yaml_for_literal(
@@ -76,6 +92,81 @@ def scan_yaml_for_literal(
 
     hits.sort(key=lambda h: (h.location, h.path))
     return hits
+
+
+def scan_yaml_for_entities(
+    base: str | Path,
+    entry_file: str = "configuration.yaml",
+) -> list[EntityRef]:
+    """Find every entity_id-shaped string leaf across the config file graph.
+
+    Same per-file ``!include`` walk as :func:`scan_yaml_for_literal`, but instead
+    of an exact target it collects every leaf matching the entity_id *shape*
+    (``domain.object_id``). Each ref carries its ``key`` (nearest enclosing
+    mapping key) so a caller can tell a true entity position (``entity_id``,
+    ``entity``) from a same-shaped service name (``service: light.turn_on``).
+
+    This is the bulk-enumeration primitive a caller uses to validate references:
+    diff the returned values against the live entity set to find dangling ones.
+    It is intentionally unfiltered — the caller decides which keys are entities.
+    """
+    base_path = Path(base).resolve()
+    resolver = YamlResolver(base_path)
+    refs: list[EntityRef] = []
+    seen: set[str] = set()
+    queue: deque[str] = deque([entry_file])
+
+    while queue:
+        rel = queue.popleft()
+        abs_path = (base_path / rel).resolve()
+        if str(abs_path) in seen or not abs_path.is_file():
+            continue
+        seen.add(str(abs_path))
+
+        try:
+            data = resolver.load(rel, resolve=False)
+        except (FileNotFoundError, PermissionError, ValueError, CircularIncludeError):
+            continue
+
+        location = _rel_to(abs_path, base_path)
+        for match_path, value in _entity_leaves(data):
+            refs.append(EntityRef(location, _path_str(match_path), _terminal_key(match_path), value))
+
+        for inc in _include_targets(data, abs_path.parent):
+            queue.append(_rel_to(inc, base_path))
+
+    refs.sort(key=lambda r: (r.location, r.path))
+    return refs
+
+
+def _terminal_key(path: list[Any]) -> str:
+    """The nearest enclosing mapping key: the last string segment of the path.
+
+    For ``[0].trigger[0].entity_id`` this is ``entity_id``; for a list item like
+    ``entity_id[0]`` it is still ``entity_id`` (trailing indices are skipped).
+    """
+    for seg in reversed(path):
+        if isinstance(seg, str):
+            return seg
+    return ""
+
+
+def _entity_leaves(node: Any, path: tuple[Any, ...] = ()) -> list[tuple[list[Any], str]]:
+    """Return (path, value) for every str leaf matching the entity_id shape.
+
+    Mirrors :func:`_scan_tree`'s traversal; ``!include``-tagged scalars are not
+    str/dict/list so they fall through untouched.
+    """
+    if isinstance(node, str):
+        return [(list(path), str(node))] if _ENTITY_ID_RE.match(node) else []
+    leaves: list[tuple[list[Any], str]] = []
+    if isinstance(node, dict):
+        for key, value in node.items():
+            leaves.extend(_entity_leaves(value, (*path, key)))
+    elif isinstance(node, list):
+        for index, value in enumerate(node):
+            leaves.extend(_entity_leaves(value, (*path, index)))
+    return leaves
 
 
 def replace_yaml_literal(

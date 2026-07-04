@@ -62,6 +62,25 @@ _REF_SCAN_SCHEMA = {
         },
     },
 }
+_REF_ENTITIES_SCHEMA = {
+    "type": "object",
+    "required": ["entities"],
+    "properties": {
+        "entities": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["location", "path", "key", "matched_value"],
+                "properties": {
+                    "location": {"type": "string"},
+                    "path": {"type": "string"},
+                    "key": {"type": "string"},
+                    "matched_value": {"type": "string"},
+                },
+            },
+        },
+    },
+}
 _REF_REPLACE_SCHEMA = {
     "type": "object",
     "required": ["status", "changes"],
@@ -405,6 +424,11 @@ ENDPOINT_META: dict[tuple[str, str], dict[str, object]] = {
             {"name": "target", "in": "query", "required": True, "schema": {"type": "string"}},
         ],
         "response_schema": _REF_SCAN_SCHEMA,
+    },
+    ("GET", "/v1/ref/entities"): {
+        "summary": "Enumerate every entity_id-shaped reference across config files",
+        "tags": ["ref"],
+        "response_schema": _REF_ENTITIES_SCHEMA,
     },
     ("POST", "/v1/ref/replace"): {
         "summary": "Rewrite a literal reference across config files (dry-run or apply)",
