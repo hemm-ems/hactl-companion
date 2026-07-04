@@ -69,12 +69,45 @@ async def test_create_helper(client: TestClient, auth_headers: dict[str, str], c
     data = await resp.json()
     assert data["status"] == "created"
     assert data["id"] == "party_mode"
+    assert data["entity_id"] == "input_boolean.party_mode"
+    assert data["reloaded"] is True
+    assert data["entity_created"] is True
 
     # Verify it appears in list
     resp2 = await client.get("/v1/config/helpers?domain=input_boolean", headers=auth_headers)
     data2 = await resp2.json()
     ids = [h["id"] for h in data2["helpers"]]
     assert "party_mode" in ids
+
+
+async def test_create_helper_domain_not_configured(client: TestClient, auth_headers: dict[str, str]) -> None:
+    """POST should reject a domain configuration.yaml has no top-level key for."""
+    body = "foo:\n  name: Foo\n"
+    resp = await client.post(
+        "/v1/config/helper?domain=input_select",
+        data=body,
+        headers={**auth_headers, "Content-Type": "text/plain"},
+    )
+    assert resp.status == 400
+
+
+async def test_create_helper_domain_defined_inline(
+    client: TestClient, auth_headers: dict[str, str], config_dir: Path
+) -> None:
+    """POST should reject a domain defined as an inline mapping, not via !include."""
+    config_path = config_dir / "configuration.yaml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8") + "\ninput_text:\n  existing:\n    name: Existing\n",
+        encoding="utf-8",
+    )
+
+    body = "foo:\n  name: Foo\n"
+    resp = await client.post(
+        "/v1/config/helper?domain=input_text",
+        data=body,
+        headers={**auth_headers, "Content-Type": "text/plain"},
+    )
+    assert resp.status == 400
 
 
 async def test_create_helper_duplicate(client: TestClient, auth_headers: dict[str, str]) -> None:

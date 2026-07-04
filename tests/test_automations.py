@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from aiohttp.test_utils import TestClient
 
 
@@ -176,3 +177,50 @@ async def test_delete_automation(
 async def test_delete_automation_not_found(client: TestClient, auth_headers: dict[str, str]) -> None:
     resp = await client.delete("/v1/config/automation?id=nonexistent", headers=auth_headers)
     assert resp.status == 404
+
+
+async def test_delete_automation_by_alias(
+    client: TestClient, auth_headers: dict[str, str], core_api_calls: list[tuple[str, str]]
+) -> None:
+    """DELETE should find the automation by alias when id doesn't match."""
+    resp = await client.delete(
+        "/v1/config/automation?id=Turn on lights at sunset",
+        headers=auth_headers,
+    )
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["status"] == "deleted"
+    assert ("automation", "reload") in core_api_calls
+
+    resp2 = await client.get("/v1/config/automation?id=automation.sunset_lights", headers=auth_headers)
+    assert resp2.status == 404
+
+
+async def test_delete_automation_by_live_entity_id(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DELETE should fall back to /api/states when id/alias don't match the config file."""
+    from companion import core_api
+
+    async def _fake_get_states() -> list[dict[str, object]]:
+        return [
+            {
+                "entity_id": "automation.sunset_lights_live",
+                "attributes": {"id": "automation.sunset_lights"},
+            }
+        ]
+
+    monkeypatch.setattr(core_api, "get_states", _fake_get_states)
+
+    resp = await client.delete(
+        "/v1/config/automation?id=automation.sunset_lights_live",
+        headers=auth_headers,
+    )
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["status"] == "deleted"
+
+    resp2 = await client.get("/v1/config/automation?id=automation.sunset_lights", headers=auth_headers)
+    assert resp2.status == 404
