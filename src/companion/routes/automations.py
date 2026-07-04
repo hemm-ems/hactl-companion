@@ -39,6 +39,59 @@ def _load_automations(base: str) -> tuple[list[Any], Any]:
     return data, target
 
 
+def _find_automation(data: list[Any], candidate: str) -> tuple[int, dict[str, Any]] | None:
+    """Find an automation by config id, falling back to alias.
+
+    HA derives the live entity_id from `alias`, not the config `id`, so a
+    caller may reasonably pass either.
+    """
+    for idx, item in enumerate(data):
+        if isinstance(item, dict) and item.get("id") == candidate:
+            return idx, item
+    for idx, item in enumerate(data):
+        if isinstance(item, dict) and item.get("alias") == candidate:
+            return idx, item
+    return None
+
+
+async def _resolve_automation_id_via_states(candidate: str) -> str | None:
+    """Resolve a live entity_id (or unrecognized identifier) to its config id.
+
+    HA always sets an automation entity's `attributes.id` to its config id,
+    regardless of the alias-derived entity_id — this bridges "the id used
+    for storage" and "the id used for the live entity" without reimplementing
+    HA's slugify. Returns None if no live state matches or states can't be
+    fetched (best-effort).
+    """
+    states = await core_api.get_states()
+    if states is None:
+        return None
+    for state in states:
+        if not isinstance(state, dict):
+            continue
+        config_id: str | None = state.get("attributes", {}).get("id")
+        if state.get("entity_id") == candidate or config_id == candidate:
+            return config_id
+    return None
+
+
+async def _poll_automation_entity_id(config_id: str, attempts: int = 5, delay: float = 0.4) -> str | None:
+    """Poll /api/states for the entity whose attributes.id matches config_id."""
+    import asyncio
+
+    for attempt in range(attempts):
+        if attempt:
+            await asyncio.sleep(delay)
+        states = await core_api.get_states()
+        if states is None:
+            continue
+        for state in states:
+            if isinstance(state, dict) and state.get("attributes", {}).get("id") == config_id:
+                entity_id: str | None = state.get("entity_id")
+                return entity_id
+    return None
+
+
 def _save_automations(target: Any, data: list[Any]) -> None:
     """Write automation data back to file with backup."""
     import shutil
@@ -172,11 +225,19 @@ async def post_automation(request: web.Request) -> web.Response:
     data.append(new_item)
     _save_automations(target, data)
     reloaded = await core_api.reload_domain("automation")
-    return web.json_response({"status": "created", "id": new_item["id"], "reloaded": reloaded}, status=201)
+    entity_id = await _poll_automation_entity_id(new_item["id"]) if reloaded else None
+    return web.json_response(
+        {"status": "created", "id": new_item["id"], "entity_id": entity_id, "reloaded": reloaded}, status=201
+    )
 
 
 async def delete_automation(request: web.Request) -> web.Response:
-    """DELETE /v1/config/automation?id=<id> — delete automation."""
+    """DELETE /v1/config/automation?id=<id> — delete automation.
+
+    `id` may be the config id, the alias, or (if neither matches the config
+    file) the live entity_id — HA derives entity_id from alias, so callers
+    working from `hactl auto` output may only have the display identifier.
+    """
     base = request.app["config_base_path"]
     automation_id = request.query.get("id", "")
     if not automation_id:
@@ -184,12 +245,18 @@ async def delete_automation(request: web.Request) -> web.Response:
 
     data, target = _load_automations(base)
 
-    for idx, item in enumerate(data):
-        if isinstance(item, dict) and item.get("id") == automation_id:
-            data.pop(idx)
-            _save_automations(target, data)
-            reloaded = await core_api.reload_domain("automation")
-            return web.json_response({"status": "deleted", "reloaded": reloaded})
+    match = _find_automation(data, automation_id)
+    if match is None:
+        resolved_id = await _resolve_automation_id_via_states(automation_id)
+        if resolved_id is not None:
+            match = _find_automation(data, resolved_id)
+
+    if match is not None:
+        idx, _item = match
+        data.pop(idx)
+        _save_automations(target, data)
+        reloaded = await core_api.reload_domain("automation")
+        return web.json_response({"status": "deleted", "reloaded": reloaded})
 
     raise web.HTTPNotFound(text=f"Automation not found: {automation_id}")
 

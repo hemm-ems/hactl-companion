@@ -59,6 +59,57 @@ async def reload_domain(domain: str) -> bool:
     return await call_service(domain, "reload")
 
 
+async def get_state(entity_id: str) -> dict[str, Any] | None:
+    """Fetch a single entity's state via GET /states/<entity_id>.
+
+    Returns None on any transport failure or if the entity doesn't exist
+    (best-effort — callers treat this as "could not confirm", not fatal).
+    """
+    token = os.environ.get("SUPERVISOR_TOKEN", "")
+    if not token:
+        logger.warning("SUPERVISOR_TOKEN not set; cannot fetch state for %s", entity_id)
+        return None
+
+    base = os.environ.get("CORE_API_URL", DEFAULT_CORE_API_URL).rstrip("/")
+    url = f"{base}/states/{entity_id}"
+    try:
+        async with (
+            aiohttp.ClientSession(timeout=_TIMEOUT) as session,
+            session.get(url, headers={"Authorization": f"Bearer {token}"}) as resp,
+        ):
+            if resp.status >= 400:
+                return None
+            return await resp.json()  # type: ignore[no-any-return]
+    except (aiohttp.ClientError, TimeoutError, OSError) as exc:
+        logger.error("get_state(%s) failed: %s", entity_id, exc)
+        return None
+
+
+async def get_states() -> list[dict[str, Any]] | None:
+    """Fetch all entity states via GET /states.
+
+    Returns None on any transport failure (best-effort).
+    """
+    token = os.environ.get("SUPERVISOR_TOKEN", "")
+    if not token:
+        logger.warning("SUPERVISOR_TOKEN not set; cannot fetch states")
+        return None
+
+    base = os.environ.get("CORE_API_URL", DEFAULT_CORE_API_URL).rstrip("/")
+    url = f"{base}/states"
+    try:
+        async with (
+            aiohttp.ClientSession(timeout=_TIMEOUT) as session,
+            session.get(url, headers={"Authorization": f"Bearer {token}"}) as resp,
+        ):
+            if resp.status >= 400:
+                return None
+            return await resp.json()  # type: ignore[no-any-return]
+    except (aiohttp.ClientError, TimeoutError, OSError) as exc:
+        logger.error("get_states() failed: %s", exc)
+        return None
+
+
 async def check_config() -> tuple[bool, str]:
     """Validate HA core configuration via POST /config/core/check_config.
 

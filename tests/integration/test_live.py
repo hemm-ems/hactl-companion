@@ -206,6 +206,27 @@ class TestConfigWrite:
         assert r.status_code == 400
 
 
+class TestHaReload:
+    """Integration tests for POST /v1/ha/reload/{domain} against real HA.
+
+    This stack wires CORE_API_URL + a real onboarding-issued token (see
+    conftest.py's compose_up) so these calls hit real HA instead of the
+    unreachable Supervisor proxy — the 502-on-unreachable-core-API fallback
+    itself is covered at the unit level (tests/test_ha.py).
+    """
+
+    def test_reload_invalid_domain(self, companion_url: str, auth_headers: dict[str, str], _ha_ready: None) -> None:
+        r = requests.post(f"{companion_url}/v1/ha/reload/evil_domain", headers=auth_headers, timeout=10)
+        assert r.status_code == 400
+
+    def test_reload_automation_succeeds(
+        self, companion_url: str, auth_headers: dict[str, str], _ha_ready: None
+    ) -> None:
+        r = requests.post(f"{companion_url}/v1/ha/reload/automation", headers=auth_headers, timeout=10)
+        assert r.status_code == 200
+        assert r.json()["status"] == "ok"
+
+
 class TestAutomationsCRUD:
     """Integration tests for automation CRUD endpoints."""
 
@@ -248,6 +269,107 @@ class TestAutomationsCRUD:
         data = r.json()
         assert data["id"] == "integ_test_auto_1"
         assert "content" in data
+
+    def test_create_and_delete_by_alias(
+        self, companion_url: str, auth_headers: dict[str, str], _ha_ready: None
+    ) -> None:
+        """HA derives entity_id from alias, not config id — deleting by the
+        display identifier (alias) must still remove the config entry and
+        the live entity, not just 404."""
+        alias = "Integration Test Alias Delete Case"
+        body = f"""id: integ_test_auto_alias_case
+alias: {alias}
+trigger:
+  - platform: time
+    at: "13:00:00"
+action:
+  - service: light.turn_on
+"""
+        r = requests.post(
+            f"{companion_url}/v1/config/automation",
+            data=body,
+            headers=auth_headers,
+            timeout=10,
+        )
+        assert r.status_code == 201
+        data = r.json()
+        assert data["id"] == "integ_test_auto_alias_case"
+        assert data["reloaded"] is True
+        assert data["entity_id"], "expected HA to confirm a live entity_id for the new automation"
+        assert data["entity_id"] != data["id"], "HA derives entity_id from alias, not id"
+
+        # Delete by alias — the display identifier — not the config id.
+        r = requests.delete(
+            f"{companion_url}/v1/config/automation",
+            params={"id": alias},
+            headers=auth_headers,
+            timeout=10,
+        )
+        assert r.status_code == 200
+
+        r = requests.get(
+            f"{companion_url}/v1/config/automation",
+            params={"id": "integ_test_auto_alias_case"},
+            headers=auth_headers,
+            timeout=10,
+        )
+        assert r.status_code == 404
+
+        r = requests.get(f"{companion_url}/v1/config/automations", headers=auth_headers, timeout=10)
+        ids = [a["id"] for a in r.json()["automations"]]
+        assert "integ_test_auto_alias_case" not in ids
+
+
+class TestHelpersCRUD:
+    """Integration tests for helper CRUD — asserts real HA entity materialization."""
+
+    def test_create_helper_materializes_live_entity(
+        self, companion_url: str, auth_headers: dict[str, str], _ha_ready: None
+    ) -> None:
+        # HA's default onboarding config doesn't wire up helper domains via
+        # YAML — create the backing file, then add the !include ourselves.
+        r = requests.put(
+            f"{companion_url}/v1/config/file",
+            params={"path": "input_boolean.yaml", "dry_run": "false"},
+            data="# managed by hactl integration test\n",
+            headers=auth_headers,
+            timeout=10,
+        )
+        assert r.status_code == 200
+
+        r = requests.get(
+            f"{companion_url}/v1/config/file",
+            params={"path": "configuration.yaml", "resolve": "false"},
+            headers=auth_headers,
+            timeout=10,
+        )
+        assert r.status_code == 200
+        base_config = r.json()["content"]
+        if "input_boolean:" not in base_config:
+            new_config = base_config.rstrip("\n") + "\ninput_boolean: !include input_boolean.yaml\n"
+            r = requests.put(
+                f"{companion_url}/v1/config/file",
+                params={"path": "configuration.yaml", "dry_run": "false"},
+                data=new_config,
+                headers=auth_headers,
+                timeout=10,
+            )
+            assert r.status_code == 200
+
+        body = "integ_test_toggle:\n  name: Integration Test Toggle\n"
+        r = requests.post(
+            f"{companion_url}/v1/config/helper",
+            params={"domain": "input_boolean"},
+            data=body,
+            headers=auth_headers,
+            timeout=10,
+        )
+        assert r.status_code == 201
+        data = r.json()
+        assert data["id"] == "integ_test_toggle"
+        assert data["entity_id"] == "input_boolean.integ_test_toggle"
+        assert data["reloaded"] is True
+        assert data["entity_created"] is True
 
 
 class TestScriptsCRUD:

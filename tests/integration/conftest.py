@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import tempfile
 import time
 from collections.abc import Iterator
 
@@ -14,7 +16,6 @@ import websocket
 from tests.related_fixture import docker_seed_script
 
 COMPOSE_FILE = "docker-compose.integration.yaml"
-COMPANION_TOKEN = "integration-test-token-12345"
 CLIENT_ID = "http://hactl-test"
 
 # ---------------------------------------------------------------------------
@@ -35,17 +36,33 @@ def _get_mapped_port(service: str, container_port: int) -> str:
 
 @pytest.fixture(scope="session")
 def compose_up():
-    """Start the integration stack and yield port mappings, then tear down."""
+    """Start HA, onboard it, then start companion with a real HA token.
+
+    There is no real Supervisor in this stack, so companion's SUPERVISOR_TOKEN
+    (used both for its own incoming Bearer auth and, via CORE_API_URL, for
+    outgoing HA core API calls — see core_api.py) must be a real HA
+    long-lived access token. That token only exists after onboarding, so HA
+    has to come up and be onboarded before companion starts.
+    """
     t0 = time.monotonic()
-    print("\n[integration] docker compose up --build ...", flush=True)
-    _compose("up", "-d", "--build")
+    print("\n[integration] docker compose up --build homeassistant ...", flush=True)
+    _compose("up", "-d", "--build", "homeassistant")
+    env_file_path: str | None = None
     try:
         ha_port = _get_mapped_port("homeassistant", 8123)
-        comp_port = _get_mapped_port("companion", 9100)
         ha_url = f"http://localhost:{ha_port}"
-        companion_url = f"http://localhost:{comp_port}"
         print(f"[integration] waiting for HA at {ha_url} ...", flush=True)
         _wait_for_ha(ha_url)
+
+        print("[integration] onboarding HA to obtain a long-lived token ...", flush=True)
+        token = _onboard_ha(ha_url)
+        env_file_path = _write_env_file({"SUPERVISOR_TOKEN": token})
+
+        print("[integration] docker compose up --build companion ...", flush=True)
+        _compose("--env-file", env_file_path, "up", "-d", "--build", "companion")
+
+        comp_port = _get_mapped_port("companion", 9100)
+        companion_url = f"http://localhost:{comp_port}"
         print(f"[integration] waiting for companion at {companion_url} ...", flush=True)
         _wait_for_url(f"{companion_url}/v1/health", timeout=30)
         elapsed = time.monotonic() - t0
@@ -53,10 +70,22 @@ def compose_up():
         yield {
             "ha_url": ha_url,
             "companion_url": companion_url,
+            "ha_token": token,
         }
     finally:
         print("\n[integration] docker compose down -v ...", flush=True)
         _compose("down", "-v")
+        if env_file_path is not None:
+            os.unlink(env_file_path)
+
+
+def _write_env_file(values: dict[str, str]) -> str:
+    """Write a dotenv file for `docker compose --env-file`, return its path."""
+    fd, path = tempfile.mkstemp(prefix="hactl-companion-integration-", suffix=".env")
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        for key, value in values.items():
+            f.write(f"{key}={value}\n")
+    return path
 
 
 # ---------------------------------------------------------------------------
@@ -163,8 +192,12 @@ def _onboard_ha(base_url: str) -> str:
 
 @pytest.fixture(scope="session")
 def ha_token(compose_up: dict[str, str]) -> str:
-    """Complete HA onboarding and return a long-lived token."""
-    return _onboard_ha(compose_up["ha_url"])
+    """The long-lived HA token obtained during onboarding in compose_up.
+
+    Onboarding can only run once per HA instance, so this must reuse the
+    token compose_up already created rather than onboarding again.
+    """
+    return compose_up["ha_token"]
 
 
 @pytest.fixture(scope="session")
@@ -178,8 +211,15 @@ def ha_url(compose_up: dict[str, str]) -> str:
 
 
 @pytest.fixture()
-def auth_headers() -> dict[str, str]:
-    return {"Authorization": f"Bearer {COMPANION_TOKEN}"}
+def auth_headers(ha_token: str) -> dict[str, str]:
+    """Bearer token for companion's own direct-access auth.
+
+    Companion has no real Supervisor in this stack, so its SUPERVISOR_TOKEN
+    (see docker-compose.integration.yaml) is the real HA long-lived token —
+    the same value authenticates both companion's incoming requests and its
+    outgoing core API calls.
+    """
+    return {"Authorization": f"Bearer {ha_token}"}
 
 
 @pytest.fixture(scope="session")
@@ -191,7 +231,7 @@ def _ha_ready(companion_url: str, ha_token: str) -> None:
     """
     # Poll until companion can list config files (proves /config is populated)
     deadline = time.monotonic() + 60
-    headers = {"Authorization": f"Bearer {COMPANION_TOKEN}"}
+    headers = {"Authorization": f"Bearer {ha_token}"}
     while time.monotonic() < deadline:
         try:
             r = requests.get(f"{companion_url}/v1/config/files", headers=headers, timeout=5)
@@ -205,15 +245,15 @@ def _ha_ready(companion_url: str, ha_token: str) -> None:
 
 
 @pytest.fixture(scope="session")
-def related_fixture_seeded(companion_url: str, _ha_ready: None) -> Iterator[None]:
+def related_fixture_seeded(companion_url: str, ha_token: str, _ha_ready: None) -> Iterator[None]:
     """Seed the disposable Docker /config volume with related graph fixture data."""
     _compose("exec", "-T", "companion", "python3", "-", input_text=docker_seed_script())
-    _wait_for_related_fixture(companion_url)
+    _wait_for_related_fixture(companion_url, ha_token)
     yield
 
 
-def _wait_for_related_fixture(companion_url: str) -> None:
-    headers = {"Authorization": f"Bearer {COMPANION_TOKEN}"}
+def _wait_for_related_fixture(companion_url: str, ha_token: str) -> None:
+    headers = {"Authorization": f"Bearer {ha_token}"}
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
         try:

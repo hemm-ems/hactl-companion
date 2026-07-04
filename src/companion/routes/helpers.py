@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from io import StringIO
+from pathlib import Path
 from typing import Any
 
 from aiohttp import web
@@ -43,23 +44,93 @@ def _yaml_file_for_domain(domain: str) -> str:
     return f"{domain}.yaml"
 
 
-def _load_helpers(base: str, domain: str) -> tuple[dict[str, Any], Any]:
-    """Load a helper YAML file, returning (data_dict, file_path).
+def _load_helpers_from(target: Path) -> dict[str, Any]:
+    """Load a helper YAML file's dict content from an explicit path.
 
-    Helper files are top-level mappings keyed by entity slug.
-    If the file doesn't exist, returns an empty dict and the target path.
+    If the file doesn't exist, returns an empty dict.
     """
-    filename = _yaml_file_for_domain(domain)
-    target = _resolve_config_path(base, filename)
     if not target.is_file():
-        return {}, target
+        return {}
     with open(target, encoding="utf-8") as f:
         data = yaml.load(f)
     if data is None:
         data = {}
     if not isinstance(data, dict):
-        raise web.HTTPInternalServerError(text=f"{filename} must be a top-level mapping")
-    return data, target
+        raise web.HTTPInternalServerError(text=f"{target.name} must be a top-level mapping")
+    return data
+
+
+def _load_helpers(base: str, domain: str) -> tuple[dict[str, Any], Any]:
+    """Load a helper YAML file, returning (data_dict, file_path).
+
+    Helper files are top-level mappings keyed by entity slug. Resolves the
+    file purely by naming convention (<domain>.yaml) — used by the
+    read/update/delete paths, which operate on helpers that (by definition)
+    already exist and were therefore already loaded successfully by HA.
+    """
+    target = _resolve_config_path(base, _yaml_file_for_domain(domain))
+    return _load_helpers_from(target), target
+
+
+def _tag_of(node: Any) -> str | None:
+    """Return the ruamel YAML tag (e.g. '!include') of a loaded node, or None."""
+    tag = getattr(node, "tag", None)
+    return getattr(tag, "value", None) if tag is not None else None
+
+
+def _resolve_domain_target(base: str, domain: str) -> Path:
+    """Resolve the file HA actually loads for a helper domain's top-level key.
+
+    Reads configuration.yaml's top-level `<domain>:` key. Raises 400 if the
+    key is absent, holds an inline mapping/list instead of an `!include`, or
+    uses an `!include_dir_*` directive — in all three cases, writing to
+    `<domain>.yaml` by convention would produce a helper HA never loads.
+    """
+    config_path = _resolve_config_path(base, "configuration.yaml")
+    if not config_path.is_file():
+        raise web.HTTPBadRequest(text="configuration.yaml not found")
+
+    with open(config_path, encoding="utf-8") as f:
+        config_data = yaml.load(f)
+
+    if not isinstance(config_data, dict) or domain not in config_data:
+        raise web.HTTPBadRequest(
+            text=(
+                f"configuration.yaml has no top-level '{domain}:' key. "
+                f"Add '{domain}: !include {domain}.yaml' before creating {domain} helpers."
+            )
+        )
+
+    value = config_data[domain]
+    tag = _tag_of(value)
+
+    if tag == "!include":
+        rel_path = str(value.value).strip()
+        return _resolve_config_path(base, rel_path)
+
+    if tag and tag.startswith("!include_dir_"):
+        raise web.HTTPBadRequest(
+            text=f"'{domain}:' uses {tag} in configuration.yaml, which hactl cannot target for a single new helper."
+        )
+
+    raise web.HTTPBadRequest(
+        text=(
+            f"'{domain}:' is defined inline in configuration.yaml, not via !include. "
+            f"hactl cannot safely append to an inline mapping."
+        )
+    )
+
+
+async def _poll_entity_created(entity_id: str, attempts: int = 5, delay: float = 0.4) -> bool:
+    """Poll /api/states until entity_id appears, or give up after `attempts` tries."""
+    import asyncio
+
+    for attempt in range(attempts):
+        if attempt:
+            await asyncio.sleep(delay)
+        if await core_api.get_state(entity_id) is not None:
+            return True
+    return False
 
 
 def _save_helpers(target: Any, data: dict[str, Any]) -> None:
@@ -140,6 +211,7 @@ async def post_helper(request: web.Request) -> web.Response:
     if not domain:
         raise web.HTTPBadRequest(text="Missing domain parameter")
     _validate_domain(domain)
+    target = _resolve_domain_target(base, domain)
 
     body = await request.text()
     if not body.strip():
@@ -156,14 +228,25 @@ async def post_helper(request: web.Request) -> web.Response:
     helper_id = next(iter(new_data))
     helper_body = new_data[helper_id]
 
-    data, target = _load_helpers(base, domain)
+    data = _load_helpers_from(target)
     if helper_id in data:
         raise web.HTTPConflict(text=f"Helper already exists: {helper_id}")
 
     data[helper_id] = helper_body
     _save_helpers(target, data)
     reloaded = await core_api.reload_domain(domain)
-    return web.json_response({"status": "created", "id": helper_id, "reloaded": reloaded}, status=201)
+    entity_id = f"{domain}.{helper_id}"
+    entity_created = await _poll_entity_created(entity_id) if reloaded else False
+    return web.json_response(
+        {
+            "status": "created",
+            "id": helper_id,
+            "entity_id": entity_id,
+            "reloaded": reloaded,
+            "entity_created": entity_created,
+        },
+        status=201,
+    )
 
 
 async def put_helper(request: web.Request) -> web.Response:
