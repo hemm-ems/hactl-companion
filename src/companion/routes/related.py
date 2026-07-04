@@ -217,21 +217,40 @@ async def get_related_entity(request: web.Request) -> web.Response:
     entity_id = request.query.get("entity_id", "")
     if not entity_id:
         raise web.HTTPBadRequest(text="Missing entity_id parameter")
+    include_stale = request.query.get("stale", "").lower() in ("1", "true", "yes")
 
-    graph = RelatedGraph(request.app["config_base_path"])
+    base = request.app["config_base_path"]
+    graph = RelatedGraph(base)
     graph.load()
-    try:
-        related = graph.related_to_entity(entity_id)
-    except KeyError as exc:
-        raise web.HTTPNotFound(text=f"Entity not found: {entity_id}") from exc
+
+    # A stale/renamed/deleted entity is not in the on-disk registry snapshot. By
+    # default that is a 404 (unchanged). With ?stale=true we instead scan the
+    # config files for the literal entity_id and report where it is still
+    # referenced — the co-occurrence graph can't, since it only pairs known ids.
+    is_stale = entity_id not in graph.entity_ids
+    if is_stale and not include_stale:
+        raise web.HTTPNotFound(text=f"Entity not found: {entity_id}")
+
+    related = [] if is_stale else graph.related_to_entity(entity_id)
+
+    stale_refs: list[dict[str, str]] = []
+    if is_stale:
+        from companion.refscan import scan_yaml_for_literal
+
+        stale_refs = [
+            {"location": hit.location, "path": hit.path, "matched_value": hit.matched_value}
+            for hit in scan_yaml_for_literal(base, entity_id)
+        ]
 
     return web.json_response(
         {
             "entity_id": entity_id,
+            "stale": is_stale,
             "related": [
                 {"entity_id": item.entity_id, "relationship": item.relationship, "detail": item.detail}
                 for item in related
             ],
+            "stale_refs": stale_refs,
         }
     )
 

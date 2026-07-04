@@ -129,3 +129,36 @@ async def test_related_entity_rejects_unknown_entity_id(
     resp = await client.get(f"/v1/related/entity?entity_id={UNKNOWN_ENTITY_ID}", headers=auth_headers)
 
     assert resp.status == 404
+
+
+async def test_related_entity_stale_param_returns_config_refs(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    config_dir: Path,
+) -> None:
+    seed_related_fixture(config_dir)
+
+    resp = await client.get(f"/v1/related/entity?entity_id={UNKNOWN_ENTITY_ID}&stale=true", headers=auth_headers)
+
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["stale"] is True
+    hits = {(h["location"], h["matched_value"]) for h in data["stale_refs"]}
+    assert ("configuration.yaml", UNKNOWN_ENTITY_ID) in hits
+
+
+async def test_related_entity_stale_param_live_entity_reports_not_stale(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    config_dir: Path,
+) -> None:
+    seed_related_fixture(config_dir)
+
+    resp = await client.get(f"/v1/related/entity?entity_id={SOURCE_ENTITY_ID}&stale=true", headers=auth_headers)
+
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["stale"] is False
+    assert data["stale_refs"] == []
+    # live relations are still reported when ?stale=true is passed for a live entity
+    assert any(item["entity_id"] == GENERATED_ENTITY_ID for item in data["related"])
