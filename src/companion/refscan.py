@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ruamel.yaml.scalarstring import ScalarString
+
 from companion.yaml_resolver import CircularIncludeError, YamlResolver
 
 _INCLUDE_DIR_TAGS = {
@@ -74,6 +76,102 @@ def scan_yaml_for_literal(
 
     hits.sort(key=lambda h: (h.location, h.path))
     return hits
+
+
+def replace_yaml_literal(
+    base: str | Path,
+    target: str,
+    replacement: str,
+    entry_file: str = "configuration.yaml",
+    *,
+    dry_run: bool,
+) -> list[dict[str, str]]:
+    """Rewrite every string leaf equal to ``target`` to ``replacement``, per file.
+
+    Walks the exact same ``!include`` graph as :func:`scan_yaml_for_literal` and
+    rewrites the literal *in the file it actually lives in*, so a reference in
+    ``automations.yaml`` is changed there and not in a resolved blob. Each file is
+    loaded round-trip (``resolve=False``) and dumped back through the resolver, so
+    comments, formatting and quote style of untouched nodes survive.
+
+    Returns ``[{location, path, before, after}]`` for every rewritten leaf. When
+    ``dry_run`` is true the report is identical but no file is written.
+    """
+    base_path = Path(base).resolve()
+    resolver = YamlResolver(base_path)
+    changes: list[dict[str, str]] = []
+    seen: set[str] = set()
+    queue: deque[str] = deque([entry_file])
+
+    while queue:
+        rel = queue.popleft()
+        abs_path = (base_path / rel).resolve()
+        if str(abs_path) in seen or not abs_path.is_file():
+            continue
+        seen.add(str(abs_path))
+
+        try:
+            data = resolver.load(rel, resolve=False)
+        except (FileNotFoundError, PermissionError, ValueError, CircularIncludeError):
+            # Missing / denied (e.g. secrets.yaml) / circular — skip, never write.
+            continue
+
+        location = _rel_to(abs_path, base_path)
+        match_paths = _replace_tree(data, target, replacement)
+        if match_paths:
+            for match_path in match_paths:
+                changes.append(
+                    {
+                        "location": location,
+                        "path": _path_str(match_path),
+                        "before": target,
+                        "after": replacement,
+                    }
+                )
+            if not dry_run:
+                resolver.save(rel, data)
+
+        for inc in _include_targets(data, abs_path.parent):
+            queue.append(_rel_to(inc, base_path))
+
+    changes.sort(key=lambda c: (c["location"], c["path"]))
+    return changes
+
+
+def _replace_tree(node: Any, target: str, replacement: str, path: tuple[Any, ...] = ()) -> list[list[Any]]:
+    """Mutate ``node`` in place: set every str leaf == target to replacement.
+
+    Mirrors :func:`_scan_tree` but assigns into the parent container, so it needs
+    the parent+key/index to write. Quote style is preserved by reconstructing the
+    original scalar's subclass (ruamel quoted scalars are ``str`` subclasses).
+    ``!include``-tagged scalars are not str/dict/list, so they fall through
+    untouched and are never rewritten. Returns the path of every rewritten leaf.
+    """
+    matches: list[list[Any]] = []
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if isinstance(value, str):
+                if value == target:
+                    node[key] = _styled_like(value, replacement)
+                    matches.append([*path, key])
+            elif isinstance(value, (dict, list)):
+                matches.extend(_replace_tree(value, target, replacement, (*path, key)))
+    elif isinstance(node, list):
+        for index, value in enumerate(node):
+            if isinstance(value, str):
+                if value == target:
+                    node[index] = _styled_like(value, replacement)
+                    matches.append([*path, index])
+            elif isinstance(value, (dict, list)):
+                matches.extend(_replace_tree(value, target, replacement, (*path, index)))
+    return matches
+
+
+def _styled_like(original: str, replacement: str) -> str:
+    """Return ``replacement`` wrapped in the original scalar's quote style, if any."""
+    if isinstance(original, ScalarString):
+        return type(original)(replacement)
+    return replacement
 
 
 def _scan_tree(node: Any, target: str, path: tuple[Any, ...] = ()) -> list[list[Any]]:
