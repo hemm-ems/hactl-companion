@@ -295,6 +295,17 @@ class TestRefReplace:
         assert self.FRESH in after
         assert self.STALE not in after
 
+    def test_entities_enumerates_seeded_reference(
+        self, companion_url: str, auth_headers: dict[str, str], _ha_ready: None
+    ) -> None:
+        # Self-contained: re-seed so this passes regardless of test order.
+        self._seed(companion_url, auth_headers)
+
+        r = requests.get(f"{companion_url}/v1/ref/entities", headers=auth_headers, timeout=10)
+        assert r.status_code == 200, r.text
+        values = {e["matched_value"] for e in r.json()["entities"]}
+        assert self.STALE in values, f"{self.STALE} not enumerated; got {sorted(values)}"
+
 
 class TestHaReload:
     """Integration tests for POST /v1/ha/reload/{domain} against real HA.

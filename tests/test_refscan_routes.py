@@ -30,6 +30,30 @@ async def test_ref_scan_requires_auth(client: TestClient, config_dir: Path) -> N
     assert resp.status == 401
 
 
+async def test_ref_entities_enumerates_shaped_leaves(
+    client: TestClient, auth_headers: dict[str, str], config_dir: Path
+) -> None:
+    (config_dir / "configuration.yaml").write_text("note: hello\nsensor:\n  value: light.kitchen\n", encoding="utf-8")
+
+    resp = await client.get("/v1/ref/entities", headers=auth_headers)
+
+    assert resp.status == 200
+    data = await resp.json()
+    assert {
+        "location": "configuration.yaml",
+        "path": "sensor.value",
+        "key": "value",
+        "matched_value": "light.kitchen",
+    } in data["entities"]
+    # The non-entity-shaped scalar "hello" is not enumerated.
+    assert all(e["matched_value"] != "hello" for e in data["entities"])
+
+
+async def test_ref_entities_requires_auth(client: TestClient, config_dir: Path) -> None:
+    resp = await client.get("/v1/ref/entities")
+    assert resp.status == 401
+
+
 async def test_ref_replace_dry_run_reports_but_writes_nothing(
     client: TestClient, auth_headers: dict[str, str], config_dir: Path
 ) -> None:
