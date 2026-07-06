@@ -206,6 +206,128 @@ class TestConfigWrite:
         assert r.status_code == 400
 
 
+class TestRefReplace:
+    """Real cross-file literal scan + replace against the live /config volume.
+
+    A mock can't prove the file on disk was actually rewritten, so this drives
+    the whole path: seed a reference into automations.yaml (already in HA's
+    default !include graph), scan for it, dry-run (must not write), then apply
+    (must write) — verifying every step by reading the file back through the
+    companion. Uses a unique literal so it never collides with other tests.
+    """
+
+    STALE = "binary_sensor.refscan_probe_stale"
+    FRESH = "binary_sensor.refscan_probe_fresh"
+    _SEED = (
+        "- id: refscan_probe\n"
+        "  alias: refscan probe\n"
+        "  trigger:\n"
+        "    - platform: state\n"
+        f"      entity_id: {STALE}\n"
+        "  action:\n"
+        '    - delay: "00:00:01"\n'
+    )
+
+    def _read(self, companion_url: str, auth_headers: dict[str, str]) -> str:
+        r = requests.get(
+            f"{companion_url}/v1/config/file",
+            params={"path": "automations.yaml", "resolve": "false"},
+            headers=auth_headers,
+            timeout=10,
+        )
+        assert r.status_code == 200, r.text
+        return r.json()["content"]
+
+    def _seed(self, companion_url: str, auth_headers: dict[str, str]) -> None:
+        r = requests.put(
+            f"{companion_url}/v1/config/file",
+            params={"path": "automations.yaml", "dry_run": "false"},
+            data=self._SEED,
+            headers=auth_headers,
+            timeout=15,
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "applied"
+
+    def test_scan_dry_run_then_apply(self, companion_url: str, auth_headers: dict[str, str], _ha_ready: None) -> None:
+        self._seed(companion_url, auth_headers)
+
+        # Scan finds the literal in the file it actually lives in.
+        r = requests.get(
+            f"{companion_url}/v1/ref/scan",
+            params={"target": self.STALE},
+            headers=auth_headers,
+            timeout=10,
+        )
+        assert r.status_code == 200, r.text
+        hits = r.json()["hits"]
+        assert {"location": "automations.yaml", "path": "[0].trigger[0].entity_id", "matched_value": self.STALE} in hits
+
+        # Dry-run reports the change but must not touch the file.
+        r = requests.post(
+            f"{companion_url}/v1/ref/replace",
+            json={"old": self.STALE, "new": self.FRESH, "dry_run": True},
+            headers=auth_headers,
+            timeout=10,
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["status"] == "dry_run"
+        assert {
+            "location": "automations.yaml",
+            "path": "[0].trigger[0].entity_id",
+            "before": self.STALE,
+            "after": self.FRESH,
+        } in body["changes"]
+        assert self.STALE in self._read(companion_url, auth_headers)
+
+        # Apply actually rewrites the on-disk file.
+        r = requests.post(
+            f"{companion_url}/v1/ref/replace",
+            json={"old": self.STALE, "new": self.FRESH, "dry_run": False},
+            headers=auth_headers,
+            timeout=10,
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "applied"
+
+        after = self._read(companion_url, auth_headers)
+        assert self.FRESH in after
+        assert self.STALE not in after
+
+    def test_entities_enumerates_seeded_reference(
+        self, companion_url: str, auth_headers: dict[str, str], _ha_ready: None
+    ) -> None:
+        # Self-contained: re-seed so this passes regardless of test order.
+        self._seed(companion_url, auth_headers)
+
+        r = requests.get(f"{companion_url}/v1/ref/entities", headers=auth_headers, timeout=10)
+        assert r.status_code == 200, r.text
+        values = {e["matched_value"] for e in r.json()["entities"]}
+        assert self.STALE in values, f"{self.STALE} not enumerated; got {sorted(values)}"
+
+
+class TestHaReload:
+    """Integration tests for POST /v1/ha/reload/{domain} against real HA.
+
+    This stack wires CORE_API_URL + a real onboarding-issued token (see
+    conftest.py's compose_up) so these calls hit real HA instead of the
+    unreachable Supervisor proxy — the 502-on-unreachable-core-API fallback
+    itself is covered at the unit level (tests/test_ha.py).
+    """
+
+    def test_reload_invalid_domain(self, companion_url: str, auth_headers: dict[str, str], _ha_ready: None) -> None:
+        r = requests.post(f"{companion_url}/v1/ha/reload/evil_domain", headers=auth_headers, timeout=10)
+        assert r.status_code == 400
+
+    def test_reload_automation_succeeds(
+        self, companion_url: str, auth_headers: dict[str, str], _ha_ready: None
+    ) -> None:
+        r = requests.post(f"{companion_url}/v1/ha/reload/automation", headers=auth_headers, timeout=10)
+        assert r.status_code == 200
+        assert r.json()["status"] == "ok"
+
+
 class TestAutomationsCRUD:
     """Integration tests for automation CRUD endpoints."""
 
@@ -248,6 +370,107 @@ class TestAutomationsCRUD:
         data = r.json()
         assert data["id"] == "integ_test_auto_1"
         assert "content" in data
+
+    def test_create_and_delete_by_alias(
+        self, companion_url: str, auth_headers: dict[str, str], _ha_ready: None
+    ) -> None:
+        """HA derives entity_id from alias, not config id — deleting by the
+        display identifier (alias) must still remove the config entry and
+        the live entity, not just 404."""
+        alias = "Integration Test Alias Delete Case"
+        body = f"""id: integ_test_auto_alias_case
+alias: {alias}
+trigger:
+  - platform: time
+    at: "13:00:00"
+action:
+  - service: light.turn_on
+"""
+        r = requests.post(
+            f"{companion_url}/v1/config/automation",
+            data=body,
+            headers=auth_headers,
+            timeout=10,
+        )
+        assert r.status_code == 201
+        data = r.json()
+        assert data["id"] == "integ_test_auto_alias_case"
+        assert data["reloaded"] is True
+        assert data["entity_id"], "expected HA to confirm a live entity_id for the new automation"
+        assert data["entity_id"] != data["id"], "HA derives entity_id from alias, not id"
+
+        # Delete by alias — the display identifier — not the config id.
+        r = requests.delete(
+            f"{companion_url}/v1/config/automation",
+            params={"id": alias},
+            headers=auth_headers,
+            timeout=10,
+        )
+        assert r.status_code == 200
+
+        r = requests.get(
+            f"{companion_url}/v1/config/automation",
+            params={"id": "integ_test_auto_alias_case"},
+            headers=auth_headers,
+            timeout=10,
+        )
+        assert r.status_code == 404
+
+        r = requests.get(f"{companion_url}/v1/config/automations", headers=auth_headers, timeout=10)
+        ids = [a["id"] for a in r.json()["automations"]]
+        assert "integ_test_auto_alias_case" not in ids
+
+
+class TestHelpersCRUD:
+    """Integration tests for helper CRUD — asserts real HA entity materialization."""
+
+    def test_create_helper_materializes_live_entity(
+        self, companion_url: str, auth_headers: dict[str, str], _ha_ready: None
+    ) -> None:
+        # HA's default onboarding config doesn't wire up helper domains via
+        # YAML — create the backing file, then add the !include ourselves.
+        r = requests.put(
+            f"{companion_url}/v1/config/file",
+            params={"path": "input_boolean.yaml", "dry_run": "false"},
+            data="# managed by hactl integration test\n",
+            headers=auth_headers,
+            timeout=10,
+        )
+        assert r.status_code == 200
+
+        r = requests.get(
+            f"{companion_url}/v1/config/file",
+            params={"path": "configuration.yaml", "resolve": "false"},
+            headers=auth_headers,
+            timeout=10,
+        )
+        assert r.status_code == 200
+        base_config = r.json()["content"]
+        if "input_boolean:" not in base_config:
+            new_config = base_config.rstrip("\n") + "\ninput_boolean: !include input_boolean.yaml\n"
+            r = requests.put(
+                f"{companion_url}/v1/config/file",
+                params={"path": "configuration.yaml", "dry_run": "false"},
+                data=new_config,
+                headers=auth_headers,
+                timeout=10,
+            )
+            assert r.status_code == 200
+
+        body = "integ_test_toggle:\n  name: Integration Test Toggle\n"
+        r = requests.post(
+            f"{companion_url}/v1/config/helper",
+            params={"domain": "input_boolean"},
+            data=body,
+            headers=auth_headers,
+            timeout=10,
+        )
+        assert r.status_code == 201
+        data = r.json()
+        assert data["id"] == "integ_test_toggle"
+        assert data["entity_id"] == "input_boolean.integ_test_toggle"
+        assert data["reloaded"] is True
+        assert data["entity_created"] is True
 
 
 class TestScriptsCRUD:

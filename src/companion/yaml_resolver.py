@@ -179,3 +179,16 @@ class YamlResolver:
         stream = StringIO()
         self._yaml.dump(data, stream)
         return stream.getvalue()
+
+    def save(self, rel_path: str, data: Any) -> None:
+        """Round-trip dump ``data`` back to ``rel_path``, within base only.
+
+        Uses the resolver's own YAML instance (``preserve_quotes=True``) so the
+        formatting, comments and quote style of untouched nodes survive. Path is
+        re-validated through ``_check_path``, so writes outside base or to a
+        denied file (``secrets.yaml``) raise rather than escaping the config dir.
+        """
+        target = (self._base / rel_path).resolve()
+        self._check_path(target)
+        with target.open("w", encoding="utf-8") as stream:
+            self._yaml.dump(data, stream)

@@ -7,3 +7,7 @@ homeassistant:
 automation: !include automations.yaml
 script: !include scripts.yaml
 template: !include template.yaml
+input_boolean: !include input_boolean.yaml
+input_number: !include input_number.yaml
+counter: !include counter.yaml
+timer: !include timer.yaml

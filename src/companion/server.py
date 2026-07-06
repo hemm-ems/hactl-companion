@@ -18,6 +18,7 @@ from companion.routes import (
     health,
     helpers,
     logs,
+    refscan,
     related,
     root,
     scripts,
@@ -125,5 +126,6 @@ def create_app(config_base_path: str = "/config") -> web.Application:
     register_routes(app, wireguard)
     register_routes(app, logs)
     register_routes(app, related)
+    register_routes(app, refscan)
 
     return app

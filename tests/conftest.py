@@ -31,8 +31,16 @@ def core_api_calls(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
     async def _fake_check_config() -> tuple[bool, str]:
         return True, ""
 
+    async def _fake_get_state(entity_id: str) -> dict[str, object] | None:
+        return {"entity_id": entity_id, "state": "unknown", "attributes": {}}
+
+    async def _fake_get_states() -> list[dict[str, object]] | None:
+        return []
+
     monkeypatch.setattr(core_api, "call_service", _fake_call_service)
     monkeypatch.setattr(core_api, "check_config", _fake_check_config)
+    monkeypatch.setattr(core_api, "get_state", _fake_get_state)
+    monkeypatch.setattr(core_api, "get_states", _fake_get_states)
     return calls
 
 
