@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from aiohttp.test_utils import TestClient
 
 from tests.related_fixture import (
@@ -108,8 +109,26 @@ async def test_related_entity_auth_invalid_token(client: TestClient, config_dir:
     assert resp.status == 401
 
 
-async def test_related_entity_ingress_header_bypasses_token(client: TestClient, config_dir: Path) -> None:
+async def test_related_entity_ingress_header_from_untrusted_source_rejected(
+    client: TestClient, config_dir: Path
+) -> None:
+    """A spoofed ingress header from an untrusted source must not bypass auth."""
     seed_related_fixture(config_dir)
+
+    resp = await client.get(
+        f"/v1/related/entity?entity_id={SOURCE_ENTITY_ID}",
+        headers={"X-Ingress-Path": "/api/hassio_ingress/abc123"},
+    )
+
+    assert resp.status == 401
+
+
+async def test_related_entity_ingress_from_trusted_source_ok(
+    client: TestClient, config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A trusted ingress source may reach the endpoint without a bearer token."""
+    seed_related_fixture(config_dir)
+    monkeypatch.setenv("INGRESS_PROXY_IPS", "127.0.0.1")
 
     resp = await client.get(
         f"/v1/related/entity?entity_id={SOURCE_ENTITY_ID}",

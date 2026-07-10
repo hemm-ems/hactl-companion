@@ -200,3 +200,24 @@ def test_entities_list_item_key_is_the_enclosing_mapping_key(tmp_path: Path) -> 
 def test_entities_no_matches_returns_empty(tmp_path: Path) -> None:
     (tmp_path / "configuration.yaml").write_text("a:\n  b: c\n", encoding="utf-8")
     assert scan_yaml_for_entities(tmp_path) == []
+
+
+def test_scan_skips_out_of_base_include(tmp_path: Path) -> None:
+    """An `!include ../outside.yaml` must be skipped, never retargeted in-base.
+
+    Regression for the `_rel_to` fallback that returned `path.name`, which would
+    re-resolve a same-named file *inside* base and scan the wrong file.
+    """
+    base = tmp_path / "config"
+    base.mkdir()
+    # A same-named file INSIDE base that is never legitimately included.
+    (base / "outside.yaml").write_text("y: sensor.gone\n", encoding="utf-8")
+    # A file OUTSIDE base holding the literal — must never be reached.
+    (tmp_path / "outside.yaml").write_text("x: sensor.gone\n", encoding="utf-8")
+    (base / "configuration.yaml").write_text("sensor: !include ../outside.yaml\n", encoding="utf-8")
+
+    hits = scan_yaml_for_literal(base, "sensor.gone")
+
+    locations = {h.location for h in hits}
+    assert "outside.yaml" not in locations, "escaping include was retargeted to an in-base file"
+    assert hits == []

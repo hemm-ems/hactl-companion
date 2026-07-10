@@ -135,15 +135,12 @@ async def _poll_entity_created(entity_id: str, attempts: int = 5, delay: float =
 
 def _save_helpers(target: Any, data: dict[str, Any]) -> None:
     """Write helper data back to file with backup."""
-    import shutil
-    from datetime import UTC, datetime
     from pathlib import Path
 
+    from companion.backups import make_backup
+
     path = Path(target)
-    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
-    backup_name = f"{path.name}.bak.{timestamp}"
-    if path.is_file():
-        shutil.copy2(path, path.parent / backup_name)
+    make_backup(path)
 
     with open(path, "w", encoding="utf-8") as f:
         yaml.dump(data, f)
@@ -249,12 +246,47 @@ async def post_helper(request: web.Request) -> web.Response:
     )
 
 
+def _locate_helper(base: str, helper_id: str, domain: str | None) -> tuple[str, dict[str, Any], Any]:
+    """Locate the domain file that owns ``helper_id`` for update/delete.
+
+    With an explicit ``domain`` only that domain is considered. Without one, all
+    domains are scanned. The same slug can legitimately exist in two domains
+    (e.g. ``counter.kitchen`` and ``input_boolean.kitchen``), so scanning and
+    silently acting on the alphabetically-first match would touch the wrong
+    entity — instead the ambiguity is surfaced as a 409 listing the candidates.
+
+    Returns ``(domain, data_dict, file_path)``.
+    """
+    if domain:
+        _validate_domain(domain)
+        data, target = _load_helpers(base, domain)
+        if helper_id in data:
+            return domain, data, target
+        raise web.HTTPNotFound(text=f"Helper not found: {helper_id} (domain {domain})")
+
+    matches: list[tuple[str, dict[str, Any], Any]] = []
+    for candidate in sorted(ALLOWED_DOMAINS):
+        data, target = _load_helpers(base, candidate)
+        if helper_id in data:
+            matches.append((candidate, data, target))
+
+    if not matches:
+        raise web.HTTPNotFound(text=f"Helper not found: {helper_id}")
+    if len(matches) > 1:
+        domains = ", ".join(candidate for candidate, _, _ in matches)
+        raise web.HTTPConflict(
+            text=(f"Helper id '{helper_id}' is ambiguous across domains: {domains}. Retry with ?domain=<one of these>.")
+        )
+    return matches[0]
+
+
 async def put_helper(request: web.Request) -> web.Response:
-    """PUT /v1/config/helper?id=<id> — update helper definition."""
+    """PUT /v1/config/helper?id=<id>[&domain=<domain>] — update helper definition."""
     base = request.app["config_base_path"]
     helper_id = request.query.get("id", "")
     if not helper_id:
         raise web.HTTPBadRequest(text="Missing id parameter")
+    domain_param = request.query.get("domain") or None
 
     body = await request.text()
     if not body.strip():
@@ -268,35 +300,26 @@ async def put_helper(request: web.Request) -> web.Response:
     if not isinstance(new_body, dict):
         raise web.HTTPBadRequest(text="Helper must be a YAML mapping")
 
-    # Find which domain this helper belongs to
-    for domain in sorted(ALLOWED_DOMAINS):
-        data, target = _load_helpers(base, domain)
-        if helper_id in data:
-            data[helper_id] = new_body
-            _save_helpers(target, data)
-            reloaded = await core_api.reload_domain(domain)
-            return web.json_response({"status": "applied", "reloaded": reloaded})
-
-    raise web.HTTPNotFound(text=f"Helper not found: {helper_id}")
+    domain, data, target = _locate_helper(base, helper_id, domain_param)
+    data[helper_id] = new_body
+    _save_helpers(target, data)
+    reloaded = await core_api.reload_domain(domain)
+    return web.json_response({"status": "applied", "reloaded": reloaded})
 
 
 async def delete_helper(request: web.Request) -> web.Response:
-    """DELETE /v1/config/helper?id=<id> — delete helper."""
+    """DELETE /v1/config/helper?id=<id>[&domain=<domain>] — delete helper."""
     base = request.app["config_base_path"]
     helper_id = request.query.get("id", "")
     if not helper_id:
         raise web.HTTPBadRequest(text="Missing id parameter")
+    domain_param = request.query.get("domain") or None
 
-    # Find which domain this helper belongs to
-    for domain in sorted(ALLOWED_DOMAINS):
-        data, target = _load_helpers(base, domain)
-        if helper_id in data:
-            del data[helper_id]
-            _save_helpers(target, data)
-            reloaded = await core_api.reload_domain(domain)
-            return web.json_response({"status": "deleted", "reloaded": reloaded})
-
-    raise web.HTTPNotFound(text=f"Helper not found: {helper_id}")
+    domain, data, target = _locate_helper(base, helper_id, domain_param)
+    del data[helper_id]
+    _save_helpers(target, data)
+    reloaded = await core_api.reload_domain(domain)
+    return web.json_response({"status": "deleted", "reloaded": reloaded})
 
 
 routes: list[RouteDef] = [

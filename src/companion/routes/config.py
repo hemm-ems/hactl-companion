@@ -6,16 +6,17 @@ import difflib
 import os
 import shutil
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
+from typing import NamedTuple
 
 from aiohttp import web
 from ruamel.yaml import YAML
 
+from companion import core_api
+from companion.backups import make_backup
+from companion.params import parse_bool_param
+from companion.pathguard import is_denied, is_within
 from companion.yaml_resolver import YamlResolver
-
-# Files that must never be exposed
-DENIED_FILES: set[str] = {"secrets.yaml"}
 
 yaml = YAML()
 yaml.preserve_quotes = True
@@ -36,12 +37,11 @@ def _resolve_config_path(base: str, relative: str) -> Path:
     base_path = Path(base).resolve()
     target = (base_path / relative).resolve()
 
-    if not str(target).startswith(str(base_path)):
+    if not is_within(target, base_path):
         raise web.HTTPBadRequest(text="Path traversal is not allowed")
 
-    filename = target.name.lower()
-    if filename in DENIED_FILES:
-        raise web.HTTPForbidden(text=f"Access to {filename} is denied")
+    if is_denied(target.name):
+        raise web.HTTPForbidden(text=f"Access to {target.name} is denied")
 
     return target
 
@@ -59,7 +59,7 @@ async def get_config_files(request: web.Request) -> web.Response:
         # Skip hidden/internal directories
         dirs[:] = [d for d in dirs if not d.startswith(".")]
         for fname in sorted(filenames):
-            if fname.endswith((".yaml", ".yml")) and fname.lower() not in DENIED_FILES:
+            if fname.endswith((".yaml", ".yml")) and not is_denied(fname):
                 rel = os.path.relpath(os.path.join(root, fname), base_path)
                 files.append(rel.replace("\\", "/"))
 
@@ -70,7 +70,7 @@ async def get_config_file(request: web.Request) -> web.Response:
     """GET /v1/config/file?path=...&resolve=true|false — read a whole YAML file."""
     base = request.app["config_base_path"]
     rel_path = request.query.get("path", "")
-    resolve = request.query.get("resolve", "true").lower() != "false"
+    resolve = parse_bool_param(request, "resolve", default=True)
     target = _resolve_config_path(base, rel_path)
 
     if not target.is_file():
@@ -138,7 +138,7 @@ async def put_config_file(request: web.Request) -> web.Response:
     """PUT /v1/config/file?path=...&dry_run=true|false — write a YAML config file."""
     base = request.app["config_base_path"]
     rel_path = request.query.get("path", "")
-    dry_run = request.query.get("dry_run", "true").lower() != "false"
+    dry_run = parse_bool_param(request, "dry_run", default=True)
 
     target = _resolve_config_path(base, rel_path)
     new_content = await request.text()
@@ -169,53 +169,73 @@ async def put_config_file(request: web.Request) -> web.Response:
         diff_text = "".join(diff)
         return web.json_response({"status": "dry_run", "diff": diff_text})
 
-    # Create backup
-    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
-    backup_name = f"{target.name}.bak.{timestamp}"
-    backup_path = target.parent / backup_name
-
-    if target.is_file():
-        shutil.copy2(target, backup_path)
+    # Back up the existing file (a brand-new file has nothing to back up — this
+    # distinction drives the rollback path below).
+    backup_name = make_backup(target)
+    existed = backup_name is not None
+    backup_path = target.parent / backup_name if backup_name is not None else None
 
     # Write new content
     target.write_text(new_content, encoding="utf-8")
 
-    # Validate via ha core check-config (if available)
-    validation_result = await _validate_config()
+    # Validate the now-on-disk config via the HA core API — the same path as
+    # POST /v1/ha/check-config, so the two validation routes cannot disagree.
+    outcome = await _validate_written_config()
 
-    if validation_result is not None and not validation_result["valid"]:
-        # Restore backup on validation failure
-        if backup_path.is_file():
-            shutil.copy2(backup_path, target)
-        raise web.HTTPBadRequest(text=f"Config validation failed: {validation_result['error']}. Backup restored.")
-
-    return web.json_response(
-        {
-            "status": "applied",
-            "backup": backup_name,
-        }
-    )
-
-
-async def _validate_config() -> dict[str, object] | None:
-    """Run ha core check-config if available. Returns None if ha CLI not available."""
-    import asyncio
-
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "ha",
-            "core",
-            "check-config",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+    if outcome.status == "invalid":
+        _rollback(target, backup_path, existed)
+        raise web.HTTPBadRequest(text=f"Config validation failed: {outcome.detail}. {_rollback_note(existed)}")
+    if outcome.status == "unavailable":
+        # A present-but-unreachable/slow validator must NOT silently un-gate the
+        # write. Roll back and surface it as a distinct, non-skipping outcome.
+        _rollback(target, backup_path, existed)
+        raise web.HTTPServiceUnavailable(
+            text=f"Config validation could not run: {outcome.detail}. {_rollback_note(existed)}"
         )
-        _stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
-        if proc.returncode == 0:
-            return {"valid": True, "error": None}
-        return {"valid": False, "error": stderr.decode("utf-8", errors="replace").strip()}
-    except (FileNotFoundError, TimeoutError):
-        # ha CLI not available or timed out — skip validation
-        return None
+
+    response: dict[str, object] = {"status": "applied", "validated": outcome.status == "ok"}
+    if backup_name is not None:
+        response["backup"] = backup_name
+    return web.json_response(response)
+
+
+def _rollback(target: Path, backup_path: Path | None, existed: bool) -> None:
+    """Undo a just-written file: restore the backup, or remove a brand-new file."""
+    if existed and backup_path is not None and backup_path.is_file():
+        shutil.copy2(backup_path, target)
+    elif not existed:
+        target.unlink(missing_ok=True)
+
+
+def _rollback_note(existed: bool) -> str:
+    return "Backup restored." if existed else "New file removed."
+
+
+class _ValidationOutcome(NamedTuple):
+    status: str  # "ok" | "invalid" | "skipped" | "unavailable"
+    detail: str
+
+
+async def _validate_written_config() -> _ValidationOutcome:
+    """Validate the on-disk config via the HA core API.
+
+    Outcomes:
+      - ``ok``          — config is valid.
+      - ``invalid``     — config is invalid (``detail`` carries the errors).
+      - ``skipped``     — no validator available (SUPERVISOR_TOKEN unset, e.g. a
+                          dev/no-supervisor stack); the write is allowed through.
+      - ``unavailable`` — a validator should exist but the check could not run
+                          (core API unreachable, HTTP error, or timeout). This is
+                          deliberately distinct from ``skipped`` so a slow/failing
+                          check cannot silently un-gate the write.
+    """
+    if not os.environ.get("SUPERVISOR_TOKEN"):
+        return _ValidationOutcome("skipped", "")
+    try:
+        valid, errors = await core_api.check_config()
+    except core_api.CoreAPIUnavailableError as exc:
+        return _ValidationOutcome("unavailable", str(exc))
+    return _ValidationOutcome("ok" if valid else "invalid", "" if valid else errors)
 
 
 routes: list[RouteDef] = [

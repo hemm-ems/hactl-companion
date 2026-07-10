@@ -169,7 +169,8 @@ class TestConfigWrite:
         assert r.status_code == 200
         data = r.json()
         assert data["status"] == "applied"
-        assert "backup" in data
+        # A brand-new file has nothing to back up, so no backup is reported.
+        assert "backup" not in data
 
         # Verify the file is now readable
         r = requests.get(
@@ -180,6 +181,19 @@ class TestConfigWrite:
         )
         assert r.status_code == 200
         assert "integration_test" in r.json()["content"]
+
+        # Overwriting the now-existing file DOES produce a backup.
+        r = requests.put(
+            f"{companion_url}/v1/config/file",
+            params={"path": "test-integration.yaml", "dry_run": "false"},
+            data="integration_test:\n  key: value2\n",
+            headers=auth_headers,
+            timeout=10,
+        )
+        assert r.status_code == 200
+        overwrite = r.json()
+        assert overwrite["status"] == "applied"
+        assert "backup" in overwrite
 
     def test_write_path_traversal_rejected(
         self, companion_url: str, auth_headers: dict[str, str], _ha_ready: None
@@ -599,15 +613,21 @@ class TestAccessLogMiddleware:
         logs = _container_logs("companion-integration")
         assert "auth=bearer" in logs, f"auth=bearer not in access logs:\n{logs[-1000:]}"
 
-    def test_ingress_bypass_logged(self, compose_up: dict[str, str], _ha_ready: None) -> None:
-        requests.get(
+    def test_spoofed_ingress_logged_as_bearer(self, compose_up: dict[str, str], _ha_ready: None) -> None:
+        """A spoofed X-Ingress-Path from an untrusted source is treated as bearer auth and rejected.
+
+        auth_mode reflects the decision actually taken, not the presence of the
+        (client-controlled) header, so this request logs auth=bearer / status=401.
+        """
+        r = requests.get(
             f"{compose_up['companion_url']}/v1/config/files",
             headers={"X-Ingress-Path": "/api/hassio_ingress/test"},
             timeout=10,
         )
+        assert r.status_code == 401
         time.sleep(0.2)
         logs = _container_logs("companion-integration")
-        assert "auth=ingress" in logs, f"auth=ingress not in access logs:\n{logs[-1000:]}"
+        assert "auth=bearer" in logs, f"auth=bearer not in access logs:\n{logs[-1000:]}"
 
     def test_exempt_path_logged_as_none(self, compose_up: dict[str, str]) -> None:
         requests.get(f"{compose_up['companion_url']}/v1/health", timeout=10)

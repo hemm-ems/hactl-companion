@@ -209,3 +209,78 @@ async def test_create_helper_new_domain_file(
     )
     assert resp.status == 201
     assert (config_dir / "timer.yaml").is_file()
+
+
+def _seed_ambiguous_slug(config_dir: Path) -> None:
+    """Put the same slug 'kitchen' in two different helper domains."""
+    (config_dir / "input_boolean.yaml").write_text("kitchen:\n  name: Kitchen Boolean\n", encoding="utf-8")
+    (config_dir / "counter.yaml").write_text("kitchen:\n  initial: 0\n", encoding="utf-8")
+
+
+async def test_put_helper_ambiguous_slug_returns_409(
+    client: TestClient, auth_headers: dict[str, str], config_dir: Path
+) -> None:
+    """A slug present in two domains must not be silently updated in the first one."""
+    _seed_ambiguous_slug(config_dir)
+    resp = await client.put(
+        "/v1/config/helper?id=kitchen",
+        data="name: Renamed\n",
+        headers={**auth_headers, "Content-Type": "text/plain"},
+    )
+    assert resp.status == 409
+    body = await resp.text()
+    assert "counter" in body and "input_boolean" in body
+    # Neither file was modified.
+    assert "Kitchen Boolean" in (config_dir / "input_boolean.yaml").read_text()
+    assert "initial: 0" in (config_dir / "counter.yaml").read_text()
+
+
+async def test_put_helper_domain_disambiguates(
+    client: TestClient, auth_headers: dict[str, str], config_dir: Path
+) -> None:
+    """With ?domain=, only that domain's helper is updated."""
+    _seed_ambiguous_slug(config_dir)
+    resp = await client.put(
+        "/v1/config/helper?id=kitchen&domain=counter",
+        data="initial: 5\n",
+        headers={**auth_headers, "Content-Type": "text/plain"},
+    )
+    assert resp.status == 200
+    assert "initial: 5" in (config_dir / "counter.yaml").read_text()
+    # The like-named input_boolean helper is untouched.
+    assert "Kitchen Boolean" in (config_dir / "input_boolean.yaml").read_text()
+
+
+async def test_delete_helper_ambiguous_slug_returns_409(
+    client: TestClient, auth_headers: dict[str, str], config_dir: Path
+) -> None:
+    _seed_ambiguous_slug(config_dir)
+    resp = await client.delete("/v1/config/helper?id=kitchen", headers=auth_headers)
+    assert resp.status == 409
+    # Neither file was modified.
+    assert "kitchen" in (config_dir / "input_boolean.yaml").read_text()
+    assert "kitchen" in (config_dir / "counter.yaml").read_text()
+
+
+async def test_delete_helper_domain_disambiguates(
+    client: TestClient, auth_headers: dict[str, str], config_dir: Path
+) -> None:
+    _seed_ambiguous_slug(config_dir)
+    resp = await client.delete("/v1/config/helper?id=kitchen&domain=counter", headers=auth_headers)
+    assert resp.status == 200
+    assert "kitchen" not in (config_dir / "counter.yaml").read_text()
+    # The like-named input_boolean helper survives.
+    assert "kitchen" in (config_dir / "input_boolean.yaml").read_text()
+
+
+async def test_put_helper_with_wrong_domain_404(
+    client: TestClient, auth_headers: dict[str, str], config_dir: Path
+) -> None:
+    """An explicit domain that doesn't contain the slug is a 404, not a cross-domain hit."""
+    _seed_ambiguous_slug(config_dir)
+    resp = await client.put(
+        "/v1/config/helper?id=kitchen&domain=timer",
+        data="name: X\n",
+        headers={**auth_headers, "Content-Type": "text/plain"},
+    )
+    assert resp.status == 404

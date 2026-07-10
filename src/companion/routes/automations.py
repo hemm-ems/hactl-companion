@@ -10,6 +10,7 @@ from aiohttp import web
 from ruamel.yaml import YAML
 
 from companion import core_api
+from companion.params import parse_bool_param
 from companion.routes.config import _resolve_config_path
 
 yaml = YAML()
@@ -94,15 +95,12 @@ async def _poll_automation_entity_id(config_id: str, attempts: int = 5, delay: f
 
 def _save_automations(target: Any, data: list[Any]) -> None:
     """Write automation data back to file with backup."""
-    import shutil
-    from datetime import UTC, datetime
     from pathlib import Path
 
+    from companion.backups import make_backup
+
     path = Path(target)
-    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
-    backup_name = f"{path.name}.bak.{timestamp}"
-    if path.is_file():
-        shutil.copy2(path, path.parent / backup_name)
+    make_backup(path)
 
     with open(path, "w", encoding="utf-8") as f:
         yaml.dump(data, f)
@@ -151,7 +149,7 @@ async def put_automation(request: web.Request) -> web.Response:
     """PUT /v1/config/automation?id=<id>&dry_run=true — update automation definition."""
     base = request.app["config_base_path"]
     automation_id = request.query.get("id", "")
-    dry_run = request.query.get("dry_run", "true").lower() != "false"
+    dry_run = parse_bool_param(request, "dry_run", default=True)
 
     if not automation_id:
         raise web.HTTPBadRequest(text="Missing id parameter")

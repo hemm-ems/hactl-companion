@@ -36,13 +36,14 @@ class TestRelatedEntity:
         )
         assert wrong.status_code == 401
 
+        # A spoofed ingress header from outside the trusted proxy must not bypass auth.
         ingress = requests.get(
             f"{companion_url}/v1/related/entity",
             params={"entity_id": SOURCE_ENTITY_ID},
             headers={"X-Ingress-Path": "/api/hassio_ingress/abc123"},
             timeout=10,
         )
-        assert ingress.status_code == 200
+        assert ingress.status_code == 401
 
         r = requests.get(
             f"{companion_url}/v1/related/entity",

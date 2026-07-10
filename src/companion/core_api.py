@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import os
 from typing import Any
+from urllib.parse import quote
 
 import aiohttp
 
@@ -71,7 +72,7 @@ async def get_state(entity_id: str) -> dict[str, Any] | None:
         return None
 
     base = os.environ.get("CORE_API_URL", DEFAULT_CORE_API_URL).rstrip("/")
-    url = f"{base}/states/{entity_id}"
+    url = f"{base}/states/{quote(entity_id, safe='')}"
     try:
         async with (
             aiohttp.ClientSession(timeout=_TIMEOUT) as session,
