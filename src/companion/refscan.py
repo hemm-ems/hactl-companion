@@ -17,7 +17,7 @@ import re
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from ruamel.yaml.scalarstring import ScalarString
 
@@ -267,7 +267,8 @@ def _replace_tree(node: Any, target: str, replacement: str, path: tuple[Any, ...
 def _styled_like(original: str, replacement: str) -> str:
     """Return ``replacement`` wrapped in the original scalar's quote style, if any."""
     if isinstance(original, ScalarString):
-        return type(original)(replacement)
+        # ScalarString subclasses str; the constructor's inferred type is Any.
+        return cast(str, type(original)(replacement))
     return replacement
 
 

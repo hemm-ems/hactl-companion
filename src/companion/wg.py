@@ -288,7 +288,8 @@ async def _dns_lookup_ip(host: str, *, timeout: float = 5.0) -> str | None:
     try:
         loop = asyncio.get_running_loop()
         results = await asyncio.wait_for(loop.getaddrinfo(host, None), timeout=timeout)
-        return results[0][4][0]
+        # sockaddr[0] is the address string (typed str | int in the stdlib stubs).
+        return str(results[0][4][0])
     except (TimeoutError, socket.gaierror, OSError, IndexError):
         return None
 
