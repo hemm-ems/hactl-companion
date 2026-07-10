@@ -11,6 +11,7 @@ from typing import Any
 from aiohttp import web
 
 from companion import __version__
+from companion.auth import bearer_token_valid, is_trusted_ingress
 from companion.routes import (
     automations,
     config,
@@ -40,9 +41,13 @@ async def access_log_middleware(
 ) -> web.StreamResponse:
     """Log every request with method, path, status, duration, and auth mode."""
     start = time.monotonic()
+    # Seed status so an unexpected (non-HTTP) exception from the handler doesn't
+    # leave `status` unbound in `finally` — that UnboundLocalError would mask the
+    # real traceback and turn every unhandled bug into the same opaque error.
+    status = 500
     if request.path in AUTH_EXEMPT_PATHS:
         auth_mode = "none"
-    elif request.headers.get("X-Ingress-Path") is not None:
+    elif is_trusted_ingress(request):
         auth_mode = "ingress"
     else:
         auth_mode = "bearer"
@@ -70,6 +75,30 @@ async def access_log_middleware(
 
 
 @web.middleware
+async def error_envelope_middleware(
+    request: web.Request,
+    handler: Callable[[web.Request], Awaitable[web.StreamResponse]],
+) -> web.StreamResponse:
+    """Normalize error bodies to a JSON envelope: ``{"error": {"code", "message"}}``.
+
+    Handlers raise ``HTTPException(text=...)`` with plain-text bodies while success
+    responses are JSON — leaving consumers unable to distinguish error kinds
+    programmatically. This wraps any >=400 HTTPException that carries a non-JSON
+    body into one uniform JSON shape, preserving the status code. Sits inside the
+    access-log middleware, so the returned response is still logged normally.
+    """
+    try:
+        return await handler(request)
+    except web.HTTPException as exc:
+        if exc.status < 400 or (exc.content_type or "").startswith("application/json"):
+            raise
+        return web.json_response(
+            {"error": {"code": exc.status, "message": exc.text or exc.reason or ""}},
+            status=exc.status,
+        )
+
+
+@web.middleware
 async def auth_middleware(
     request: web.Request,
     handler: Callable[[web.Request], Awaitable[web.StreamResponse]],
@@ -78,16 +107,21 @@ async def auth_middleware(
     if request.path in AUTH_EXEMPT_PATHS:
         return await handler(request)
 
-    # When accessed via HA Ingress, the proxy already authenticated the user.
-    # The Ingress header is set by the HA Ingress proxy.
-    ingress_header = request.headers.get("X-Ingress-Path")
-    if ingress_header is not None:
+    # When accessed via HA Ingress, the Supervisor proxy already authenticated the
+    # user. Trust that only when the request provably comes from the proxy — the
+    # X-Ingress-Path header alone is client-controlled (see companion.auth).
+    if is_trusted_ingress(request):
         return await handler(request)
 
     expected_token = os.environ.get("SUPERVISOR_TOKEN", "")
-    auth_header = request.headers.get("Authorization", "")
+    if not expected_token:
+        # No token configured — there is nothing to authenticate against. Fail
+        # closed (an empty expected token must never be satisfied by an empty
+        # or any other credential).
+        raise web.HTTPServiceUnavailable(text="Server authentication is not configured (SUPERVISOR_TOKEN unset)")
 
-    if not auth_header.startswith("Bearer ") or auth_header[7:] != expected_token:
+    auth_header = request.headers.get("Authorization", "")
+    if not bearer_token_valid(auth_header, expected_token):
         raise web.HTTPUnauthorized(text="Invalid or missing authentication token")
 
     return await handler(request)
@@ -105,6 +139,7 @@ def create_app(config_base_path: str = "/config") -> web.Application:
         middlewares=[
             web.normalize_path_middleware(merge_slashes=True, append_slash=False),
             access_log_middleware,
+            error_envelope_middleware,
             auth_middleware,
         ]
     )

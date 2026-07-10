@@ -11,6 +11,7 @@ from typing import Any
 
 from aiohttp import web
 
+from companion.params import parse_bool_param
 from companion.yaml_resolver import CircularIncludeError, YamlResolver
 
 
@@ -217,7 +218,7 @@ async def get_related_entity(request: web.Request) -> web.Response:
     entity_id = request.query.get("entity_id", "")
     if not entity_id:
         raise web.HTTPBadRequest(text="Missing entity_id parameter")
-    include_stale = request.query.get("stale", "").lower() in ("1", "true", "yes")
+    include_stale = parse_bool_param(request, "stale", default=False)
 
     base = request.app["config_base_path"]
     graph = RelatedGraph(base)

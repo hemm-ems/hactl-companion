@@ -1,5 +1,6 @@
 """Tests for GET /v1/status."""
 
+import pytest
 from aiohttp.test_utils import TestClient
 
 from companion import __version__
@@ -32,8 +33,17 @@ async def test_status_auth_mode_bearer_without_ingress(client: TestClient) -> No
     assert data["auth_mode"] == "bearer"
 
 
-async def test_status_ingress_active_with_header(client: TestClient) -> None:
-    """With X-Ingress-Path header, ingress_active should be True and auth_mode 'ingress'."""
+async def test_status_ingress_header_from_untrusted_source_is_bearer(client: TestClient) -> None:
+    """An X-Ingress-Path header from an untrusted source must not report ingress mode."""
+    resp = await client.get("/v1/status", headers={"X-Ingress-Path": "/api/hassio_ingress/abc"})
+    data = await resp.json()
+    assert data["ingress_active"] is False
+    assert data["auth_mode"] == "bearer"
+
+
+async def test_status_ingress_active_from_trusted_source(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """With the header and a trusted source IP, ingress_active is True and auth_mode 'ingress'."""
+    monkeypatch.setenv("INGRESS_PROXY_IPS", "127.0.0.1")
     resp = await client.get("/v1/status", headers={"X-Ingress-Path": "/api/hassio_ingress/abc"})
     data = await resp.json()
     assert data["ingress_active"] is True

@@ -84,6 +84,11 @@ jobs:
         with:
           fetch-depth: 0
           token: ${{ secrets.PACKAGES_TOKEN }}
+      - uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3 # v8.3.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+      - run: uv sync --extra dev
 
       # Bump the version FIRST and push to main, so the tag cut next points at
       # the bumped commit. Otherwise the image (built from the tag) is built from
@@ -104,9 +109,11 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           sed -i "s/^version = .*/version = \"${VER}\"/" pyproject.toml
-          sed -i "s/^  version: .*/  version: ${VER}/" openapi/companion-v1.yaml
           sed -i "s/^version: .*/version: \"${VER}\"/" hactl_companion/config.yaml
           sed -i "s/^__version__ = .*/__version__ = \"${VER}\"/" src/companion/__init__.py
+          # Regenerate the OpenAPI spec from the bumped __version__ so info.version and the
+          # ENDPOINT_META-derived body stay in one source of truth (no drift vs `make spec`).
+          uv run python -c "from companion.openapi import write_spec; write_spec()"
           # Generate notes via the API (no release exists yet — created below).
           NOTES=$(gh api --method POST "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
             -f tag_name="${tag}" -f target_commitish=main --jq '.body' | sed '/^---$/,$d')

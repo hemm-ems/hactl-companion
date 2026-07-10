@@ -19,15 +19,23 @@ _CONFIG_BLOCK_SCHEMA = {
     "type": "object",
     "properties": {"path": {"type": "string"}, "id": {"type": "string"}, "content": {"type": "string"}},
 }
-_CONFIG_WRITE_DRY_SCHEMA = {
+_CONFIG_WRITE_SCHEMA = {
     "type": "object",
-    "properties": {"status": {"type": "string"}, "diff": {"type": "string"}},
+    "required": ["status"],
+    "properties": {
+        "status": {"type": "string"},
+        # dry-run returns a diff; apply returns whether validation ran and the backup name.
+        "diff": {"type": "string"},
+        "validated": {"type": "boolean"},
+        "backup": {"type": "string"},
+    },
 }
 _RELATED_ENTITY_SCHEMA = {
     "type": "object",
-    "required": ["entity_id", "related"],
+    "required": ["entity_id", "stale", "related", "stale_refs"],
     "properties": {
         "entity_id": {"type": "string"},
+        "stale": {"type": "boolean"},
         "related": {
             "type": "array",
             "items": {
@@ -37,6 +45,20 @@ _RELATED_ENTITY_SCHEMA = {
                     "entity_id": {"type": "string"},
                     "relationship": {"type": "string"},
                     "detail": {"type": "string"},
+                },
+            },
+        },
+        # Populated only when ?stale=true and the entity is no longer in the registry:
+        # every place the literal id is still referenced across config files.
+        "stale_refs": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["location", "path", "matched_value"],
+                "properties": {
+                    "location": {"type": "string"},
+                    "path": {"type": "string"},
+                    "matched_value": {"type": "string"},
                 },
             },
         },
@@ -183,9 +205,21 @@ _AUTOMATION_SCHEMA = {
     "type": "object",
     "properties": {"id": {"type": "string"}, "content": {"type": "string"}},
 }
-_SIMPLE_STATUS_SCHEMA = {
+# PUT template/script/automation: dry-run returns a diff; apply returns `reloaded`.
+_WRITE_RESULT_SCHEMA = {
     "type": "object",
-    "properties": {"status": {"type": "string"}},
+    "required": ["status"],
+    "properties": {
+        "status": {"type": "string"},
+        "diff": {"type": "string"},
+        "reloaded": {"type": "boolean"},
+    },
+}
+# DELETE (template/script/automation/helper) and PUT helper: {status, reloaded}.
+_RELOAD_RESULT_SCHEMA = {
+    "type": "object",
+    "required": ["status"],
+    "properties": {"status": {"type": "string"}, "reloaded": {"type": "boolean"}},
 }
 _RELOAD_SCHEMA = {
     "type": "object",
@@ -199,13 +233,36 @@ _CHECK_CONFIG_SCHEMA = {
         "errors": {"type": "string"},
     },
 }
-_CREATED_SCHEMA = {
+_CREATED_SCRIPT_SCHEMA = {
     "type": "object",
-    "properties": {"status": {"type": "string"}, "id": {"type": "string"}},
+    "required": ["status"],
+    "properties": {"status": {"type": "string"}, "id": {"type": "string"}, "reloaded": {"type": "boolean"}},
+}
+_CREATED_AUTOMATION_SCHEMA = {
+    "type": "object",
+    "required": ["status"],
+    "properties": {
+        "status": {"type": "string"},
+        "id": {"type": "string"},
+        "entity_id": {"type": "string", "nullable": True},
+        "reloaded": {"type": "boolean"},
+    },
 }
 _CREATED_UID_SCHEMA = {
     "type": "object",
-    "properties": {"status": {"type": "string"}, "unique_id": {"type": "string"}},
+    "required": ["status"],
+    "properties": {"status": {"type": "string"}, "unique_id": {"type": "string"}, "reloaded": {"type": "boolean"}},
+}
+_CREATED_HELPER_SCHEMA = {
+    "type": "object",
+    "required": ["status"],
+    "properties": {
+        "status": {"type": "string"},
+        "id": {"type": "string"},
+        "entity_id": {"type": "string"},
+        "reloaded": {"type": "boolean"},
+        "entity_created": {"type": "boolean"},
+    },
 }
 _HELPER_LIST_SCHEMA = {
     "type": "object",
@@ -381,7 +438,7 @@ ENDPOINT_META: dict[tuple[str, str], dict[str, object]] = {
         "tags": ["config"],
         "parameters": [
             {"name": "path", "in": "query", "required": True, "schema": {"type": "string"}},
-            {"name": "resolve", "in": "query", "required": False, "schema": {"type": "string", "default": "true"}},
+            {"name": "resolve", "in": "query", "required": False, "schema": {"type": "boolean", "default": True}},
         ],
         "response_schema": _CONFIG_FILE_SCHEMA,
     },
@@ -399,13 +456,13 @@ ENDPOINT_META: dict[tuple[str, str], dict[str, object]] = {
         "tags": ["config"],
         "parameters": [
             {"name": "path", "in": "query", "required": True, "schema": {"type": "string"}},
-            {"name": "dry_run", "in": "query", "required": False, "schema": {"type": "string", "default": "true"}},
+            {"name": "dry_run", "in": "query", "required": False, "schema": {"type": "boolean", "default": True}},
         ],
         "requestBody": {
             "content": {"text/plain": {"schema": {"type": "string"}}},
             "required": True,
         },
-        "response_schema": _CONFIG_WRITE_DRY_SCHEMA,
+        "response_schema": _CONFIG_WRITE_SCHEMA,
     },
     # Related graph
     ("GET", "/v1/related/entity"): {
@@ -413,6 +470,7 @@ ENDPOINT_META: dict[tuple[str, str], dict[str, object]] = {
         "tags": ["related"],
         "parameters": [
             {"name": "entity_id", "in": "query", "required": True, "schema": {"type": "string"}},
+            {"name": "stale", "in": "query", "required": False, "schema": {"type": "boolean", "default": False}},
         ],
         "response_schema": _RELATED_ENTITY_SCHEMA,
     },
@@ -453,13 +511,13 @@ ENDPOINT_META: dict[tuple[str, str], dict[str, object]] = {
         "tags": ["templates"],
         "parameters": [
             {"name": "id", "in": "query", "required": True, "schema": {"type": "string"}},
-            {"name": "dry_run", "in": "query", "required": False, "schema": {"type": "string", "default": "true"}},
+            {"name": "dry_run", "in": "query", "required": False, "schema": {"type": "boolean", "default": True}},
         ],
         "requestBody": {
             "content": {"text/plain": {"schema": {"type": "string"}}},
             "required": True,
         },
-        "response_schema": _SIMPLE_STATUS_SCHEMA,
+        "response_schema": _WRITE_RESULT_SCHEMA,
     },
     ("POST", "/v1/config/template"): {
         "summary": "Create new template sensor",
@@ -478,7 +536,7 @@ ENDPOINT_META: dict[tuple[str, str], dict[str, object]] = {
         "summary": "Delete template sensor",
         "tags": ["templates"],
         "parameters": [{"name": "id", "in": "query", "required": True, "schema": {"type": "string"}}],
-        "response_schema": _SIMPLE_STATUS_SCHEMA,
+        "response_schema": _RELOAD_RESULT_SCHEMA,
     },
     # Scripts
     ("GET", "/v1/config/scripts"): {
@@ -497,13 +555,13 @@ ENDPOINT_META: dict[tuple[str, str], dict[str, object]] = {
         "tags": ["scripts"],
         "parameters": [
             {"name": "id", "in": "query", "required": True, "schema": {"type": "string"}},
-            {"name": "dry_run", "in": "query", "required": False, "schema": {"type": "string", "default": "true"}},
+            {"name": "dry_run", "in": "query", "required": False, "schema": {"type": "boolean", "default": True}},
         ],
         "requestBody": {
             "content": {"text/plain": {"schema": {"type": "string"}}},
             "required": True,
         },
-        "response_schema": _SIMPLE_STATUS_SCHEMA,
+        "response_schema": _WRITE_RESULT_SCHEMA,
     },
     ("POST", "/v1/config/script"): {
         "summary": "Create new script",
@@ -512,14 +570,14 @@ ENDPOINT_META: dict[tuple[str, str], dict[str, object]] = {
             "content": {"text/plain": {"schema": {"type": "string"}}},
             "required": True,
         },
-        "response_schema": _CREATED_SCHEMA,
+        "response_schema": _CREATED_SCRIPT_SCHEMA,
         "response_status": 201,
     },
     ("DELETE", "/v1/config/script"): {
         "summary": "Delete script",
         "tags": ["scripts"],
         "parameters": [{"name": "id", "in": "query", "required": True, "schema": {"type": "string"}}],
-        "response_schema": _SIMPLE_STATUS_SCHEMA,
+        "response_schema": _RELOAD_RESULT_SCHEMA,
     },
     # Automations
     ("GET", "/v1/config/automations"): {
@@ -538,13 +596,13 @@ ENDPOINT_META: dict[tuple[str, str], dict[str, object]] = {
         "tags": ["automations"],
         "parameters": [
             {"name": "id", "in": "query", "required": True, "schema": {"type": "string"}},
-            {"name": "dry_run", "in": "query", "required": False, "schema": {"type": "string", "default": "true"}},
+            {"name": "dry_run", "in": "query", "required": False, "schema": {"type": "boolean", "default": True}},
         ],
         "requestBody": {
             "content": {"text/plain": {"schema": {"type": "string"}}},
             "required": True,
         },
-        "response_schema": _SIMPLE_STATUS_SCHEMA,
+        "response_schema": _WRITE_RESULT_SCHEMA,
     },
     ("POST", "/v1/config/automation"): {
         "summary": "Create new automation",
@@ -553,14 +611,14 @@ ENDPOINT_META: dict[tuple[str, str], dict[str, object]] = {
             "content": {"text/plain": {"schema": {"type": "string"}}},
             "required": True,
         },
-        "response_schema": _CREATED_SCHEMA,
+        "response_schema": _CREATED_AUTOMATION_SCHEMA,
         "response_status": 201,
     },
     ("DELETE", "/v1/config/automation"): {
         "summary": "Delete automation",
         "tags": ["automations"],
         "parameters": [{"name": "id", "in": "query", "required": True, "schema": {"type": "string"}}],
-        "response_schema": _SIMPLE_STATUS_SCHEMA,
+        "response_schema": _RELOAD_RESULT_SCHEMA,
     },
     # Helpers
     ("GET", "/v1/config/helpers"): {
@@ -580,30 +638,37 @@ ENDPOINT_META: dict[tuple[str, str], dict[str, object]] = {
     ("POST", "/v1/config/helper"): {
         "summary": "Create new helper",
         "tags": ["helpers"],
+        "parameters": [
+            {"name": "domain", "in": "query", "required": True, "schema": {"type": "string"}},
+        ],
         "requestBody": {
             "content": {"application/json": {"schema": {"type": "object"}}},
             "required": True,
         },
-        "response_schema": _CREATED_SCHEMA,
+        "response_schema": _CREATED_HELPER_SCHEMA,
         "response_status": 201,
     },
     ("PUT", "/v1/config/helper"): {
         "summary": "Update helper definition",
         "tags": ["helpers"],
+        "parameters": [
+            {"name": "id", "in": "query", "required": True, "schema": {"type": "string"}},
+            {"name": "domain", "in": "query", "required": False, "schema": {"type": "string"}},
+        ],
         "requestBody": {
             "content": {"application/json": {"schema": {"type": "object"}}},
             "required": True,
         },
-        "response_schema": _SIMPLE_STATUS_SCHEMA,
+        "response_schema": _RELOAD_RESULT_SCHEMA,
     },
     ("DELETE", "/v1/config/helper"): {
         "summary": "Delete helper",
         "tags": ["helpers"],
         "parameters": [
-            {"name": "domain", "in": "query", "required": True, "schema": {"type": "string"}},
             {"name": "id", "in": "query", "required": True, "schema": {"type": "string"}},
+            {"name": "domain", "in": "query", "required": False, "schema": {"type": "string"}},
         ],
-        "response_schema": _SIMPLE_STATUS_SCHEMA,
+        "response_schema": _RELOAD_RESULT_SCHEMA,
     },
     # HA core API
     ("POST", "/v1/ha/reload/{domain}"): {
@@ -669,7 +734,7 @@ ENDPOINT_META: dict[tuple[str, str], dict[str, object]] = {
 
 
 def generate_spec() -> dict[str, object]:
-    """Generate a full OpenAPI 3.0 spec dict from registered routes."""
+    """Generate a full OpenAPI 3.0 spec dict from the ENDPOINT_META map."""
     paths: dict[str, dict[str, object]] = {}
 
     for (method, path), meta in ENDPOINT_META.items():
@@ -686,6 +751,9 @@ def generate_spec() -> dict[str, object]:
                     "description": "Successful response",
                     "content": {"application/json": {"schema": meta.get("response_schema", {})}},
                 },
+                # Every operation can return the shared JSON error envelope.
+                "4XX": {"$ref": "#/components/responses/Error"},
+                "5XX": {"$ref": "#/components/responses/Error"},
             },
         }
 
@@ -716,6 +784,28 @@ def generate_spec() -> dict[str, object]:
                 "bearerAuth": {
                     "type": "http",
                     "scheme": "bearer",
+                },
+            },
+            "schemas": {
+                "Error": {
+                    "type": "object",
+                    "required": ["error"],
+                    "properties": {
+                        "error": {
+                            "type": "object",
+                            "required": ["code", "message"],
+                            "properties": {
+                                "code": {"type": "integer", "description": "HTTP status code"},
+                                "message": {"type": "string"},
+                            },
+                        },
+                    },
+                },
+            },
+            "responses": {
+                "Error": {
+                    "description": "Error response (JSON envelope)",
+                    "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}},
                 },
             },
         },

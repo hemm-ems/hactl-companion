@@ -10,6 +10,7 @@ from aiohttp import web
 from ruamel.yaml import YAML
 
 from companion import core_api
+from companion.params import parse_bool_param
 from companion.routes.config import _resolve_config_path
 
 yaml = YAML()
@@ -41,15 +42,12 @@ def _load_scripts(base: str) -> tuple[dict[str, Any], Any]:
 
 def _save_scripts(target: Any, data: dict[str, Any]) -> None:
     """Write script data back to file with backup."""
-    import shutil
-    from datetime import UTC, datetime
     from pathlib import Path
 
+    from companion.backups import make_backup
+
     path = Path(target)
-    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
-    backup_name = f"{path.name}.bak.{timestamp}"
-    if path.is_file():
-        shutil.copy2(path, path.parent / backup_name)
+    make_backup(path)
 
     with open(path, "w", encoding="utf-8") as f:
         yaml.dump(data, f)
@@ -145,7 +143,7 @@ async def put_script(request: web.Request) -> web.Response:
     """PUT /v1/config/script?id=<script_id>&dry_run=true — update script definition."""
     base = request.app["config_base_path"]
     script_id = request.query.get("id", "")
-    dry_run = request.query.get("dry_run", "true").lower() != "false"
+    dry_run = parse_bool_param(request, "dry_run", default=True)
 
     if not script_id:
         raise web.HTTPBadRequest(text="Missing id parameter")

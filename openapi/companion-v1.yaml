@@ -26,6 +26,10 @@ paths:
                     type: string
                   version:
                     type: string
+        4XX:
+          $ref: '#/components/responses/Error'
+        5XX:
+          $ref: '#/components/responses/Error'
   /v1/status:
     get:
       summary: Companion capability report
@@ -61,6 +65,10 @@ paths:
                     enum:
                     - ingress
                     - bearer
+        4XX:
+          $ref: '#/components/responses/Error'
+        5XX:
+          $ref: '#/components/responses/Error'
       description: Returns version and capability flags. Auth-exempt (same 
         policy as /v1/health).
   /v1/config/files:
@@ -80,6 +88,10 @@ paths:
                     type: array
                     items:
                       type: string
+        4XX:
+          $ref: '#/components/responses/Error'
+        5XX:
+          $ref: '#/components/responses/Error'
   /v1/config/file:
     get:
       summary: Read a config file (with optional !include resolution)
@@ -97,6 +109,10 @@ paths:
                     type: string
                   content:
                     type: string
+        4XX:
+          $ref: '#/components/responses/Error'
+        5XX:
+          $ref: '#/components/responses/Error'
       parameters:
       - name: path
         in: query
@@ -107,8 +123,8 @@ paths:
         in: query
         required: false
         schema:
-          type: string
-          default: 'true'
+          type: boolean
+          default: true
     put:
       summary: Write a config file (dry-run or apply)
       tags:
@@ -120,11 +136,21 @@ paths:
             application/json:
               schema:
                 type: object
+                required:
+                - status
                 properties:
                   status:
                     type: string
                   diff:
                     type: string
+                  validated:
+                    type: boolean
+                  backup:
+                    type: string
+        4XX:
+          $ref: '#/components/responses/Error'
+        5XX:
+          $ref: '#/components/responses/Error'
       parameters:
       - name: path
         in: query
@@ -135,8 +161,8 @@ paths:
         in: query
         required: false
         schema:
-          type: string
-          default: 'true'
+          type: boolean
+          default: true
       requestBody:
         content:
           text/plain:
@@ -162,6 +188,10 @@ paths:
                     type: string
                   content:
                     type: string
+        4XX:
+          $ref: '#/components/responses/Error'
+        5XX:
+          $ref: '#/components/responses/Error'
       parameters:
       - name: path
         in: query
@@ -188,10 +218,14 @@ paths:
                 type: object
                 required:
                 - entity_id
+                - stale
                 - related
+                - stale_refs
                 properties:
                   entity_id:
                     type: string
+                  stale:
+                    type: boolean
                   related:
                     type: array
                     items:
@@ -207,12 +241,37 @@ paths:
                           type: string
                         detail:
                           type: string
+                  stale_refs:
+                    type: array
+                    items:
+                      type: object
+                      required:
+                      - location
+                      - path
+                      - matched_value
+                      properties:
+                        location:
+                          type: string
+                        path:
+                          type: string
+                        matched_value:
+                          type: string
+        4XX:
+          $ref: '#/components/responses/Error'
+        5XX:
+          $ref: '#/components/responses/Error'
       parameters:
       - name: entity_id
         in: query
         required: true
         schema:
           type: string
+      - name: stale
+        in: query
+        required: false
+        schema:
+          type: boolean
+          default: false
   /v1/ref/scan:
     get:
       summary: Find every literal reference to a value across the config file 
@@ -247,6 +306,10 @@ paths:
                           type: string
                         matched_value:
                           type: string
+        4XX:
+          $ref: '#/components/responses/Error'
+        5XX:
+          $ref: '#/components/responses/Error'
       parameters:
       - name: target
         in: query
@@ -286,6 +349,10 @@ paths:
                           type: string
                         matched_value:
                           type: string
+        4XX:
+          $ref: '#/components/responses/Error'
+        5XX:
+          $ref: '#/components/responses/Error'
   /v1/ref/replace:
     post:
       summary: Rewrite a literal reference across config files (dry-run or 
@@ -323,6 +390,10 @@ paths:
                           type: string
                         after:
                           type: string
+        4XX:
+          $ref: '#/components/responses/Error'
+        5XX:
+          $ref: '#/components/responses/Error'
       requestBody:
         content:
           application/json:
@@ -370,6 +441,10 @@ paths:
                           type: string
                         device_class:
                           type: string
+        4XX:
+          $ref: '#/components/responses/Error'
+        5XX:
+          $ref: '#/components/responses/Error'
   /v1/config/template:
     get:
       summary: Get single template definition
@@ -387,6 +462,10 @@ paths:
                     type: string
                   content:
                     type: string
+        4XX:
+          $ref: '#/components/responses/Error'
+        5XX:
+          $ref: '#/components/responses/Error'
       parameters:
       - name: id
         in: query
@@ -404,9 +483,19 @@ paths:
             application/json:
               schema: &id001
                 type: object
+                required:
+                - status
                 properties:
                   status:
                     type: string
+                  diff:
+                    type: string
+                  reloaded:
+                    type: boolean
+        4XX:
+          $ref: '#/components/responses/Error'
+        5XX:
+          $ref: '#/components/responses/Error'
       parameters:
       - name: id
         in: query
@@ -417,8 +506,8 @@ paths:
         in: query
         required: false
         schema:
-          type: string
-          default: 'true'
+          type: boolean
+          default: true
       requestBody:
         content:
           text/plain:
@@ -436,11 +525,19 @@ paths:
             application/json:
               schema:
                 type: object
+                required:
+                - status
                 properties:
                   status:
                     type: string
                   unique_id:
                     type: string
+                  reloaded:
+                    type: boolean
+        4XX:
+          $ref: '#/components/responses/Error'
+        5XX:
+          $ref: '#/components/responses/Error'
       parameters:
       - name: domain
         in: query
@@ -463,7 +560,19 @@ paths:
           description: Successful response
           content:
             application/json:
-              schema: *id001
+              schema: &id002
+                type: object
+                required:
+                - status
+                properties:
+                  status:
+                    type: string
+                  reloaded:
+                    type: boolean
+        4XX:
+          $ref: '#/components/responses/Error'
+        5XX:
+          $ref: '#/components/responses/Error'
       parameters:
       - name: id
         in: query
@@ -498,6 +607,10 @@ paths:
                           type: array
                           items:
                             type: object
+        4XX:
+          $ref: '#/components/responses/Error'
+        5XX:
+          $ref: '#/components/responses/Error'
   /v1/config/script:
     get:
       summary: Get single script definition
@@ -515,6 +628,10 @@ paths:
                     type: string
                   content:
                     type: string
+        4XX:
+          $ref: '#/components/responses/Error'
+        5XX:
+          $ref: '#/components/responses/Error'
       parameters:
       - name: id
         in: query
@@ -531,6 +648,10 @@ paths:
           content:
             application/json:
               schema: *id001
+        4XX:
+          $ref: '#/components/responses/Error'
+        5XX:
+          $ref: '#/components/responses/Error'
       parameters:
       - name: id
         in: query
@@ -541,8 +662,8 @@ paths:
         in: query
         required: false
         schema:
-          type: string
-          default: 'true'
+          type: boolean
+          default: true
       requestBody:
         content:
           text/plain:
@@ -558,13 +679,21 @@ paths:
           description: Successful response
           content:
             application/json:
-              schema: &id002
+              schema:
                 type: object
+                required:
+                - status
                 properties:
                   status:
                     type: string
                   id:
                     type: string
+                  reloaded:
+                    type: boolean
+        4XX:
+          $ref: '#/components/responses/Error'
+        5XX:
+          $ref: '#/components/responses/Error'
       requestBody:
         content:
           text/plain:
@@ -580,7 +709,11 @@ paths:
           description: Successful response
           content:
             application/json:
-              schema: *id001
+              schema: *id002
+        4XX:
+          $ref: '#/components/responses/Error'
+        5XX:
+          $ref: '#/components/responses/Error'
       parameters:
       - name: id
         in: query
@@ -613,6 +746,10 @@ paths:
                           type: string
                         description:
                           type: string
+        4XX:
+          $ref: '#/components/responses/Error'
+        5XX:
+          $ref: '#/components/responses/Error'
   /v1/config/automation:
     get:
       summary: Get single automation definition
@@ -630,6 +767,10 @@ paths:
                     type: string
                   content:
                     type: string
+        4XX:
+          $ref: '#/components/responses/Error'
+        5XX:
+          $ref: '#/components/responses/Error'
       parameters:
       - name: id
         in: query
@@ -646,6 +787,10 @@ paths:
           content:
             application/json:
               schema: *id001
+        4XX:
+          $ref: '#/components/responses/Error'
+        5XX:
+          $ref: '#/components/responses/Error'
       parameters:
       - name: id
         in: query
@@ -656,8 +801,8 @@ paths:
         in: query
         required: false
         schema:
-          type: string
-          default: 'true'
+          type: boolean
+          default: true
       requestBody:
         content:
           text/plain:
@@ -673,7 +818,24 @@ paths:
           description: Successful response
           content:
             application/json:
-              schema: *id002
+              schema:
+                type: object
+                required:
+                - status
+                properties:
+                  status:
+                    type: string
+                  id:
+                    type: string
+                  entity_id:
+                    type: string
+                    nullable: true
+                  reloaded:
+                    type: boolean
+        4XX:
+          $ref: '#/components/responses/Error'
+        5XX:
+          $ref: '#/components/responses/Error'
       requestBody:
         content:
           text/plain:
@@ -689,7 +851,11 @@ paths:
           description: Successful response
           content:
             application/json:
-              schema: *id001
+              schema: *id002
+        4XX:
+          $ref: '#/components/responses/Error'
+        5XX:
+          $ref: '#/components/responses/Error'
       parameters:
       - name: id
         in: query
@@ -722,6 +888,10 @@ paths:
                           type: string
                         icon:
                           type: string
+        4XX:
+          $ref: '#/components/responses/Error'
+        5XX:
+          $ref: '#/components/responses/Error'
       parameters:
       - name: domain
         in: query
@@ -747,6 +917,10 @@ paths:
                     type: string
                   content:
                     type: string
+        4XX:
+          $ref: '#/components/responses/Error'
+        5XX:
+          $ref: '#/components/responses/Error'
       parameters:
       - name: id
         in: query
@@ -762,7 +936,31 @@ paths:
           description: Successful response
           content:
             application/json:
-              schema: *id002
+              schema:
+                type: object
+                required:
+                - status
+                properties:
+                  status:
+                    type: string
+                  id:
+                    type: string
+                  entity_id:
+                    type: string
+                  reloaded:
+                    type: boolean
+                  entity_created:
+                    type: boolean
+        4XX:
+          $ref: '#/components/responses/Error'
+        5XX:
+          $ref: '#/components/responses/Error'
+      parameters:
+      - name: domain
+        in: query
+        required: true
+        schema:
+          type: string
       requestBody:
         content:
           application/json:
@@ -778,7 +976,22 @@ paths:
           description: Successful response
           content:
             application/json:
-              schema: *id001
+              schema: *id002
+        4XX:
+          $ref: '#/components/responses/Error'
+        5XX:
+          $ref: '#/components/responses/Error'
+      parameters:
+      - name: id
+        in: query
+        required: true
+        schema:
+          type: string
+      - name: domain
+        in: query
+        required: false
+        schema:
+          type: string
       requestBody:
         content:
           application/json:
@@ -794,16 +1007,20 @@ paths:
           description: Successful response
           content:
             application/json:
-              schema: *id001
+              schema: *id002
+        4XX:
+          $ref: '#/components/responses/Error'
+        5XX:
+          $ref: '#/components/responses/Error'
       parameters:
-      - name: domain
+      - name: id
         in: query
         required: true
         schema:
           type: string
-      - name: id
+      - name: domain
         in: query
-        required: true
+        required: false
         schema:
           type: string
   /v1/ha/reload/{domain}:
@@ -823,6 +1040,10 @@ paths:
                     type: string
                   domain:
                     type: string
+        4XX:
+          $ref: '#/components/responses/Error'
+        5XX:
+          $ref: '#/components/responses/Error'
       parameters:
       - name: domain
         in: path
@@ -848,6 +1069,10 @@ paths:
                     type: boolean
                   errors:
                     type: string
+        4XX:
+          $ref: '#/components/responses/Error'
+        5XX:
+          $ref: '#/components/responses/Error'
   /v1/wireguard/config:
     post:
       summary: Push WireGuard tunnel configuration
@@ -865,6 +1090,10 @@ paths:
                     type: string
                   tunnel:
                     type: string
+        4XX:
+          $ref: '#/components/responses/Error'
+        5XX:
+          $ref: '#/components/responses/Error'
       parameters:
       - name: tunnel
         in: query
@@ -930,6 +1159,10 @@ paths:
                     type: string
                   tunnel:
                     type: string
+        4XX:
+          $ref: '#/components/responses/Error'
+        5XX:
+          $ref: '#/components/responses/Error'
       parameters:
       - name: tunnel
         in: query
@@ -954,6 +1187,10 @@ paths:
                     type: string
                   tunnel:
                     type: string
+        4XX:
+          $ref: '#/components/responses/Error'
+        5XX:
+          $ref: '#/components/responses/Error'
       parameters:
       - name: tunnel
         in: query
@@ -1042,6 +1279,10 @@ paths:
                       last_error:
                         type: string
                         nullable: true
+        4XX:
+          $ref: '#/components/responses/Error'
+        5XX:
+          $ref: '#/components/responses/Error'
       parameters:
       - name: tunnel
         in: query
@@ -1075,6 +1316,10 @@ paths:
                           type: string
                         message:
                           type: string
+        4XX:
+          $ref: '#/components/responses/Error'
+        5XX:
+          $ref: '#/components/responses/Error'
       parameters:
       - name: component
         in: query
@@ -1101,5 +1346,29 @@ components:
     bearerAuth:
       type: http
       scheme: bearer
+  schemas:
+    Error:
+      type: object
+      required:
+      - error
+      properties:
+        error:
+          type: object
+          required:
+          - code
+          - message
+          properties:
+            code:
+              type: integer
+              description: HTTP status code
+            message:
+              type: string
+  responses:
+    Error:
+      description: Error response (JSON envelope)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
 security:
 - bearerAuth: []

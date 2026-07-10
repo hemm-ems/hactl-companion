@@ -7,8 +7,7 @@ from typing import Any
 
 from ruamel.yaml import YAML
 
-# Files that must never be resolved/included
-DENIED_FILES: set[str] = {"secrets.yaml"}
+from companion.pathguard import is_denied, is_within
 
 
 class CircularIncludeError(Exception):
@@ -26,10 +25,10 @@ class YamlResolver:
     def _check_path(self, path: Path) -> None:
         """Validate path is within base and not denied."""
         resolved = path.resolve()
-        if not str(resolved).startswith(str(self._base)):
+        if not is_within(resolved, self._base):
             msg = f"Path traversal not allowed: {path}"
             raise ValueError(msg)
-        if resolved.name.lower() in DENIED_FILES:
+        if is_denied(resolved.name):
             msg = f"Access to {resolved.name} is denied"
             raise PermissionError(msg)
 
@@ -62,24 +61,10 @@ class YamlResolver:
         return data
 
     def _resolve_includes(self, content: str, context_dir: Path, visited: set[str]) -> Any:
-        """Parse YAML content, replacing !include tags with resolved content."""
-        # Process line by line looking for !include directives
-        lines = content.splitlines(keepends=True)
-        processed_lines: list[str] = []
-        for line in lines:
-            stripped = line.strip()
-            # Skip comment-only lines or empty lines
-            if stripped.startswith("#") or not stripped:
-                processed_lines.append(line)
-                continue
-            processed_lines.append(line)
-
-        text = "".join(processed_lines)
-        data = self._yaml.load(text) if text.strip() else None
-
+        """Parse YAML content and resolve any !include-family tags within it."""
+        data = self._yaml.load(content) if content.strip() else None
         if data is None:
             return data
-
         return self._walk_and_resolve(data, context_dir, visited)
 
     def _walk_and_resolve(self, node: Any, context_dir: Path, visited: set[str]) -> Any:
@@ -128,7 +113,7 @@ class YamlResolver:
             return {}
         result: dict[str, Any] = {}
         for f in sorted(resolved.iterdir()):
-            if f.is_file() and f.suffix in (".yaml", ".yml") and f.name.lower() not in DENIED_FILES:
+            if f.is_file() and f.suffix in (".yaml", ".yml") and not is_denied(f.name):
                 name = f.stem
                 content = self._resolve_file(f, visited)
                 result[name] = content
@@ -142,7 +127,7 @@ class YamlResolver:
             return []
         result: list[Any] = []
         for f in sorted(resolved.iterdir()):
-            if f.is_file() and f.suffix in (".yaml", ".yml") and f.name.lower() not in DENIED_FILES:
+            if f.is_file() and f.suffix in (".yaml", ".yml") and not is_denied(f.name):
                 content = self._resolve_file(f, visited)
                 result.append(content)
         return result
@@ -155,7 +140,7 @@ class YamlResolver:
             return {}
         result: dict[str, Any] = {}
         for f in sorted(resolved.iterdir()):
-            if f.is_file() and f.suffix in (".yaml", ".yml") and f.name.lower() not in DENIED_FILES:
+            if f.is_file() and f.suffix in (".yaml", ".yml") and not is_denied(f.name):
                 content = self._resolve_file(f, visited)
                 if isinstance(content, dict):
                     result = self._deep_merge(result, content)

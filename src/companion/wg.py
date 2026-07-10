@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import ipaddress
 import logging
 import re
@@ -259,10 +260,16 @@ async def _run_wg_cmd(*args: str, timeout: int = 30) -> tuple[int, str, str]:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except FileNotFoundError as exc:
         raise web.HTTPBadGateway(text=f"Command not found: {args[0]}") from exc
+
+    try:
+        stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except TimeoutError as exc:
+        # Reap the timed-out child so it doesn't leak as a zombie / keep the pipes open.
+        proc.kill()
+        with contextlib.suppress(ProcessLookupError):
+            await proc.wait()
         raise web.HTTPGatewayTimeout(text=f"Command timed out after {timeout}s") from exc
 
     stdout = stdout_b.decode("utf-8", errors="replace")

@@ -551,3 +551,50 @@ def _wg_config_dir(tmp_path, monkeypatch):
     monkeypatch.setattr("companion.wg._PERSIST_DIR", persist)
     monkeypatch.setattr("companion.wg._WG_CONFIG_DIR", runtime)
     return persist
+
+
+# ---------------------------------------------------------------------------
+# _run_wg_cmd — timeout must reap the child process (no leak)
+# ---------------------------------------------------------------------------
+
+
+async def test_run_wg_cmd_kills_process_on_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """On timeout, the subprocess must be killed and reaped, then 504 raised."""
+    import asyncio
+
+    from aiohttp import web
+
+    from companion import wg
+
+    killed = {"kill": False, "wait": False}
+
+    class _FakeProc:
+        returncode = None
+
+        async def communicate(self) -> tuple[bytes, bytes]:  # pragma: no cover - never completes
+            await asyncio.sleep(60)
+            return b"", b""
+
+        def kill(self) -> None:
+            killed["kill"] = True
+
+        async def wait(self) -> int:
+            killed["wait"] = True
+            return 0
+
+    async def _fake_exec(*_args: object, **_kwargs: object) -> _FakeProc:
+        return _FakeProc()
+
+    async def _fake_wait_for(coro: object, timeout: float) -> object:
+        # Discard the pending communicate() coroutine and simulate a timeout.
+        coro.close()  # type: ignore[attr-defined]
+        raise TimeoutError
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_exec)
+    monkeypatch.setattr(asyncio, "wait_for", _fake_wait_for)
+
+    with pytest.raises(web.HTTPGatewayTimeout):
+        await wg._run_wg_cmd("wg", "show", "wg0", timeout=1)
+
+    assert killed["kill"] is True, "timed-out subprocess was not killed"
+    assert killed["wait"] is True, "killed subprocess was not reaped"

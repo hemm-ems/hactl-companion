@@ -8,11 +8,12 @@ import shutil
 from aiohttp import web
 
 from companion import __version__
+from companion.auth import is_trusted_ingress
 from companion.routes.health import RouteDef
 
 
 async def get_status(request: web.Request) -> web.Response:
-    ingress_active = request.headers.get("X-Ingress-Path") is not None
+    ingress_active = is_trusted_ingress(request)
     auth_mode = "ingress" if ingress_active else "bearer"
 
     # Check if the Supervisor API is reachable (environment variable set by HA OS).

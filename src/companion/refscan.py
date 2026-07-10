@@ -88,7 +88,9 @@ def scan_yaml_for_literal(
             hits.append(ScanHit(location, _path_str(match_path), target))
 
         for inc in _include_targets(data, abs_path.parent):
-            queue.append(_rel_to(inc, base_path))
+            rel_inc = _rel_within(inc, base_path)
+            if rel_inc is not None:
+                queue.append(rel_inc)
 
     hits.sort(key=lambda h: (h.location, h.path))
     return hits
@@ -133,7 +135,9 @@ def scan_yaml_for_entities(
             refs.append(EntityRef(location, _path_str(match_path), _terminal_key(match_path), value))
 
         for inc in _include_targets(data, abs_path.parent):
-            queue.append(_rel_to(inc, base_path))
+            rel_inc = _rel_within(inc, base_path)
+            if rel_inc is not None:
+                queue.append(rel_inc)
 
     refs.sort(key=lambda r: (r.location, r.path))
     return refs
@@ -223,7 +227,9 @@ def replace_yaml_literal(
                 resolver.save(rel, data)
 
         for inc in _include_targets(data, abs_path.parent):
-            queue.append(_rel_to(inc, base_path))
+            rel_inc = _rel_within(inc, base_path)
+            if rel_inc is not None:
+                queue.append(rel_inc)
 
     changes.sort(key=lambda c: (c["location"], c["path"]))
     return changes
@@ -330,3 +336,16 @@ def _rel_to(path: Path, base: Path) -> str:
         return path.resolve().relative_to(base).as_posix()
     except ValueError:
         return path.name
+
+
+def _rel_within(path: Path, base: Path) -> str | None:
+    """Base-relative path, or None if it escapes base.
+
+    Used when enqueueing include targets: an `!include ../outside.yaml` must be
+    skipped, not retargeted to a same-named file *inside* base (which `_rel_to`'s
+    `path.name` fallback would wrongly do).
+    """
+    try:
+        return path.resolve().relative_to(base).as_posix()
+    except ValueError:
+        return None
