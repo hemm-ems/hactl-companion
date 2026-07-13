@@ -154,6 +154,10 @@ _TEMPLATE_LIST_SCHEMA = {
                     "state": {"type": "string"},
                     "unit_of_measurement": {"type": "string"},
                     "device_class": {"type": "string"},
+                    "trigger": {
+                        "type": "boolean",
+                        "description": "true if the entity lives in a trigger-based block",
+                    },
                 },
             },
         }
@@ -161,7 +165,11 @@ _TEMPLATE_LIST_SCHEMA = {
 }
 _TEMPLATE_SCHEMA = {
     "type": "object",
-    "properties": {"unique_id": {"type": "string"}, "content": {"type": "string"}},
+    "properties": {
+        "unique_id": {"type": "string"},
+        "content": {"type": "string"},
+        "trigger": {"type": "boolean", "description": "true if the entry is trigger-based"},
+    },
 }
 _SCRIPT_LIST_SCHEMA = {
     "type": "object",
@@ -502,6 +510,10 @@ ENDPOINT_META: dict[tuple[str, str], dict[str, object]] = {
     },
     ("GET", "/v1/config/template"): {
         "summary": "Get single template definition",
+        "description": (
+            "For a trigger-based entry, `content` is the whole block (trigger + entity) so the "
+            "trigger is visible; otherwise it is the entity item."
+        ),
         "tags": ["templates"],
         "parameters": [{"name": "id", "in": "query", "required": True, "schema": {"type": "string"}}],
         "response_schema": _TEMPLATE_SCHEMA,
@@ -520,10 +532,23 @@ ENDPOINT_META: dict[tuple[str, str], dict[str, object]] = {
         "response_schema": _WRITE_RESULT_SCHEMA,
     },
     ("POST", "/v1/config/template"): {
-        "summary": "Create new template sensor",
+        "summary": "Create a new template entry",
+        "description": (
+            "Body is either a bare entity item (placed into a state-based block for `domain`) or a "
+            "full block (declares `sensor:`/`binary_sensor:`, optionally with block-level "
+            "`triggers:`/`actions:`/`conditions:`), appended as its own list item. The latter is how "
+            "trigger-based and multi-domain entries are created. A bare item carrying a block-level "
+            "trigger key is rejected (400)."
+        ),
         "tags": ["templates"],
         "parameters": [
-            {"name": "domain", "in": "query", "required": False, "schema": {"type": "string", "default": "sensor"}},
+            {
+                "name": "domain",
+                "in": "query",
+                "required": False,
+                "description": "domain for a bare entity item (sensor or binary_sensor); ignored for a full block",
+                "schema": {"type": "string", "default": "sensor"},
+            },
         ],
         "requestBody": {
             "content": {"text/plain": {"schema": {"type": "string"}}},
