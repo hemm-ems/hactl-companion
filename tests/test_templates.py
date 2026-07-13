@@ -84,7 +84,7 @@ state: "{{ 42 }}"
     assert data["status"] == "applied"
 
     # Verify backup exists
-    backups = list(config_dir.glob("template.yaml.bak.*"))
+    backups = list((config_dir / ".hactl_backups").glob("template.yaml.bak.*"))
     assert len(backups) >= 1
 
     # Verify updated content

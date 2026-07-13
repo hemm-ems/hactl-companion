@@ -97,7 +97,7 @@ action:
     assert data["reloaded"] is True
 
     # Verify backup
-    backups = list(config_dir.glob("automations.yaml.bak.*"))
+    backups = list((config_dir / ".hactl_backups").glob("automations.yaml.bak.*"))
     assert len(backups) >= 1
 
     # Verify updated

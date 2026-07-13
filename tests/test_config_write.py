@@ -67,7 +67,7 @@ async def test_apply_creates_backup(client: TestClient, auth_headers: dict[str, 
     assert "backup" in data
 
     # Verify backup file exists
-    backup_files = list(config_dir.glob("automations.yaml.bak.*"))
+    backup_files = list((config_dir / ".hactl_backups").glob("automations.yaml.bak.*"))
     assert len(backup_files) == 1
 
     # Verify new content was written
