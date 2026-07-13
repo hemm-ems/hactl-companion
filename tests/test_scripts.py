@@ -118,7 +118,7 @@ sequence:
     assert data["status"] == "applied"
 
     # Verify backup
-    backups = list(config_dir.glob("scripts.yaml.bak.*"))
+    backups = list((config_dir / ".hactl_backups").glob("scripts.yaml.bak.*"))
     assert len(backups) >= 1
 
     # Verify updated

@@ -183,7 +183,7 @@ async def test_delete_helper(
     assert resp2.status == 404
 
     # Verify backup was created
-    backups = list(config_dir.glob("input_boolean.yaml.bak.*"))
+    backups = list((config_dir / ".hactl_backups").glob("input_boolean.yaml.bak.*"))
     assert len(backups) >= 1
 
 

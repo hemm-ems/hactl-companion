@@ -13,7 +13,7 @@ from aiohttp import web
 from ruamel.yaml import YAML
 
 from companion import core_api
-from companion.backups import make_backup
+from companion.backups import backup_dir, make_backup
 from companion.params import parse_bool_param
 from companion.pathguard import is_denied, is_within
 from companion.yaml_resolver import YamlResolver
@@ -173,7 +173,7 @@ async def put_config_file(request: web.Request) -> web.Response:
     # distinction drives the rollback path below).
     backup_name = make_backup(target)
     existed = backup_name is not None
-    backup_path = target.parent / backup_name if backup_name is not None else None
+    backup_path = backup_dir(target) / backup_name if backup_name is not None else None
 
     # Write new content
     target.write_text(new_content, encoding="utf-8")
