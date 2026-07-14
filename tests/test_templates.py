@@ -255,12 +255,75 @@ binary_sensor:
     assert [s.get("unique_id") for s in block["binary_sensor"]] == ["tpl_active"]
 
 
-async def test_create_block_unsupported_domain_rejected(client: TestClient, auth_headers: dict[str, str]) -> None:
-    """A block declaring a not-yet-supported domain (e.g. number) is refused, not written."""
-    body = "number:\n  - name: N\n    unique_id: tpl_num\n    state: '{{ 1 }}'\n    set_value: []\n"
+async def test_create_number_block_full_crud(
+    client: TestClient, auth_headers: dict[str, str], config_dir: Path
+) -> None:
+    """A non-sensor domain (number) supports the full create -> get -> list -> delete cycle.
+
+    The block carries a ``set_value`` action template, which is appended verbatim
+    (hactl never models per-domain action templates).
+    """
+    body = (
+        "number:\n"
+        "  - name: N\n"
+        "    unique_id: tpl_num\n"
+        '    state: "{{ 1 }}"\n'
+        "    set_value:\n"
+        "      - action: input_number.set_value\n"
+        "        target: {entity_id: input_number.backing}\n"
+        '        data: {value: "{{ value }}"}\n'
+    )
     resp = await _post(client, auth_headers, body)
-    assert resp.status == 400
-    assert "not yet supported" in (await resp.text())
+    assert resp.status == 201
+    assert (await resp.json())["unique_id"] == "tpl_num"
+
+    # Written verbatim, action template preserved.
+    data = _read_template_yaml(config_dir)
+    block = next(b for b in data if "number" in b)
+    assert block["number"][0]["unique_id"] == "tpl_num"
+    assert "set_value" in block["number"][0]
+
+    # Visible to get/list with the right domain ...
+    got = await client.get("/v1/config/template?id=tpl_num", headers=auth_headers)
+    assert got.status == 200
+    assert "set_value" in (await got.json())["content"]
+    listed = await (await client.get("/v1/config/templates", headers=auth_headers)).json()
+    assert {"tpl_num": "number"}.items() <= {t["unique_id"]: t["domain"] for t in listed["templates"]}.items()
+
+    # ... and deletable.
+    deleted = await client.delete("/v1/config/template?id=tpl_num", headers=auth_headers)
+    assert deleted.status == 200
+    assert not any("number" in b for b in _read_template_yaml(config_dir))
+
+
+async def test_create_select_and_button_blocks(client: TestClient, auth_headers: dict[str, str]) -> None:
+    """Other action-driven domains (select, button) create and are readable by unique_id."""
+    select_block = (
+        "select:\n"
+        "  - name: Mode\n"
+        "    unique_id: tpl_mode\n"
+        "    state: \"{{ 'a' }}\"\n"
+        "    options: \"{{ ['a', 'b'] }}\"\n"
+        "    select_option:\n"
+        "      - action: input_select.select_option\n"
+        "        target: {entity_id: input_select.backing}\n"
+        '        data: {option: "{{ option }}"}\n'
+    )
+    button_block = (
+        "button:\n"
+        "  - name: Ping\n"
+        "    unique_id: tpl_ping\n"
+        "    press:\n"
+        "      - action: homeassistant.update_entity\n"
+        "        target: {entity_id: sensor.x}\n"
+    )
+    for body, uid in ((select_block, "tpl_mode"), (button_block, "tpl_ping")):
+        resp = await _post(client, auth_headers, body)
+        assert resp.status == 201, await resp.text()
+        assert (await resp.json())["unique_id"] == uid
+        got = await client.get(f"/v1/config/template?id={uid}", headers=auth_headers)
+        assert got.status == 200
+        assert (await got.json())["trigger"] is False
 
 
 async def test_create_block_duplicate_unique_id(client: TestClient, auth_headers: dict[str, str]) -> None:

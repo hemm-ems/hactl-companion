@@ -559,6 +559,105 @@ class TestTemplatesCRUD:
         data = r.json()
         assert data["unique_id"] == "integ_test_tpl_1"
 
+    def test_create_non_sensor_block_full_crud(
+        self, companion_url: str, auth_headers: dict[str, str], _ha_ready: None, ha_url: str, ha_token: str
+    ) -> None:
+        """A non-sensor domain (number) block: create -> HA-validated -> get/list -> delete.
+
+        Proves Option C end-to-end against real HA: the block (with a verbatim
+        ``set_value`` action template) is accepted by HA as valid config, and the
+        domain-agnostic extraction makes the number entity visible to get/list/delete.
+
+        Note: the companion's per-write ``template.reload`` reports ``reloaded=False``
+        in this harness only because HA boots without any ``template:`` config, so
+        the ``template.reload`` service is never registered (and can't be reloaded
+        into existence without a restart) — a test-stack quirk, identical for the
+        existing sensor path, not a real-world issue. HA validity is therefore
+        asserted via ``check_config`` rather than the reload flag.
+        """
+        ha_hdr = {"Authorization": f"Bearer {ha_token}"}
+        # Wire template.yaml into HA's config (default onboarding doesn't) so
+        # check_config actually validates the file we write.
+        seed = '- sensor:\n    - name: Seed\n      unique_id: integ_seed_tpl\n      state: "{{ 1 }}"\n'
+        r = requests.put(
+            f"{companion_url}/v1/config/file",
+            params={"path": "template.yaml", "dry_run": "false"},
+            data=seed,
+            headers=auth_headers,
+            timeout=10,
+        )
+        assert r.status_code == 200
+        base_config = requests.get(
+            f"{companion_url}/v1/config/file",
+            params={"path": "configuration.yaml", "resolve": "false"},
+            headers=auth_headers,
+            timeout=10,
+        ).json()["content"]
+        if "template:" not in base_config:
+            new_config = base_config.rstrip("\n") + "\ntemplate: !include template.yaml\n"
+            r = requests.put(
+                f"{companion_url}/v1/config/file",
+                params={"path": "configuration.yaml", "dry_run": "false"},
+                data=new_config,
+                headers=auth_headers,
+                timeout=10,
+            )
+            assert r.status_code == 200
+
+        number_block = """number:
+  - name: "Integration Test Number"
+    unique_id: integ_test_num
+    state: "{{ 5 }}"
+    set_value:
+      - service: input_number.set_value
+        target: {entity_id: input_number.integ_backing}
+        data: {value: "{{ value }}"}
+"""
+        r = requests.post(
+            f"{companion_url}/v1/config/template",
+            data=number_block,
+            headers={**auth_headers, "Content-Type": "text/plain"},
+            timeout=15,
+        )
+        assert r.status_code == 201, r.text
+        body = r.json()
+        assert body["unique_id"] == "integ_test_num"
+        assert "reloaded" in body  # field returned; value is harness-dependent (see docstring)
+
+        # HA accepts the number template (verbatim action template included).
+        chk = requests.post(f"{ha_url}/api/config/core/check_config", headers=ha_hdr, json={}, timeout=30)
+        assert chk.status_code == 200, chk.text
+        assert chk.json()["result"] == "valid", chk.text
+
+        # Domain-agnostic extraction: the number entity is visible to get + list.
+        got = requests.get(
+            f"{companion_url}/v1/config/template",
+            params={"id": "integ_test_num"},
+            headers=auth_headers,
+            timeout=10,
+        )
+        assert got.status_code == 200
+        assert "set_value" in got.json()["content"]
+        listed = requests.get(f"{companion_url}/v1/config/templates", headers=auth_headers, timeout=10).json()
+        by_uid = {t["unique_id"]: t["domain"] for t in listed["templates"]}
+        assert by_uid.get("integ_test_num") == "number"
+
+        # Delete addressing works for a non-sensor domain.
+        deleted = requests.delete(
+            f"{companion_url}/v1/config/template",
+            params={"id": "integ_test_num"},
+            headers=auth_headers,
+            timeout=15,
+        )
+        assert deleted.status_code == 200
+        gone = requests.get(
+            f"{companion_url}/v1/config/template",
+            params={"id": "integ_test_num"},
+            headers=auth_headers,
+            timeout=10,
+        )
+        assert gone.status_code == 404
+
 
 def _container_logs(container_name: str) -> str:
     result = subprocess.run(
