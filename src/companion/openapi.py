@@ -535,10 +535,11 @@ ENDPOINT_META: dict[tuple[str, str], dict[str, object]] = {
         "summary": "Create a new template entry",
         "description": (
             "Body is either a bare entity item (placed into a state-based block for `domain`) or a "
-            "full block (declares `sensor:`/`binary_sensor:`, optionally with block-level "
-            "`triggers:`/`actions:`/`conditions:`), appended as its own list item. The latter is how "
-            "trigger-based and multi-domain entries are created. A bare item carrying a block-level "
-            "trigger key is rejected (400)."
+            "full block (declares any template entity domain — `sensor:`, `number:`, `select:`, "
+            "`button:`, `weather:`, … — optionally with block-level `triggers:`/`actions:`/"
+            "`conditions:`), appended as its own list item. The latter is how trigger-based and "
+            "multi-domain entries are created. A bare item carrying a block-level trigger key is "
+            "rejected (400)."
         ),
         "tags": ["templates"],
         "parameters": [
@@ -546,7 +547,10 @@ ENDPOINT_META: dict[tuple[str, str], dict[str, object]] = {
                 "name": "domain",
                 "in": "query",
                 "required": False,
-                "description": "domain for a bare entity item (sensor or binary_sensor); ignored for a full block",
+                "description": (
+                    "domain for a bare entity item (any template entity domain; "
+                    "default sensor); ignored for a full block"
+                ),
                 "schema": {"type": "string", "default": "sensor"},
             },
         ],

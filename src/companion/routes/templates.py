@@ -53,10 +53,6 @@ _ENTITY_DOMAINS = (
     "vacuum",
 )
 
-# Entity domains hactl can currently author/index. Blocks declaring anything
-# outside this set are rejected (full-schema support is tracked separately).
-_SUPPORTED_DOMAINS = ("sensor", "binary_sensor")
-
 # Block-level keys (both the modern plural and legacy singular spellings) that
 # make a block trigger-based. A plain state-based entity must never be merged
 # into a block carrying any of these.
@@ -123,14 +119,20 @@ def _all_unique_ids(data: list[Any]) -> set[str]:
     return ids
 
 
-def _extract_sensors(data: list[Any]) -> list[dict[str, Any]]:
-    """Extract all sensor/binary_sensor defs with their domain and parent index."""
-    sensors: list[dict[str, Any]] = []
+def _extract_entities(data: list[Any]) -> list[dict[str, Any]]:
+    """Extract every template entity def with its domain and parent index.
+
+    Walks all ``_ENTITY_DOMAINS`` so entities in any template domain (not just
+    sensor/binary_sensor) are visible to get/list/update/delete. The
+    ``state``/``unit_of_measurement``/``device_class`` fields are sensor-oriented
+    and left empty for domains that don't declare them.
+    """
+    entities: list[dict[str, Any]] = []
     for group_idx, group in enumerate(data):
         if not isinstance(group, dict):
             continue
         trigger_based = _block_is_trigger_based(group)
-        for domain in ("sensor", "binary_sensor"):
+        for domain in _ENTITY_DOMAINS:
             items = group.get(domain)
             if not isinstance(items, list):
                 continue
@@ -138,7 +140,7 @@ def _extract_sensors(data: list[Any]) -> list[dict[str, Any]]:
                 if not isinstance(item, dict):
                     continue
                 uid = item.get("unique_id", "")
-                sensors.append(
+                entities.append(
                     {
                         "unique_id": str(uid),
                         "name": item.get("name", ""),
@@ -151,7 +153,7 @@ def _extract_sensors(data: list[Any]) -> list[dict[str, Any]]:
                         "item_idx": item_idx,
                     }
                 )
-    return sensors
+    return entities
 
 
 def _save_templates(target: Any, data: list[Any]) -> None:
@@ -171,7 +173,7 @@ async def get_templates(request: web.Request) -> web.Response:
     """GET /v1/config/templates — list all template sensor definitions."""
     base = request.app["config_base_path"]
     data, _target = _load_templates(base)
-    sensors = _extract_sensors(data)
+    entities = _extract_entities(data)
     result = [
         {
             "unique_id": s["unique_id"],
@@ -182,7 +184,7 @@ async def get_templates(request: web.Request) -> web.Response:
             "device_class": s["device_class"],
             "trigger": s["trigger"],
         }
-        for s in sensors
+        for s in entities
     ]
     return web.json_response({"templates": result})
 
@@ -199,9 +201,9 @@ async def get_template(request: web.Request) -> web.Response:
         raise web.HTTPBadRequest(text="Missing id parameter")
 
     data, _target = _load_templates(base)
-    sensors = _extract_sensors(data)
+    entities = _extract_entities(data)
 
-    for s in sensors:
+    for s in entities:
         if s["unique_id"] == uid:
             group = data[s["group_idx"]]
             payload = group if s["trigger"] else group[s["domain"]][s["item_idx"]]
@@ -242,9 +244,9 @@ async def put_template(request: web.Request) -> web.Response:
         raise web.HTTPBadRequest(text=f"'{stray}' belongs at the block level, not inside an entity item")
 
     data, target = _load_templates(base)
-    sensors = _extract_sensors(data)
+    entities = _extract_entities(data)
 
-    for s in sensors:
+    for s in entities:
         if s["unique_id"] == uid:
             if dry_run:
                 import difflib
@@ -278,7 +280,8 @@ async def post_template(request: web.Request) -> web.Response:
 
     * a **bare entity item** (``unique_id`` + ``state`` + …), placed into a
       state-based block for ``?domain=`` (the legacy shape); or
-    * a **full block** (declares ``sensor:``/``binary_sensor:``, optionally with
+    * a **full block** (declares any template entity domain — ``sensor:``,
+      ``number:``, ``select:``, ``button:``, ``weather:``, … — optionally with
       block-level ``triggers:``/``actions:``/``conditions:``), appended verbatim
       as its own new top-level list item — this is how trigger-based and
       multi-domain entries are authored.
@@ -314,14 +317,6 @@ async def post_template(request: web.Request) -> web.Response:
 
 def _create_block(data: list[Any], block: dict[str, Any], existing_ids: set[str]) -> str:
     """Append a full block verbatim as its own list item. Returns first unique_id."""
-    declared = [d for d in _ENTITY_DOMAINS if d in block]
-    unsupported = [d for d in declared if d not in _SUPPORTED_DOMAINS]
-    if unsupported:
-        raise web.HTTPBadRequest(
-            text=f"template domains not yet supported by hactl: {', '.join(unsupported)} "
-            f"(only {', '.join(_SUPPORTED_DOMAINS)})"
-        )
-
     new_ids = _block_unique_ids(block)
     if not new_ids:
         raise web.HTTPBadRequest(text="Template block must define at least one entity with a unique_id")
@@ -349,8 +344,8 @@ def _create_bare_item(request: web.Request, data: list[Any], item: dict[str, Any
         )
 
     domain = request.query.get("domain", "sensor")
-    if domain not in _SUPPORTED_DOMAINS:
-        raise web.HTTPBadRequest(text="domain must be 'sensor' or 'binary_sensor'")
+    if domain not in _ENTITY_DOMAINS:
+        raise web.HTTPBadRequest(text=f"'{domain}' is not a template entity domain")
 
     uid = str(item["unique_id"])
     if uid in existing_ids:
@@ -375,9 +370,9 @@ async def delete_template(request: web.Request) -> web.Response:
         raise web.HTTPBadRequest(text="Missing id parameter")
 
     data, target = _load_templates(base)
-    sensors = _extract_sensors(data)
+    entities = _extract_entities(data)
 
-    for s in sensors:
+    for s in entities:
         if s["unique_id"] == uid:
             group = data[s["group_idx"]]
             del group[s["domain"]][s["item_idx"]]
