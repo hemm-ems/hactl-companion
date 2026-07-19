@@ -3,7 +3,11 @@
 Unlike ``related.py``'s co-occurrence graph, which only pairs strings already in
 the live entity registry, this scans for a *literal* value regardless of whether
 it is still a known entity. That is what makes it usable for stale/renamed
-entities: it finds every place a now-deleted entity_id is still referenced.
+entities: it finds every place a now-deleted entity_id is still referenced —
+including a mention embedded inside a larger string, such as an entity_id
+wrapped in a Jinja template (``"{{ states('sensor.foo') }}"``). Matching is
+boundary-aware (see :func:`_target_pattern`), not substring: ``sensor.foo``
+matches inside that template but not inside ``sensor.foo_bar``.
 
 Each file is parsed on its own (``resolve=False``) so a hit reports the concrete
 file it lives in (e.g. ``automations.yaml``) rather than a fully-inlined blob.
@@ -28,7 +32,16 @@ from companion.yaml_resolver import CircularIncludeError, YamlResolver
 # lowercase/digit/underscore object id. Deliberately shape-only — a service name
 # (e.g. light.turn_on) matches too; separating services from entities is the
 # caller's job (it can key off the path terminal, e.g. `.service`).
-_ENTITY_ID_RE = re.compile(r"^[a-z_]+\.[a-z0-9_]+$")
+#
+# Deliberately de-anchored (no ^...$): a leaf doesn't have to *be* an entity_id,
+# it only has to *contain* one as a whole token — e.g. a Jinja template string
+# like "{{ states('sensor.foo') }}" embeds sensor.foo. The \b boundaries are
+# what make this safe: since every entity_id starts and ends on a word
+# character ([a-z_] / [a-z0-9_]), \b rejects a match that is merely a prefix of
+# a longer token (sensor.foo inside sensor.foo_bar) or glued onto other text
+# (asensor.foo), while still matching across non-word delimiters like quotes,
+# parens and spaces.
+_ENTITY_ID_RE = re.compile(r"\b[a-z_]+\.[a-z0-9_]+\b")
 
 _INCLUDE_DIR_TAGS = {
     "!include_dir_named",
@@ -60,7 +73,12 @@ def scan_yaml_for_literal(
     target: str,
     entry_file: str = "configuration.yaml",
 ) -> list[ScanHit]:
-    """Find every string leaf equal to ``target`` across the config file graph.
+    """Find every string leaf containing ``target`` as a whole token, across the config file graph.
+
+    A leaf matches whether it *is* ``target`` (``entity_id: sensor.gone``) or
+    merely *embeds* it as a boundary-delimited token, e.g. inside a Jinja
+    template string (``"{{ states('sensor.gone') }}"``). See :data:`_ENTITY_ID_RE`
+    for why ``\\b`` boundaries are the right notion of "whole token" here.
 
     Starts from ``entry_file`` and follows ``!include`` / ``!include_dir_*``
     directives, scanning each reachable file's own parsed tree. Files that cannot
@@ -68,6 +86,7 @@ def scan_yaml_for_literal(
     """
     base_path = Path(base).resolve()
     resolver = YamlResolver(base_path)
+    pattern = _target_pattern(target)
     hits: list[ScanHit] = []
     seen: set[str] = set()
     queue: deque[str] = deque([entry_file])
@@ -85,7 +104,7 @@ def scan_yaml_for_literal(
             continue
 
         location = _rel_to(abs_path, base_path)
-        for match_path in _scan_tree(data, target):
+        for match_path in _scan_tree(data, pattern):
             hits.append(ScanHit(location, _path_str(match_path), target))
 
         for inc in _include_targets(data, abs_path.parent):
@@ -157,13 +176,17 @@ def _terminal_key(path: list[Any]) -> str:
 
 
 def _entity_leaves(node: Any, path: tuple[Any, ...] = ()) -> list[tuple[list[Any], str]]:
-    """Return (path, value) for every str leaf matching the entity_id shape.
+    """Return (path, value) for every entity_id-shaped token found in a str leaf.
 
-    Mirrors :func:`_scan_tree`'s traversal; ``!include``-tagged scalars are not
-    str/dict/list so they fall through untouched.
+    A leaf that *is* an entity id (``entity_id: light.kitchen``) yields one
+    ref; a leaf that only *embeds* one or more entity-id-shaped tokens (e.g. a
+    Jinja template string like ``"{{ states('sensor.foo') }}"``) yields one ref
+    per embedded token, all sharing the leaf's path. Mirrors :func:`_scan_tree`'s
+    traversal; ``!include``-tagged scalars are not str/dict/list so they fall
+    through untouched.
     """
     if isinstance(node, str):
-        return [(list(path), str(node))] if _ENTITY_ID_RE.match(node) else []
+        return [(list(path), m.group()) for m in _ENTITY_ID_RE.finditer(node)]
     leaves: list[tuple[list[Any], str]] = []
     if isinstance(node, dict):
         for key, value in node.items():
@@ -182,7 +205,13 @@ def replace_yaml_literal(
     *,
     dry_run: bool,
 ) -> list[dict[str, str]]:
-    """Rewrite every string leaf equal to ``target`` to ``replacement``, per file.
+    """Rewrite every whole-token occurrence of ``target`` to ``replacement``, per file.
+
+    Matches the same boundary-aware notion of "occurrence" as
+    :func:`scan_yaml_for_literal`: a leaf that *is* ``target`` is replaced
+    outright, and a leaf that only *embeds* ``target`` as a token (e.g. inside a
+    Jinja template string) has just that token swapped, leaving the rest of the
+    string — and the surrounding YAML — untouched.
 
     Walks the exact same ``!include`` graph as :func:`scan_yaml_for_literal` and
     rewrites the literal *in the file it actually lives in*, so a reference in
@@ -196,6 +225,7 @@ def replace_yaml_literal(
     """
     base_path = Path(base).resolve()
     resolver = YamlResolver(base_path)
+    pattern = _target_pattern(target)
     changes: list[dict[str, str]] = []
     seen: set[str] = set()
     queue: deque[str] = deque([entry_file])
@@ -214,7 +244,7 @@ def replace_yaml_literal(
             continue
 
         location = _rel_to(abs_path, base_path)
-        match_paths = _replace_tree(data, target, replacement)
+        match_paths = _replace_tree(data, pattern, replacement)
         if match_paths:
             for match_path in match_paths:
                 changes.append(
@@ -240,32 +270,42 @@ def replace_yaml_literal(
     return changes
 
 
-def _replace_tree(node: Any, target: str, replacement: str, path: tuple[Any, ...] = ()) -> list[list[Any]]:
-    """Mutate ``node`` in place: set every str leaf == target to replacement.
+def _replace_tree(node: Any, pattern: re.Pattern[str], replacement: str, path: tuple[Any, ...] = ()) -> list[list[Any]]:
+    """Mutate ``node`` in place: rewrite every whole-token match of ``pattern`` to replacement.
 
-    Mirrors :func:`_scan_tree` but assigns into the parent container, so it needs
-    the parent+key/index to write. Quote style is preserved by reconstructing the
-    original scalar's subclass (ruamel quoted scalars are ``str`` subclasses).
-    ``!include``-tagged scalars are not str/dict/list, so they fall through
-    untouched and are never rewritten. Returns the path of every rewritten leaf.
+    A leaf that is *only* the target is replaced outright; a leaf that merely
+    *embeds* the target (e.g. ``"{{ states('sensor.foo') }}"``) has just the
+    matched token(s) substituted, via :func:`re.Pattern.sub` on the whole leaf —
+    the surrounding text is left exactly as it was. Mirrors :func:`_scan_tree`
+    but assigns into the parent container, so it needs the parent+key/index to
+    write. Quote style is preserved by reconstructing the original scalar's
+    subclass (ruamel quoted scalars are ``str`` subclasses). ``!include``-tagged
+    scalars are not str/dict/list, so they fall through untouched and are never
+    rewritten. Returns the path of every rewritten leaf.
     """
+    # A callable repl (rather than a plain string) makes re.sub treat
+    # ``replacement`` as a literal — a string repl would otherwise interpret
+    # backslash sequences (e.g. "\1") in an arbitrary entity_id as a group
+    # reference and raise.
     matches: list[list[Any]] = []
     if isinstance(node, dict):
         for key, value in node.items():
             if isinstance(value, str):
-                if value == target:
-                    node[key] = _styled_like(value, replacement)
+                new_value = pattern.sub(lambda _m: replacement, value)
+                if new_value != value:
+                    node[key] = _styled_like(value, new_value)
                     matches.append([*path, key])
             elif isinstance(value, (dict, list)):
-                matches.extend(_replace_tree(value, target, replacement, (*path, key)))
+                matches.extend(_replace_tree(value, pattern, replacement, (*path, key)))
     elif isinstance(node, list):
         for index, value in enumerate(node):
             if isinstance(value, str):
-                if value == target:
-                    node[index] = _styled_like(value, replacement)
+                new_value = pattern.sub(lambda _m: replacement, value)
+                if new_value != value:
+                    node[index] = _styled_like(value, new_value)
                     matches.append([*path, index])
             elif isinstance(value, (dict, list)):
-                matches.extend(_replace_tree(value, target, replacement, (*path, index)))
+                matches.extend(_replace_tree(value, pattern, replacement, (*path, index)))
     return matches
 
 
@@ -277,22 +317,36 @@ def _styled_like(original: str, replacement: str) -> str:
     return replacement
 
 
-def _scan_tree(node: Any, target: str, path: tuple[Any, ...] = ()) -> list[list[Any]]:
-    """Return the path of every str leaf equal to target in a parsed YAML tree.
+def _target_pattern(target: str) -> re.Pattern[str]:
+    """Boundary-aware pattern matching ``target`` as a whole token anywhere in a string.
+
+    Entity ids are made only of ``[a-z_]``, ``[a-z0-9_]`` and a separating dot,
+    so every entity_id-shaped ``target`` starts and ends on a word character —
+    which makes a plain ``\\b`` at each end exactly the right notion of "whole
+    token": it matches a bare leaf (``sensor.foo``) and an embedded mention
+    inside a larger string (``"{{ states('sensor.foo') }}"``), while rejecting
+    a match that is only a prefix of a longer token (``sensor.foo_bar``) or
+    glued onto other text (``asensor.foo``).
+    """
+    return re.compile(r"\b" + re.escape(target) + r"\b")
+
+
+def _scan_tree(node: Any, pattern: re.Pattern[str], path: tuple[Any, ...] = ()) -> list[list[Any]]:
+    """Return the path of every str leaf containing a whole-token match of pattern.
 
     ``!include``-tagged scalars are neither str, dict nor list, so they fall
     through untouched — their contents are scanned when the target file is
     reached via the include graph.
     """
     if isinstance(node, str):
-        return [list(path)] if node == target else []
+        return [list(path)] if pattern.search(node) else []
     matches: list[list[Any]] = []
     if isinstance(node, dict):
         for key, value in node.items():
-            matches.extend(_scan_tree(value, target, (*path, key)))
+            matches.extend(_scan_tree(value, pattern, (*path, key)))
     elif isinstance(node, list):
         for index, value in enumerate(node):
-            matches.extend(_scan_tree(value, target, (*path, index)))
+            matches.extend(_scan_tree(value, pattern, (*path, index)))
     return matches
 
 
