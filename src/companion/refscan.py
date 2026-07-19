@@ -21,6 +21,7 @@ from typing import Any, cast
 
 from ruamel.yaml.scalarstring import ScalarString
 
+from companion.backups import make_backup
 from companion.yaml_resolver import CircularIncludeError, YamlResolver
 
 # An entity_id is domain.object_id: a lowercase/underscore domain, a dot, then a
@@ -190,7 +191,8 @@ def replace_yaml_literal(
     comments, formatting and quote style of untouched nodes survive.
 
     Returns ``[{location, path, before, after}]`` for every rewritten leaf. When
-    ``dry_run`` is true the report is identical but no file is written.
+    ``dry_run`` is true the report is identical but no file is written. Each
+    rewritten file is backed up (see :mod:`companion.backups`) before it is saved.
     """
     base_path = Path(base).resolve()
     resolver = YamlResolver(base_path)
@@ -224,6 +226,9 @@ def replace_yaml_literal(
                     }
                 )
             if not dry_run:
+                # Back up the prior content before overwriting (C-5: every applied
+                # write gets a backup, same as the PUT/POST config routes).
+                make_backup(abs_path)
                 resolver.save(rel, data)
 
         for inc in _include_targets(data, abs_path.parent):

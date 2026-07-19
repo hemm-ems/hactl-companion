@@ -63,10 +63,6 @@ content into `.hactl_backups/` next to the file (bounded retention, see
 
 - Enforced by: `tests/test_invariants.py::test_applied_write_backs_up_every_modified_file`
   (all file-mutating routes), `tests/test_config_write.py::test_apply_creates_backup`
-- **Known gap:** `POST /v1/ref/replace` in apply mode writes through
-  `YamlResolver.save` without `make_backup`. Tracked as a strict `xfail` in
-  the invariant test — fixing it will flip the xfail and force this note to
-  be removed.
 
 ## C-6 — Validate or roll back on applied config writes
 

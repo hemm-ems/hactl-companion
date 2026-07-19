@@ -165,7 +165,6 @@ FILE_WRITES: dict[tuple[str, str], dict[str, Any]] = {
         "gated": True,
         "seed": _seed_ref_target,
         "apply": {"json": {"old": "sensor.gone", "new": "sensor.new", "dry_run": False}},
-        "backup_xfail": "C-5 gap: ref/replace apply writes via YamlResolver.save without make_backup",
     },
 }
 
@@ -268,15 +267,7 @@ async def test_omitted_dry_run_never_touches_disk(
     assert _snapshot(config_dir) == before, f"{method} {path}: request without dry_run modified files on disk"
 
 
-def _backup_params() -> list[Any]:
-    params = []
-    for (method, path), probe in sorted(FILE_WRITES.items()):
-        marks = [pytest.mark.xfail(strict=True, reason=probe["backup_xfail"])] if "backup_xfail" in probe else []
-        params.append(pytest.param(method, path, id=f"{method} {path}", marks=marks))
-    return params
-
-
-@pytest.mark.parametrize(("method", "path"), _backup_params())
+@pytest.mark.parametrize(("method", "path"), _params(FILE_WRITES.keys()))
 async def test_applied_write_backs_up_every_modified_file(
     client: TestClient, auth_headers: dict[str, str], config_dir: Path, method: str, path: str
 ) -> None:
