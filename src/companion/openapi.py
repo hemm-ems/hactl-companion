@@ -43,7 +43,17 @@ _RELATED_ENTITY_SCHEMA = {
                 "required": ["entity_id", "relationship", "detail"],
                 "properties": {
                     "entity_id": {"type": "string"},
-                    "relationship": {"type": "string"},
+                    "relationship": {
+                        "type": "string",
+                        "description": (
+                            "How the two are related: config-entry-reference, referenced-entity, "
+                            "device-reference, yaml-reference (entities co-occurring in one YAML node), "
+                            "or automation-reference. automation-reference means an automation's config "
+                            "mentions the queried entity; entity_id is then the automation's entity_id "
+                            "(registry-resolved via its unique_id, else derived from its alias) and "
+                            "detail is 'file:path-within-file (alias)'."
+                        ),
+                    },
                     "detail": {"type": "string"},
                 },
             },
