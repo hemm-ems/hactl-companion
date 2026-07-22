@@ -173,6 +173,30 @@ def test_scan_finds_target_embedded_in_jinja_template(tmp_path: Path) -> None:
     assert hits == [ScanHit("configuration.yaml", "sensor[0].sensors.liters.value_template", "sensor.zisterne_liter")]
 
 
+def test_scan_finds_target_split_by_an_escaped_line_continuation(tmp_path: Path) -> None:
+    """A token the raw bytes do not contain, but the parsed value does.
+
+    Inside a double-quoted scalar a trailing backslash joins the two lines with
+    no separator, so `sensor.` + `gone` parse as `sensor.gone` even though the
+    file text never holds that substring. The scan's raw-text pre-filter (which
+    exists to avoid parsing files that cannot match) must not be fooled into
+    skipping this file.
+    """
+    (tmp_path / "configuration.yaml").write_text(
+        'automation: !include automations.yaml\nnote: "harmless"\n', encoding="utf-8"
+    )
+    (tmp_path / "automations.yaml").write_text(
+        "- alias: A\n  condition:\n    - condition: template\n"
+        "      value_template: \"{{ states('sensor.\\\n        gone') }}\"\n",
+        encoding="utf-8",
+    )
+    assert "sensor.gone" not in (tmp_path / "automations.yaml").read_text(encoding="utf-8")
+
+    hits = scan_yaml_for_literal(tmp_path, "sensor.gone")
+
+    assert hits == [ScanHit("automations.yaml", "[0].condition[0].value_template", "sensor.gone")]
+
+
 def test_scan_boundary_rejects_longer_or_glued_token(tmp_path: Path) -> None:
     (tmp_path / "configuration.yaml").write_text(
         "a: sensor.foo_bar\nb: asensor.foo\n",

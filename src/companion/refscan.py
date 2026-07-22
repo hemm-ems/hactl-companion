@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import re
 from collections import deque
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -51,6 +52,10 @@ _INCLUDE_DIR_TAGS = {
 }
 _YAML_SUFFIXES = (".yaml", ".yml")
 
+# A backslash immediately before a line break: inside a double-quoted scalar YAML
+# joins those lines with no separator, so a token can span the break.
+_ESCAPED_NEWLINE_RE = re.compile(r"\\\r?\n")
+
 
 @dataclass(frozen=True)
 class ScanHit:
@@ -66,6 +71,99 @@ class EntityRef:
     key: str  # nearest enclosing mapping key (e.g. "entity_id" vs "service") — lets the
     # caller tell a true entity position from a same-shaped service name
     matched_value: str  # the entity_id-shaped value found at this leaf
+
+
+def iter_config_trees(
+    base: str | Path,
+    entry_file: str = "configuration.yaml",
+    *,
+    contains: str | None = None,
+) -> Iterator[tuple[str, Path, Any]]:
+    """Yield ``(location, absolute path, parsed tree)`` for every reachable config file.
+
+    One breadth-first walk of the ``!include`` / ``!include_dir_*`` graph starting
+    at ``entry_file``. Each file is parsed on its own (``resolve=False``) so a
+    caller can attribute what it finds to the concrete file it lives in. Files
+    that cannot be read or parsed are skipped rather than aborting the walk.
+
+    A file is only enqueued after its includer has been yielded, so a consumer
+    that needs parent context (e.g. "``automation:`` pointed at this file") can
+    record it while walking. This is the single walk implementation shared by
+    every read-only scan, so callers never disagree about which files are part
+    of the config.
+
+    ``contains`` is a pure cost optimisation for callers hunting one literal:
+    a file whose raw text cannot possibly yield a match and cannot extend the
+    graph is skipped without paying for a YAML parse. Round-trip parsing a
+    few-hundred-KiB config costs ~0.5s, and this endpoint runs it per request,
+    so the pre-filter is what keeps the scan affordable. See :func:`_may_contain`
+    for exactly when a file is deemed skippable — it is deliberately
+    conservative: when in doubt, parse.
+    """
+    base_path = Path(base).resolve()
+    resolver = YamlResolver(base_path)
+    seen: set[str] = set()
+    queue: deque[str] = deque([entry_file])
+
+    while queue:
+        rel = queue.popleft()
+        abs_path = (base_path / rel).resolve()
+        if str(abs_path) in seen or not abs_path.is_file():
+            continue
+        seen.add(str(abs_path))
+
+        if contains is not None and not _may_contain(abs_path, contains):
+            continue
+
+        try:
+            data = resolver.load(rel, resolve=False)
+        except (FileNotFoundError, PermissionError, ValueError, CircularIncludeError):
+            continue
+
+        yield _rel_to(abs_path, base_path), abs_path, data
+
+        for inc in _include_targets(data, abs_path.parent):
+            rel_inc = _rel_within(inc, base_path)
+            if rel_inc is not None:
+                queue.append(rel_inc)
+
+
+def _may_contain(path: Path, needle: str) -> bool:
+    """Whether ``path`` is worth parsing when hunting for the literal ``needle``.
+
+    True unless all three hold:
+
+    * the raw text does not contain ``needle`` — a string leaf can only *hold*
+      the token if the bytes are there;
+    * the raw text has no ``!include`` — otherwise skipping it would prune part
+      of the config graph, not just this file;
+    * the raw text has no escaped line continuation (``\\`` at end of line inside
+      a double-quoted scalar) — that is the one YAML construct that joins two
+      lines with *no* separator, so it could rejoin a token the raw text splits.
+      Folded/literal blocks always insert a space or newline, which no entity_id
+      token can survive, so they need no special case.
+
+    An unreadable file returns True so the parse attempt (and its existing
+    error handling) still decides.
+    """
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return True
+    return needle in text or "!include" in text or _ESCAPED_NEWLINE_RE.search(text) is not None
+
+
+def scan_tree_for_literal(tree: Any, target: str) -> list[str]:
+    """Rendered paths of every string leaf in one parsed tree containing ``target``.
+
+    The per-file half of :func:`scan_yaml_for_literal`, exposed so a caller that
+    already holds a parsed tree (from :func:`iter_config_trees`) can match with
+    *this* matcher instead of writing its own — two matchers that disagree is how
+    ``ref scan`` and ``ent related`` came to give contradictory answers about the
+    same entity.
+    """
+    pattern = _target_pattern(target)
+    return [render_path(match_path) for match_path in _scan_tree(tree, pattern)]
 
 
 def scan_yaml_for_literal(
@@ -84,34 +182,11 @@ def scan_yaml_for_literal(
     directives, scanning each reachable file's own parsed tree. Files that cannot
     be read or parsed are skipped rather than aborting the whole scan.
     """
-    base_path = Path(base).resolve()
-    resolver = YamlResolver(base_path)
-    pattern = _target_pattern(target)
-    hits: list[ScanHit] = []
-    seen: set[str] = set()
-    queue: deque[str] = deque([entry_file])
-
-    while queue:
-        rel = queue.popleft()
-        abs_path = (base_path / rel).resolve()
-        if str(abs_path) in seen or not abs_path.is_file():
-            continue
-        seen.add(str(abs_path))
-
-        try:
-            data = resolver.load(rel, resolve=False)
-        except (FileNotFoundError, PermissionError, ValueError, CircularIncludeError):
-            continue
-
-        location = _rel_to(abs_path, base_path)
-        for match_path in _scan_tree(data, pattern):
-            hits.append(ScanHit(location, _path_str(match_path), target))
-
-        for inc in _include_targets(data, abs_path.parent):
-            rel_inc = _rel_within(inc, base_path)
-            if rel_inc is not None:
-                queue.append(rel_inc)
-
+    hits = [
+        ScanHit(location, path, target)
+        for location, _abs_path, data in iter_config_trees(base, entry_file, contains=target)
+        for path in scan_tree_for_literal(data, target)
+    ]
     hits.sort(key=lambda h: (h.location, h.path))
     return hits
 
@@ -132,33 +207,11 @@ def scan_yaml_for_entities(
     diff the returned values against the live entity set to find dangling ones.
     It is intentionally unfiltered — the caller decides which keys are entities.
     """
-    base_path = Path(base).resolve()
-    resolver = YamlResolver(base_path)
-    refs: list[EntityRef] = []
-    seen: set[str] = set()
-    queue: deque[str] = deque([entry_file])
-
-    while queue:
-        rel = queue.popleft()
-        abs_path = (base_path / rel).resolve()
-        if str(abs_path) in seen or not abs_path.is_file():
-            continue
-        seen.add(str(abs_path))
-
-        try:
-            data = resolver.load(rel, resolve=False)
-        except (FileNotFoundError, PermissionError, ValueError, CircularIncludeError):
-            continue
-
-        location = _rel_to(abs_path, base_path)
-        for match_path, value in _entity_leaves(data):
-            refs.append(EntityRef(location, _path_str(match_path), _terminal_key(match_path), value))
-
-        for inc in _include_targets(data, abs_path.parent):
-            rel_inc = _rel_within(inc, base_path)
-            if rel_inc is not None:
-                queue.append(rel_inc)
-
+    refs = [
+        EntityRef(location, render_path(match_path), _terminal_key(match_path), value)
+        for location, _abs_path, data in iter_config_trees(base, entry_file)
+        for match_path, value in _entity_leaves(data)
+    ]
     refs.sort(key=lambda r: (r.location, r.path))
     return refs
 
@@ -250,7 +303,7 @@ def replace_yaml_literal(
                 changes.append(
                     {
                         "location": location,
-                        "path": _path_str(match_path),
+                        "path": render_path(match_path),
                         "before": target,
                         "after": replacement,
                     }
@@ -350,6 +403,30 @@ def _scan_tree(node: Any, pattern: re.Pattern[str], path: tuple[Any, ...] = ()) 
     return matches
 
 
+def include_tag(node: Any) -> tuple[str, str] | None:
+    """``(tag, raw target)`` if ``node`` is an ``!include``-family tagged scalar, else None.
+
+    Only meaningful on an *unresolved* tree (``resolve=False``), where ruamel
+    leaves an unknown tag as a tagged scalar. Exposed because which include tag
+    was used is semantic, not cosmetic: under an ``automation:`` key,
+    ``!include_dir_merge_list`` means "each file holds a *list* of automations"
+    while ``!include_dir_list`` means "each file *is* one automation".
+    """
+    if hasattr(node, "tag") and hasattr(node, "value"):
+        tag = node.tag.value if hasattr(node.tag, "value") else str(node.tag)
+        raw = str(node.value).strip()
+        if raw and (tag == "!include" or tag in _INCLUDE_DIR_TAGS):
+            return tag, raw
+    return None
+
+
+def include_dir_files(directory: Path) -> list[Path]:
+    """The YAML files an ``!include_dir_*`` tag expands to, in the resolver's order."""
+    if not directory.is_dir():
+        return []
+    return sorted(f.resolve() for f in directory.iterdir() if f.is_file() and f.suffix in _YAML_SUFFIXES)
+
+
 def _include_targets(node: Any, context_dir: Path) -> list[Path]:
     """Absolute paths of files reachable via !include* tags in an unresolved tree."""
     targets: list[Path] = []
@@ -363,24 +440,21 @@ def _include_targets(node: Any, context_dir: Path) -> list[Path]:
             for child in value:
                 walk(child)
             return
-        if hasattr(value, "tag") and hasattr(value, "value"):
-            tag = value.tag.value if hasattr(value.tag, "value") else str(value.tag)
-            raw = str(value.value).strip()
-            if not raw:
-                return
-            dest = (context_dir / raw).resolve()
-            if tag == "!include":
-                targets.append(dest)
-            elif tag in _INCLUDE_DIR_TAGS and dest.is_dir():
-                targets.extend(
-                    sorted(f.resolve() for f in dest.iterdir() if f.is_file() and f.suffix in _YAML_SUFFIXES)
-                )
+        tagged = include_tag(value)
+        if tagged is None:
+            return
+        tag, raw = tagged
+        dest = (context_dir / raw).resolve()
+        if tag == "!include":
+            targets.append(dest)
+        elif tag in _INCLUDE_DIR_TAGS:
+            targets.extend(include_dir_files(dest))
 
     walk(node)
     return targets
 
 
-def _path_str(path: list[Any]) -> str:
+def render_path(path: list[Any] | tuple[Any, ...]) -> str:
     """Render a path like ``views[0].cards[2].entity`` (mirrors Go jsonwalk)."""
     parts: list[str] = []
     for i, seg in enumerate(path):
