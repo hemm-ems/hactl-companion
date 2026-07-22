@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import yaml
 from aiohttp.test_utils import TestClient
 
 
@@ -116,3 +117,48 @@ async def test_circular_include_detected(client: TestClient, auth_headers: dict[
         content: str = data.get("content", "")
         # A sane fallback is returning the raw unparsed YAML
         assert "!include" in content or len(content) > 0, "200 response with empty content for circular include"
+
+
+async def test_include_dir_merge_list(client: TestClient, auth_headers: dict[str, str], config_dir: Path) -> None:
+    """!include_dir_merge_list concatenates each file's list into one flat list.
+
+    This is the standard tag for a split automations/ directory. It used to fall
+    through to the unknown-tag branch and resolve to the bare directory string,
+    so every automation in a split layout was invisible to `ent related`,
+    `ref scan` and `config file`.
+    """
+    split = config_dir / "split_automations"
+    split.mkdir()
+    (split / "a.yaml").write_text("- id: split_one\n  alias: Split One\n")
+    (split / "b.yaml").write_text("- id: split_two\n  alias: Split Two\n")
+    (config_dir / "merged.yaml").write_text("automation: !include_dir_merge_list split_automations/\n")
+
+    resp = await client.get("/v1/config/file?path=merged.yaml&resolve=true", headers=auth_headers)
+    assert resp.status == 200
+    content = (await resp.json())["content"]
+
+    parsed = yaml.safe_load(content)
+    automations = parsed["automation"]
+    assert isinstance(automations, list), f"expected a list, got {type(automations).__name__}: {automations!r}"
+    # Flat, not a list of per-file lists — that is what distinguishes
+    # merge_list from include_dir_list.
+    assert [a["id"] for a in automations] == ["split_one", "split_two"]
+
+
+async def test_unresolved_tag_keeps_its_directive(
+    client: TestClient, auth_headers: dict[str, str], config_dir: Path
+) -> None:
+    """An unresolved tag keeps its directive text rather than degrading to the bare value.
+
+    `!secret home_lat` used to resolve to the string "home_lat" — the secret's
+    KEY rendered where its VALUE belongs, indistinguishable from a real setting.
+    The secret itself is never read here; only the directive is preserved.
+    """
+    (config_dir / "withsecret.yaml").write_text("homeassistant:\n  latitude: !secret home_lat\n")
+
+    resp = await client.get("/v1/config/file?path=withsecret.yaml&resolve=true", headers=auth_headers)
+    assert resp.status == 200
+    content = (await resp.json())["content"]
+
+    latitude = yaml.safe_load(content)["homeassistant"]["latitude"]
+    assert latitude == "!secret home_lat", f"expected the directive preserved, got {latitude!r}"

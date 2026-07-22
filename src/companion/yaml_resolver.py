@@ -91,10 +91,16 @@ class YamlResolver:
             return self._include_dir_named(context_dir / value.strip(), visited)
         if tag == "!include_dir_list":
             return self._include_dir_list(context_dir / value.strip(), visited)
+        if tag == "!include_dir_merge_list":
+            return self._include_dir_merge_list(context_dir / value.strip(), visited)
         if tag == "!include_dir_merge_named":
             return self._include_dir_merge_named(context_dir / value.strip(), visited)
-        # Unknown tag — return as string
-        return value
+        # An unresolved tag keeps its directive text. Returning the bare value
+        # made `!secret home_lat` render as the string "home_lat" — a fabricated
+        # value indistinguishable from a real one — and any future include-family
+        # tag would silently degrade the same way rather than being visibly
+        # unresolved. Secrets are never read here; see is_denied/_check_path.
+        return f"{tag} {value}".strip()
 
     def _include_file(self, path: Path, visited: set[str]) -> Any:
         """Resolve !include <path> — inline file content."""
@@ -130,6 +136,29 @@ class YamlResolver:
             if f.is_file() and f.suffix in (".yaml", ".yml") and not is_denied(f.name):
                 content = self._resolve_file(f, visited)
                 result.append(content)
+        return result
+
+    def _include_dir_merge_list(self, dir_path: Path, visited: set[str]) -> list[Any]:
+        """Resolve !include_dir_merge_list <dir> — concatenate list files.
+
+        This is the standard tag for a split automations/ or scripts/ directory,
+        where each file holds a list and the lists are joined into one. Until it
+        was implemented the tag fell through to the unknown-tag branch and
+        resolved to the bare directory string, so every automation in a split
+        layout was invisible to `ent related`, `ref scan` and `config file`.
+        """
+        resolved = dir_path.resolve()
+        self._check_path(resolved)
+        if not resolved.is_dir():
+            return []
+        result: list[Any] = []
+        for f in sorted(resolved.iterdir()):
+            if f.is_file() and f.suffix in (".yaml", ".yml") and not is_denied(f.name):
+                content = self._resolve_file(f, visited)
+                if isinstance(content, list):
+                    result.extend(content)
+                elif content is not None:
+                    result.append(content)
         return result
 
     def _include_dir_merge_named(self, dir_path: Path, visited: set[str]) -> dict[str, Any]:
