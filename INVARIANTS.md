@@ -92,6 +92,26 @@ content type, so hactl never has to scrape HTML or plain text.
 
 - Enforced by: `tests/test_auth.py::test_error_responses_use_json_envelope`
 
+## C-9 — The related-graph is reconciled against HA's own answer
+
+`/v1/related/entity` computes relationships from the on-disk `.storage`
+snapshot and config files — it does **not** ask HA. For any behaviour HA can
+answer itself the expected value must be derived from HA at test time (TC-1),
+never from a hand-authored fixture (a fixture and the code can be wrong
+together — the original `related_fixture` failure class). So for a live
+entity, the automation relations the endpoint reports must be a **superset** of
+the automations HA's own `search/related` command reports for that entity —
+companion may report *more* (e.g. Jinja-template references HA's static search
+misses, the reason its boundary-aware matcher exists) but never *fewer* — and
+it must invent no automation relation for an entity HA relates to nothing. This
+is a named-example invariant (the one route where HA is a reachable oracle);
+the hand-authored `related_fixture` remains valid only as a unit-test *input*.
+
+- Enforced by: `tests/integration/test_related.py::TestRelatedEntityHAOracle::test_related_reconciles_with_ha_search_related`
+  (computes HA's `search/related` answer live and reconciles the companion's
+  against it; the fixture-shape/​auth Docker test `TestRelatedEntity` is not an
+  oracle and does not satisfy this)
+
 ---
 
 Client-side counterparts (retry idempotency, CLI confirm gate, vendored-spec

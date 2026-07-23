@@ -210,6 +210,45 @@ def ha_url(compose_up: dict[str, str]) -> str:
     return compose_up["ha_url"]
 
 
+def _ha_ws_command(ha_url: str, ha_token: str, msg_type: str, **payload: object) -> object:
+    """Authenticate over WS and run one HA command, returning its ``result``.
+
+    Reuses the auth handshake from ``_onboard_ha``. Raises AssertionError on a
+    failed handshake or an unsuccessful command so a broken oracle query is a
+    loud failure, never a silently-empty answer that could pass a ⊇ check.
+    """
+    ws_url = ha_url.replace("http://", "ws://") + "/api/websocket"
+    ws = websocket.create_connection(ws_url, timeout=30)
+    try:
+        ws.recv()  # {"type": "auth_required", ...}
+        ws.send(json.dumps({"type": "auth", "access_token": ha_token}))
+        auth_resp = json.loads(ws.recv())
+        assert auth_resp["type"] == "auth_ok", f"WS auth failed: {auth_resp}"
+
+        ws.send(json.dumps({"id": 1, "type": msg_type, **payload}))
+        while True:
+            resp = json.loads(ws.recv())
+            if resp.get("id") == 1 and resp.get("type") == "result":
+                assert resp.get("success"), f"WS command {msg_type} failed: {resp}"
+                return resp["result"]
+    finally:
+        ws.close()
+
+
+@pytest.fixture(scope="session")
+def ha_ws_command(ha_url: str, ha_token: str):
+    """A callable ``(msg_type, **payload) -> result`` bound to the live HA.
+
+    Lets a test ask HA's own WebSocket API (e.g. ``search/related``) so the
+    expected value is computed *from HA at test time* rather than hand-authored.
+    """
+
+    def _call(msg_type: str, **payload: object) -> object:
+        return _ha_ws_command(ha_url, ha_token, msg_type, **payload)
+
+    return _call
+
+
 @pytest.fixture()
 def auth_headers(ha_token: str) -> dict[str, str]:
     """Bearer token for companion's own direct-access auth.
