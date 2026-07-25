@@ -53,15 +53,17 @@ INCLUDE_TAGS: frozenset[str] = frozenset(
 # Preserving the directive is truthful for all three: nothing is hidden, and the
 # rendered text says exactly what the config says.
 #
-# INCLUDE_TAGS | PRESERVED_TAGS is HA's *entire* YAML tag vocabulary. Verified
-# against a live instance rather than assumed: writing `automation bogus:
-# !my_custom_thing whatever` into configuration.yaml makes HA's own
+# INCLUDE_TAGS | PRESERVED_TAGS is HA's *entire* YAML tag vocabulary. Asked of a
+# live instance rather than assumed, by
+# tests/integration/test_live.py::TestIncludeWiring::
+# test_home_assistant_refuses_any_tag_outside_its_vocabulary: writing
+# `probe_key: !my_custom_thing x` into configuration.yaml makes HA's own
 # check_config answer
 #     invalid | Error loading /config/configuration.yaml: could not determine a
 #               constructor for the tag '!my_custom_thing'
-# and `automation.reload` return 500 (HA 2026.x, 2026-07-25). HA's loader has a
-# closed constructor set; there is no such thing as a working HA config carrying
-# a tag outside these eight.
+# and the same for a plausible-but-nonexistent include tag
+# (`!include_dir_merge_flat`). HA's loader has a closed constructor set; there is
+# no such thing as a working HA config carrying a tag outside these eight.
 PRESERVED_TAGS: frozenset[str] = frozenset({"!secret", "!env_var", "!input"})
 
 
