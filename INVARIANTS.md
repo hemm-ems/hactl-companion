@@ -112,11 +112,6 @@ the hand-authored `related_fixture` remains valid only as a unit-test *input*.
   against it; the fixture-shape/​auth Docker test `TestRelatedEntity` is not an
   oracle and does not satisfy this)
 
----
-
-Client-side counterparts (retry idempotency, CLI confirm gate, vendored-spec
-drift) live in the hactl repo's `INVARIANTS.md`.
-
 ## C-10 — A create proves Home Assistant reads the file first
 
 A route that creates a **new** definition in a file it chose by naming
@@ -177,3 +172,44 @@ resolver refuses.
   `tests/integration/test_live.py::TestIncludeWiring::test_unknown_include_tag_is_refused_by_a_live_route`
   plus `::test_home_assistant_refuses_any_tag_outside_its_vocabulary` (HA's own
   loader is asked to confirm the vocabulary is closed)
+
+## C-12 — The response contract is field-level, on every route, both ways
+
+Path-and-method presence is not a contract (TC-5). `test_openapi.py` proves
+every route has a spec entry; that is compatible with a handler quietly adding,
+renaming or dropping a response field. D45 is the proof it is not theoretical —
+hactl's Go structs silently dropped the `reloaded` field the companion sent and
+the spec documented, across four copies of the contract, because every
+"contract" test checked paths.
+
+So for **every** entry in `ENDPOINT_META`:
+
+1. the route is driven against a real handler, and its response must validate
+   against the spec's `response_schema` and carry **no undocumented field**,
+   recursively (producer → spec);
+2. every field the spec **documents** must be produced by at least one of that
+   route's probes, or carry a written reason in `UNOBSERVED_FIELDS`
+   (spec → producer). This is also what makes a probe non-vacuous: an empty
+   `{}` response satisfies (1) and fails (2);
+3. the covered set is **derived from `ENDPOINT_META`**, never hand-listed. A
+   new route must be given a probe or an explicit exemption, and the suite is
+   red until it is. A hand-maintained list of *covered* routes would drift
+   silently (TC-7); a list of *exemptions* cannot, because the canary computes
+   the complement.
+
+Exemptions must be loud and enumerated, never silent. `UNDRIVEN` is currently
+**empty** — all 37 routes are drivable in the unit tier, WireGuard included
+(its `wg`/`wg-quick` calls and monitor registry are substituted; the field
+contract on a real WireGuard stack is additionally checked by the `test-wg`
+tier). Both exemption tables are kept honest from both sides: an entry naming a
+route or field that no longer exists, or a field the probes now produce, fails
+as stale.
+
+- Enforced by: `tests/test_spec_conformance.py::test_every_endpoint_is_conformance_classified`
+  (the canary), `::test_route_response_conformance` (both directions, one case
+  per route), and `::test_unobserved_field_exemptions_are_for_known_routes`
+
+---
+
+Client-side counterparts (retry idempotency, CLI confirm gate, vendored-spec
+drift) live in the hactl repo's `INVARIANTS.md`.

@@ -10,6 +10,8 @@ import time
 import pytest
 import requests
 
+from tests.test_spec_conformance import assert_conforms
+
 WG_COMPOSE_FILE = "docker-compose.wireguard.yaml"
 WG_TOKEN = "wg-test-token-12345"
 
@@ -134,6 +136,7 @@ class TestWireGuardFlow:
         r = requests.get(f"{companion_url}/v1/wireguard/status", headers=auth_headers, timeout=10)
         assert r.status_code == 200
         assert r.json()["state"] == "inactive"
+        assert_conforms("GET", "/v1/wireguard/status", r.json())
 
     def test_03_config_raw(self, companion_url: str, auth_headers: dict[str, str], client_conf: str) -> None:
         """Push raw .conf content."""
@@ -147,6 +150,7 @@ class TestWireGuardFlow:
         body = r.json()
         assert body["status"] == "configured"
         assert body["tunnel"] == "wg0"
+        assert_conforms("POST", "/v1/wireguard/config", body)
 
     def test_04_config_invalid_tunnel(self, companion_url: str, auth_headers: dict[str, str]) -> None:
         """Reject invalid tunnel names."""
@@ -169,6 +173,7 @@ class TestWireGuardFlow:
         body = r.json()
         assert body["status"] == "started"
         assert body["tunnel"] == "wg0"
+        assert_conforms("POST", "/v1/wireguard/start", body)
 
     def test_06_start_already_up(self, companion_url: str, auth_headers: dict[str, str]) -> None:
         """Starting an already-active tunnel returns 409."""
@@ -194,6 +199,10 @@ class TestWireGuardFlow:
         assert body["tunnel"] == "wg0"
         assert "public_key" in body.get("interface", {})
         assert len(body.get("peers", [])) >= 1
+        # C-12 on a real WireGuard stack: the unit-tier probe substitutes
+        # `wg show <t> dump`, so this is the one place the peer/interface field
+        # contract is checked against output wireguard-tools actually produced.
+        assert_conforms("GET", "/v1/wireguard/status", body)
 
     def test_08_ping_through_tunnel(self) -> None:
         """Verify actual connectivity: ping the WG server through the tunnel."""
@@ -214,6 +223,7 @@ class TestWireGuardFlow:
         )
         assert r.status_code == 200
         assert r.json()["status"] == "stopped"
+        assert_conforms("POST", "/v1/wireguard/stop", r.json())
 
     def test_10_status_after_stop(self, companion_url: str, auth_headers: dict[str, str]) -> None:
         """Status shows inactive after stop."""
