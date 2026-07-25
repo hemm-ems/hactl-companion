@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import sys
 from pathlib import Path
 
 import pytest
@@ -12,8 +13,52 @@ from aiohttp.test_utils import TestClient
 from companion import core_api
 from companion.server import create_app
 
-FIXTURES_DIR = Path(__file__).parent.parent / "testdata" / "fixtures"
+TREE_ROOT = Path(__file__).resolve().parent.parent
+FIXTURES_DIR = TREE_ROOT / "testdata" / "fixtures"
 TEST_TOKEN = "test-supervisor-token-12345"
+
+
+def _inside_tree(path: Path) -> bool:
+    return TREE_ROOT == path or TREE_ROOT in path.parents
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Refuse to run this tree's tests against another tree's interpreter or sources.
+
+    ``git worktree add`` creates a tree with no ``.venv``. The first ``uv run``
+    builds one but installs only the **base** dependency group — pytest, ruff and
+    mypy live under ``[project.optional-dependencies] dev`` — so ``uv run pytest``
+    finds no pytest in the new venv and falls through ``PATH`` to the next one,
+    normally the main checkout's. ``make test`` then executes *this* tree's
+    ``tests/`` against the *other* tree's ``src/companion``: every result, green or
+    red, is evidence about the wrong branch. The failure is silent and has already
+    cost real debugging time (an agent "reproduced" a defect that did not exist).
+
+    Both halves are checked because they fail independently: ``sys.prefix`` names
+    the environment that actually resolved ``pytest``, while ``companion.__file__``
+    names the sources under test — an editable install pointing elsewhere would
+    pass the first check and fail the second.
+
+    This lives in ``conftest.py`` rather than the ``Makefile`` on purpose: it then
+    also fires for a bare ``pytest`` or an IDE runner, which never go through
+    ``make``. It costs two path comparisons once per session.
+    """
+    import companion
+
+    problems = []
+    prefix = Path(sys.prefix).resolve()
+    if not _inside_tree(prefix):
+        problems.append(f"interpreter/venv is {prefix}, not inside {TREE_ROOT}")
+    package = Path(companion.__file__).resolve()
+    if not _inside_tree(package):
+        problems.append(f"'companion' imports from {package}, not inside {TREE_ROOT}")
+    if problems:
+        raise pytest.UsageError(
+            "tests would not exercise this tree's code: "
+            + "; ".join(problems)
+            + f"\nfix: cd {TREE_ROOT} && uv sync --all-extras   (then re-run; 'uv sync' alone omits the dev extra "
+            "that provides pytest, which is how the wrong venv gets used)"
+        )
 
 
 @pytest.fixture(autouse=True)
