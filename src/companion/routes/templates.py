@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from io import StringIO
+from pathlib import Path
 from typing import Any
 
 from aiohttp import web
@@ -23,11 +24,12 @@ from ruamel.yaml import YAML
 
 from companion import core_api
 from companion.params import parse_bool_param
-from companion.routes.config import _resolve_config_path
+from companion.wiring import require_wired_target, wired_target_or_default
 
 yaml = YAML()
 yaml.preserve_quotes = True
 
+TEMPLATE_DOMAIN = "template"
 TEMPLATE_FILE = "template.yaml"
 
 # Entity-domain keys a template block can declare. The presence of any of these
@@ -74,10 +76,18 @@ class RouteDef:
 
 
 def _load_templates(base: str) -> tuple[list[Any], Any]:
-    """Load and parse template.yaml, returning (raw_data, target_path)."""
-    target = _resolve_config_path(base, TEMPLATE_FILE)
+    """Load and parse the template file, returning (raw_data, target_path).
+
+    The file is whichever one ``configuration.yaml`` wires ``template:`` to,
+    falling back to the conventional name when that cannot be established.
+    """
+    return _load_templates_from(wired_target_or_default(base, TEMPLATE_DOMAIN, TEMPLATE_FILE))
+
+
+def _load_templates_from(target: Path) -> tuple[list[Any], Any]:
+    """Load and parse an explicit template file, returning (raw_data, path)."""
     if not target.is_file():
-        raise web.HTTPNotFound(text=f"File not found: {TEMPLATE_FILE}")
+        raise web.HTTPNotFound(text=f"File not found: {target.name}")
     with open(target, encoding="utf-8") as f:
         data = yaml.load(f)
     if data is None:
@@ -299,7 +309,10 @@ async def post_template(request: web.Request) -> web.Response:
     if not isinstance(new_item, dict):
         raise web.HTTPBadRequest(text="Template must be a YAML mapping")
 
-    data, target = _load_templates(base)
+    # C-10: a template.yaml no `template:` key !include's is written happily and
+    # never read — the entity simply never appears. Prove HA reads this file
+    # before claiming to have created anything in it.
+    data, target = _load_templates_from(require_wired_target(base, TEMPLATE_DOMAIN, TEMPLATE_FILE))
     existing_ids = _all_unique_ids(data)
 
     if _is_block(new_item):

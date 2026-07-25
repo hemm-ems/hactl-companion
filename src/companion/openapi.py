@@ -544,6 +544,11 @@ ENDPOINT_META: dict[tuple[str, str], dict[str, object]] = {
     ("POST", "/v1/config/template"): {
         "summary": "Create a new template entry",
         "description": (
+            "Refuses with 400 unless `configuration.yaml` has a top-level `template:` key "
+            "(or a labelled `template <label>:` key) that `!include`s a file — without it "
+            "Home Assistant never reads `template.yaml` and the new entry would be written and "
+            "ignored. The entry is written to the file the include names, not to `template.yaml` "
+            "by convention. "
             "Body is either a bare entity item (placed into a state-based block for `domain`) or a "
             "full block (declares any template entity domain — `sensor:`, `number:`, `select:`, "
             "`button:`, `weather:`, … — optionally with block-level `triggers:`/`actions:`/"
@@ -604,6 +609,13 @@ ENDPOINT_META: dict[tuple[str, str], dict[str, object]] = {
     },
     ("POST", "/v1/config/script"): {
         "summary": "Create new script",
+        "description": (
+            "Refuses with 400 unless `configuration.yaml` has a top-level `script:` key "
+            "(or a labelled `script <label>:` key) that `!include`s a file — without it "
+            "Home Assistant never reads `scripts.yaml` and the new entry would be written and "
+            "ignored. The entry is written to the file the include names, not to `scripts.yaml` "
+            "by convention. "
+        ),
         "tags": ["scripts"],
         "requestBody": {
             "content": {"text/plain": {"schema": {"type": "string"}}},
@@ -645,6 +657,13 @@ ENDPOINT_META: dict[tuple[str, str], dict[str, object]] = {
     },
     ("POST", "/v1/config/automation"): {
         "summary": "Create new automation",
+        "description": (
+            "Refuses with 400 unless `configuration.yaml` has a top-level `automation:` key "
+            "(or a labelled `automation <label>:` key) that `!include`s a file — without it "
+            "Home Assistant never reads `automations.yaml` and the new entry would be written and "
+            "ignored. The entry is written to the file the include names, not to `automations.yaml` "
+            "by convention. "
+        ),
         "tags": ["automations"],
         "requestBody": {
             "content": {"text/plain": {"schema": {"type": "string"}}},
@@ -676,6 +695,12 @@ ENDPOINT_META: dict[tuple[str, str], dict[str, object]] = {
     },
     ("POST", "/v1/config/helper"): {
         "summary": "Create new helper",
+        "description": (
+            "Refuses with 400 unless `configuration.yaml` has a top-level `<domain>:` key "
+            "(or a labelled `<domain> <label>:` key) that `!include`s a file — without it Home Assistant "
+            "never reads `<domain>.yaml` and the new helper would be written and ignored. The helper is "
+            "written to the file the include names, not to `<domain>.yaml` by convention."
+        ),
         "tags": ["helpers"],
         "parameters": [
             {"name": "domain", "in": "query", "required": True, "schema": {"type": "string"}},

@@ -15,7 +15,7 @@ from aiohttp import web
 from ruamel.yaml import YAML
 
 from companion import core_api
-from companion.routes.config import _resolve_config_path
+from companion.wiring import require_wired_target, wired_target_or_default
 
 yaml = YAML()
 yaml.preserve_quotes = True
@@ -63,62 +63,16 @@ def _load_helpers_from(target: Path) -> dict[str, Any]:
 def _load_helpers(base: str, domain: str) -> tuple[dict[str, Any], Any]:
     """Load a helper YAML file, returning (data_dict, file_path).
 
-    Helper files are top-level mappings keyed by entity slug. Resolves the
-    file purely by naming convention (<domain>.yaml) — used by the
-    read/update/delete paths, which operate on helpers that (by definition)
-    already exist and were therefore already loaded successfully by HA.
+    Helper files are top-level mappings keyed by entity slug. The file is the
+    one ``configuration.yaml`` wires the domain to, falling back to the
+    conventional ``<domain>.yaml`` when the wiring cannot be established — used
+    by the read/update/delete paths, which operate on helpers that (by
+    definition) already exist. Resolving through the same function the create
+    path uses is what stops a helper created in ``my_booleans.yaml`` from being
+    invisible to the ``helper ls`` that follows it.
     """
-    target = _resolve_config_path(base, _yaml_file_for_domain(domain))
+    target = wired_target_or_default(base, domain, _yaml_file_for_domain(domain))
     return _load_helpers_from(target), target
-
-
-def _tag_of(node: Any) -> str | None:
-    """Return the ruamel YAML tag (e.g. '!include') of a loaded node, or None."""
-    tag = getattr(node, "tag", None)
-    return getattr(tag, "value", None) if tag is not None else None
-
-
-def _resolve_domain_target(base: str, domain: str) -> Path:
-    """Resolve the file HA actually loads for a helper domain's top-level key.
-
-    Reads configuration.yaml's top-level `<domain>:` key. Raises 400 if the
-    key is absent, holds an inline mapping/list instead of an `!include`, or
-    uses an `!include_dir_*` directive — in all three cases, writing to
-    `<domain>.yaml` by convention would produce a helper HA never loads.
-    """
-    config_path = _resolve_config_path(base, "configuration.yaml")
-    if not config_path.is_file():
-        raise web.HTTPBadRequest(text="configuration.yaml not found")
-
-    with open(config_path, encoding="utf-8") as f:
-        config_data = yaml.load(f)
-
-    if not isinstance(config_data, dict) or domain not in config_data:
-        raise web.HTTPBadRequest(
-            text=(
-                f"configuration.yaml has no top-level '{domain}:' key. "
-                f"Add '{domain}: !include {domain}.yaml' before creating {domain} helpers."
-            )
-        )
-
-    value = config_data[domain]
-    tag = _tag_of(value)
-
-    if tag == "!include":
-        rel_path = str(value.value).strip()
-        return _resolve_config_path(base, rel_path)
-
-    if tag and tag.startswith("!include_dir_"):
-        raise web.HTTPBadRequest(
-            text=f"'{domain}:' uses {tag} in configuration.yaml, which hactl cannot target for a single new helper."
-        )
-
-    raise web.HTTPBadRequest(
-        text=(
-            f"'{domain}:' is defined inline in configuration.yaml, not via !include. "
-            f"hactl cannot safely append to an inline mapping."
-        )
-    )
 
 
 async def _poll_entity_created(entity_id: str, attempts: int = 5, delay: float = 0.4) -> bool:
@@ -208,7 +162,8 @@ async def post_helper(request: web.Request) -> web.Response:
     if not domain:
         raise web.HTTPBadRequest(text="Missing domain parameter")
     _validate_domain(domain)
-    target = _resolve_domain_target(base, domain)
+    # C-10: prove HA reads this file before writing a new helper into it.
+    target = require_wired_target(base, domain, _yaml_file_for_domain(domain))
 
     body = await request.text()
     if not body.strip():
