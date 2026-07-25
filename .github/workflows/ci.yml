@@ -109,3 +109,52 @@ jobs:
       - run: uv sync --extra dev --extra integration
       - name: Run WireGuard integration tests
         run: make test-wg
+
+  # ---------------------------------------------------------------------------
+  # gates — the single required check.
+  #
+  # This aggregator exists so branch protection can require ONE check that
+  # cannot be satisfied while any tier is skipped, cancelled or silently
+  # absent: a skipped `needs` job leaves result != 'success' and fails here.
+  # The companion mutates user config (backup-before-mutate, validate-or-
+  # rollback), so its live-HA integration matrix and WireGuard tier are not
+  # optional at the merge gate — unit tests alone are never acceptance.
+  # ---------------------------------------------------------------------------
+  gates:
+    name: All Gates Green
+    runs-on: ubuntu-latest
+    if: always()
+    needs:
+      - lint
+      - test
+      - openapi
+      - docker
+      - test-integration
+      - test-wireguard
+    steps:
+      - name: Verify every gate succeeded
+        run: |
+          declare -A results=(
+            [lint]="${{ needs.lint.result }}"
+            [test]="${{ needs.test.result }}"
+            [openapi]="${{ needs.openapi.result }}"
+            [docker]="${{ needs.docker.result }}"
+            [test-integration]="${{ needs.test-integration.result }}"
+            [test-wireguard]="${{ needs.test-wireguard.result }}"
+          )
+          failed=0
+          for job in "${!results[@]}"; do
+            printf '  %-20s %s\n' "$job" "${results[$job]}"
+            if [ "${results[$job]}" != "success" ]; then failed=1; fi
+          done
+          if [ "$failed" -ne 0 ]; then
+            echo
+            echo "ERROR: a required gate did not succeed."
+            echo "The live-HA integration matrix and the WireGuard tier are"
+            echo "mandatory — the companion mutates user config, so a green run"
+            echo "without them proves nothing about how it behaves against a"
+            echo "real Home Assistant."
+            exit 1
+          fi
+          echo
+          echo "All gates green, every tier included."
