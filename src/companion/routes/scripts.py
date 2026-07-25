@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from io import StringIO
+from pathlib import Path
 from typing import Any
 
 from aiohttp import web
@@ -11,11 +12,12 @@ from ruamel.yaml import YAML
 
 from companion import core_api
 from companion.params import parse_bool_param
-from companion.routes.config import _resolve_config_path
+from companion.wiring import require_wired_target, wired_target_or_default
 
 yaml = YAML()
 yaml.preserve_quotes = True
 
+SCRIPT_DOMAIN = "script"
 SCRIPTS_FILE = "scripts.yaml"
 
 
@@ -27,10 +29,18 @@ class RouteDef:
 
 
 def _load_scripts(base: str) -> tuple[dict[str, Any], Any]:
-    """Load scripts.yaml, returning (data_dict, file_path)."""
-    target = _resolve_config_path(base, SCRIPTS_FILE)
+    """Load the script file, returning (data_dict, file_path).
+
+    The file is whichever one ``configuration.yaml`` wires ``script:`` to,
+    falling back to the conventional name when that cannot be established.
+    """
+    return _load_scripts_from(wired_target_or_default(base, SCRIPT_DOMAIN, SCRIPTS_FILE))
+
+
+def _load_scripts_from(target: Path) -> tuple[dict[str, Any], Any]:
+    """Load an explicit script file, returning (data_dict, path)."""
     if not target.is_file():
-        raise web.HTTPNotFound(text=f"File not found: {SCRIPTS_FILE}")
+        raise web.HTTPNotFound(text=f"File not found: {target.name}")
     with open(target, encoding="utf-8") as f:
         data = yaml.load(f)
     if data is None:
@@ -206,7 +216,8 @@ async def post_script(request: web.Request) -> web.Response:
     script_id = next(iter(new_data))
     script_body = new_data[script_id]
 
-    data, target = _load_scripts(base)
+    # C-10: prove HA reads this file before claiming the script was created.
+    data, target = _load_scripts_from(require_wired_target(base, SCRIPT_DOMAIN, SCRIPTS_FILE))
     if script_id in data:
         raise web.HTTPConflict(text=f"Script already exists: {script_id}")
 

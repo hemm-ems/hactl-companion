@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from io import StringIO
+from pathlib import Path
 from typing import Any
 
 from aiohttp import web
@@ -11,11 +12,12 @@ from ruamel.yaml import YAML
 
 from companion import core_api
 from companion.params import parse_bool_param
-from companion.routes.config import _resolve_config_path
+from companion.wiring import require_wired_target, wired_target_or_default
 
 yaml = YAML()
 yaml.preserve_quotes = True
 
+AUTOMATION_DOMAIN = "automation"
 AUTOMATIONS_FILE = "automations.yaml"
 
 
@@ -27,10 +29,18 @@ class RouteDef:
 
 
 def _load_automations(base: str) -> tuple[list[Any], Any]:
-    """Load automations.yaml, returning (data_list, file_path)."""
-    target = _resolve_config_path(base, AUTOMATIONS_FILE)
+    """Load the automation file, returning (data_list, file_path).
+
+    The file is whichever one ``configuration.yaml`` wires ``automation:`` to,
+    falling back to the conventional name when that cannot be established.
+    """
+    return _load_automations_from(wired_target_or_default(base, AUTOMATION_DOMAIN, AUTOMATIONS_FILE))
+
+
+def _load_automations_from(target: Path) -> tuple[list[Any], Any]:
+    """Load an explicit automation file, returning (data_list, path)."""
     if not target.is_file():
-        raise web.HTTPNotFound(text=f"File not found: {AUTOMATIONS_FILE}")
+        raise web.HTTPNotFound(text=f"File not found: {target.name}")
     with open(target, encoding="utf-8") as f:
         data = yaml.load(f)
     if data is None:
@@ -213,7 +223,8 @@ async def post_automation(request: web.Request) -> web.Response:
     if "id" not in new_item:
         raise web.HTTPBadRequest(text="Automation must have an id field")
 
-    data, target = _load_automations(base)
+    # C-10: prove HA reads this file before claiming the automation was created.
+    data, target = _load_automations_from(require_wired_target(base, AUTOMATION_DOMAIN, AUTOMATIONS_FILE))
 
     # Check for duplicate id
     for item in data:

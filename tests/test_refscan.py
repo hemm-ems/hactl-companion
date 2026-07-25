@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from companion.refscan import (
     EntityRef,
     ScanHit,
@@ -11,6 +13,7 @@ from companion.refscan import (
     scan_yaml_for_entities,
     scan_yaml_for_literal,
 )
+from companion.yaml_resolver import UnknownIncludeTagError
 
 
 def test_scan_finds_literal_in_top_level_file(tmp_path: Path) -> None:
@@ -353,3 +356,36 @@ def test_scan_skips_out_of_base_include(tmp_path: Path) -> None:
     locations = {h.location for h in hits}
     assert "outside.yaml" not in locations, "escaping include was retargeted to an in-base file"
     assert hits == []
+
+
+def test_scan_refuses_unknown_include_tag(tmp_path: Path) -> None:
+    """C-11: an unimplemented include tag stops the scan instead of pruning the graph.
+
+    `include_tag` returning None here would drop every file the tag names out of
+    the walked config, and `ref scan`'s hit list, `ref validate`'s dangling-
+    reference verdict and `ref replace`'s rewrite set would all answer
+    confidently about a config they had only partly read. `ref replace` is the
+    sharp end: a pruned file keeps the old entity id while the response says the
+    replacement succeeded.
+    """
+    split = tmp_path / "autos"
+    split.mkdir()
+    (split / "a.yaml").write_text("- id: one\n  action:\n    - entity_id: sensor.gone\n", encoding="utf-8")
+    (tmp_path / "configuration.yaml").write_text("automation: !include_dir_merge_flat autos/\n", encoding="utf-8")
+
+    with pytest.raises(UnknownIncludeTagError) as excinfo:
+        scan_yaml_for_literal(tmp_path, "sensor.gone")
+    assert "!include_dir_merge_flat" in str(excinfo.value)
+
+
+def test_scan_still_follows_every_known_include_dir_tag(tmp_path: Path) -> None:
+    """Control: the refusal above must not have cost us the tags we do implement."""
+    for tag in ("!include_dir_list", "!include_dir_merge_list", "!include_dir_named", "!include_dir_merge_named"):
+        base = tmp_path / tag.strip("!")
+        split = base / "autos"
+        split.mkdir(parents=True)
+        (split / "a.yaml").write_text("- id: one\n  action:\n    - entity_id: sensor.gone\n", encoding="utf-8")
+        (base / "configuration.yaml").write_text(f"automation: {tag} autos/\n", encoding="utf-8")
+
+        hits = scan_yaml_for_literal(base, "sensor.gone")
+        assert [h.location for h in hits] == ["autos/a.yaml"], f"{tag} did not reach the file it names: {hits}"

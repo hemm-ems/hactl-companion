@@ -93,71 +93,87 @@ def _seed_ref_target(config_dir: Path) -> None:
 #          test_dry_run_gated_classification_matches_spec)
 #   url/data/json: request WITHOUT dry_run — C-4 asserts omission never writes
 #   apply: overrides for apply mode (dry_run=false) — C-5 asserts backups
+#   wiring: {"domain": ...} for a route that CREATES a new definition in a file
+#           chosen by convention — C-10 sweeps these (see below). Routes without
+#           it must give a `no_wiring_reason`; the canary enforces the choice.
 FILE_WRITES: dict[tuple[str, str], dict[str, Any]] = {
     ("PUT", "/v1/config/file"): {
         "url": "/v1/config/file?path=automations.yaml",
         "data": "probe:\n  value: 1\n",
         "gated": True,
         "apply": {"url": "/v1/config/file?path=automations.yaml&dry_run=false"},
+        "no_wiring_reason": "caller names the path explicitly; HA check_config validates the result (C-6)",
     },
     ("PUT", "/v1/config/template"): {
         "url": "/v1/config/template?id=tpl_energie_zaehler",
         "data": 'name: "Updated"\nunique_id: tpl_energie_zaehler\nstate: "{{ 1 }}"\n',
         "gated": True,
         "apply": {"url": "/v1/config/template?id=tpl_energie_zaehler&dry_run=false"},
+        "no_wiring_reason": "edits an entry that already exists; refusing would strand a user mid-cleanup",
     },
     ("POST", "/v1/config/template"): {
         "url": "/v1/config/template?domain=sensor",
         "data": 'name: "New"\nunique_id: tpl_probe\nstate: "{{ 1 }}"\n',
         "gated": False,
+        "wiring": {"domain": "template"},
     },
     ("DELETE", "/v1/config/template"): {
         "url": "/v1/config/template?id=tpl_energie_zaehler",
         "gated": False,
+        "no_wiring_reason": "removes an entry; a user must be able to clean up a file HA ignores",
     },
     ("PUT", "/v1/config/script"): {
         "url": "/v1/config/script?id=welcome_home",
         "data": "alias: Updated\nsequence:\n  - service: light.turn_on\n",
         "gated": True,
         "apply": {"url": "/v1/config/script?id=welcome_home&dry_run=false"},
+        "no_wiring_reason": "edits an entry that already exists; refusing would strand a user mid-cleanup",
     },
     ("POST", "/v1/config/script"): {
         "url": "/v1/config/script",
         "data": "probe_script:\n  alias: Probe\n  sequence:\n    - service: light.turn_off\n",
         "gated": False,
+        "wiring": {"domain": "script"},
     },
     ("DELETE", "/v1/config/script"): {
         "url": "/v1/config/script?id=welcome_home",
         "gated": False,
+        "no_wiring_reason": "removes an entry; a user must be able to clean up a file HA ignores",
     },
     ("PUT", "/v1/config/automation"): {
         "url": "/v1/config/automation?id=automation.door_light",
         "data": "id: automation.door_light\nalias: Updated\ntrigger: []\naction: []\n",
         "gated": True,
         "apply": {"url": "/v1/config/automation?id=automation.door_light&dry_run=false"},
+        "no_wiring_reason": "edits an entry that already exists; refusing would strand a user mid-cleanup",
     },
     ("POST", "/v1/config/automation"): {
         "url": "/v1/config/automation",
         "data": "id: automation.probe\nalias: Probe\ntrigger: []\naction: []\n",
         "gated": False,
+        "wiring": {"domain": "automation"},
     },
     ("DELETE", "/v1/config/automation"): {
         "url": "/v1/config/automation?id=automation.door_light",
         "gated": False,
+        "no_wiring_reason": "removes an entry; a user must be able to clean up a file HA ignores",
     },
     ("POST", "/v1/config/helper"): {
         "url": "/v1/config/helper?domain=input_boolean",
         "data": "probe_helper:\n  name: Probe\n",
         "gated": False,
+        "wiring": {"domain": "input_boolean"},
     },
     ("PUT", "/v1/config/helper"): {
         "url": "/v1/config/helper?id=guest_mode",
         "data": "name: Probe 2\n",
         "gated": False,
+        "no_wiring_reason": "edits an entry that already exists; refusing would strand a user mid-cleanup",
     },
     ("DELETE", "/v1/config/helper"): {
         "url": "/v1/config/helper?id=guest_mode",
         "gated": False,
+        "no_wiring_reason": "removes an entry; a user must be able to clean up a file HA ignores",
     },
     ("POST", "/v1/ref/replace"): {
         "url": "/v1/ref/replace",
@@ -165,6 +181,7 @@ FILE_WRITES: dict[tuple[str, str], dict[str, Any]] = {
         "gated": True,
         "seed": _seed_ref_target,
         "apply": {"json": {"old": "sensor.gone", "new": "sensor.new", "dry_run": False}},
+        "no_wiring_reason": "rewrites files already reachable from configuration.yaml; creates no file",
     },
 }
 
@@ -298,3 +315,74 @@ async def test_applied_write_backs_up_every_modified_file(
         assert any(after[b] == before[name] for b in candidates), (
             f"{method} {path}: modified {name} without a backup of the prior content in {backup_rel_dir}/"
         )
+
+
+# ---------------------------------------------------------------------------
+# C-10: a create proves Home Assistant reads the file first
+# ---------------------------------------------------------------------------
+
+CREATES = {key: probe for key, probe in FILE_WRITES.items() if "wiring" in probe}
+
+
+def test_every_file_write_declares_a_wiring_stance() -> None:
+    """Canary: each file-writing route either gets the C-10 sweep or says why not.
+
+    The defect this closes (D46) was not a misunderstood feature — ``helpers.py``
+    had carried the include-wiring check for a year while ``template``,
+    ``script`` and ``automation`` wrote by convention and reported success for a
+    file HA never read. Routes #N..#N+2 forgot a rule route #1 followed, and
+    nothing asked them to declare a position. This asks.
+    """
+    undeclared = {
+        key for key, probe in FILE_WRITES.items() if "wiring" not in probe and not probe.get("no_wiring_reason")
+    }
+    assert not undeclared, (
+        f"file-writing endpoints with no wiring stance: {sorted(undeclared)} — a route that creates a new "
+        "definition in a conventionally-named file needs 'wiring' (C-10 sweeps it); any other file writer "
+        "needs a 'no_wiring_reason' saying why the guard does not apply"
+    )
+    assert CREATES, "no create routes carry a 'wiring' declaration — did the probe table lose its C-10 coverage?"
+
+
+def _unwire_domain(config_dir: Path, domain: str) -> None:
+    """Delete every ``<domain>:``/``<domain> <label>:`` line from configuration.yaml.
+
+    Leaves the backing YAML file itself in place, so the *only* thing missing is
+    the include that makes HA read it — exactly the D46 instance.
+    """
+    config_path = config_dir / "configuration.yaml"
+    key = re.compile(rf"^{re.escape(domain)}(| .+):")
+    kept = [line for line in config_path.read_text(encoding="utf-8").splitlines(keepends=True) if not key.match(line)]
+    config_path.write_text("".join(kept), encoding="utf-8")
+
+
+@pytest.mark.parametrize(("method", "path"), _params(CREATES.keys()))
+async def test_create_refuses_when_configuration_does_not_include_the_file(
+    client: TestClient, auth_headers: dict[str, str], config_dir: Path, method: str, path: str
+) -> None:
+    """C-10: with the domain's include removed, a create must refuse and write nothing.
+
+    Both halves matter. The status proves the caller is told; the byte-for-byte
+    disk comparison proves the refusal happened *before* the write, so there is
+    no orphaned definition sitting in a file nobody reads.
+    """
+    probe = CREATES[(method, path)]
+    domain = probe["wiring"]["domain"]
+
+    # Precondition: the create works while the domain is wired. Without this the
+    # 400 below could come from anywhere and the test would pass vacuously.
+    ok = await client.request(method, probe["url"], **_request_kwargs(probe, auth_headers))
+    assert ok.status == 201, f"{method} {path}: probe does not create while '{domain}:' is wired: {await ok.text()}"
+
+    _unwire_domain(config_dir, domain)
+    before = _snapshot(config_dir)
+
+    resp = await client.request(method, probe["url"], **_request_kwargs(probe, auth_headers))
+    assert resp.status == 400, (
+        f"{method} {path}: answered {resp.status} with no '{domain}:' key in configuration.yaml — "
+        f"Home Assistant never reads that file, so the definition would be written and ignored (D46)"
+    )
+    body = await resp.json()
+    assert domain in body["error"]["message"], f"refusal does not name the missing key: {body}"
+
+    assert _snapshot(config_dir) == before, f"{method} {path}: refused the create but still modified files on disk"

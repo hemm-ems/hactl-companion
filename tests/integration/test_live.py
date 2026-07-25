@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import subprocess
 import time
 
@@ -743,3 +744,243 @@ class TestAccessLogMiddleware:
         time.sleep(0.2)
         logs = _container_logs("companion-integration")
         assert "status=401" in logs, f"401 not logged:\n{logs[-1000:]}"
+
+
+# ---------------------------------------------------------------------------
+# C-10 / C-11 — include wiring and unknown include tags, against the live HA
+# ---------------------------------------------------------------------------
+
+WIRING_AUTOMATION_FILE = "automations_wiring_probe.yaml"
+WIRING_AUTOMATION = "- id: hactl_wiring_probe\n  alias: Hactl Wiring Probe\n  trigger: []\n  action: []\n"
+WIRING_ENTITY = "automation.hactl_wiring_probe"
+
+
+def _read_config_file(companion_url: str, auth_headers: dict[str, str], path: str) -> str | None:
+    """Raw (unresolved) content of a config file, or None if it does not exist."""
+    r = requests.get(
+        f"{companion_url}/v1/config/file",
+        params={"path": path, "resolve": "false"},
+        headers=auth_headers,
+        timeout=15,
+    )
+    if r.status_code == 404:
+        return None
+    assert r.status_code == 200, r.text
+    return str(r.json()["content"])
+
+
+def _write_config_file(companion_url: str, auth_headers: dict[str, str], path: str, content: str) -> requests.Response:
+    return requests.put(
+        f"{companion_url}/v1/config/file",
+        params={"path": path, "dry_run": "false"},
+        data=content,
+        headers=auth_headers,
+        timeout=60,
+    )
+
+
+def _strip_domain_keys(config_text: str, domain: str) -> str:
+    """Remove every top-level `<domain>:` / `<domain> <label>:` line.
+
+    Mirrors HA's own extract_domain_configs matching, so the resulting config is
+    one where HA genuinely does not read the domain's file — not one where we
+    merely removed the spelling we happened to think of.
+    """
+    key = re.compile(rf"^{re.escape(domain)}(| .+):")
+    return "".join(line for line in config_text.splitlines(keepends=True) if not key.match(line))
+
+
+def _automation_is_loaded(ha_url: str, ha_token: str, entity_id: str) -> bool:
+    """Ask HA whether it currently has this automation loaded.
+
+    Entity *presence* is not the answer. HA keeps a removed automation in the
+    entity registry and serves it back as a restored ghost — `state:
+    unavailable` with a `restored: true` attribute — so a presence check reports
+    "still there" for an automation HA has actually dropped.
+    """
+    r = requests.get(f"{ha_url}/api/states/{entity_id}", headers={"Authorization": f"Bearer {ha_token}"}, timeout=15)
+    if r.status_code != 200:
+        return False
+    state = r.json()
+    return state["state"] != "unavailable" and not state.get("attributes", {}).get("restored")
+
+
+def _reload_automations(ha_url: str, ha_token: str) -> None:
+    r = requests.post(
+        f"{ha_url}/api/services/automation/reload",
+        headers={"Authorization": f"Bearer {ha_token}"},
+        json={},
+        timeout=90,
+    )
+    assert r.status_code == 200, f"automation.reload failed: {r.status_code} {r.text}"
+    time.sleep(2)
+
+
+class TestIncludeWiring:
+    """C-10: HA reads a file because configuration.yaml includes it — never because of its name."""
+
+    def test_labelled_domain_key_is_live_config(
+        self, companion_url: str, auth_headers: dict[str, str], ha_url: str, ha_token: str, _ha_ready: None
+    ) -> None:
+        """Both halves of D46, with HA as the oracle and the backing file never touched.
+
+        The same bytes sit in `automations_wiring_probe.yaml` throughout. Only
+        the `!include` in configuration.yaml changes, and HA's answer changes
+        with it: the automation is loaded while the key is there and dropped
+        when it is gone. That is the whole premise of the wiring guard, measured
+        instead of assumed.
+
+        It also settles the guard's one non-obvious modelling choice — that
+        `automation <label>:` is real configuration (HA's
+        `extract_domain_configs` matches `^<domain>(| .+)$`), which is why
+        `wiring.domain_keys` accepts it. A guard that refused a labelled key
+        would break a documented split-automation layout.
+        """
+        original = _read_config_file(companion_url, auth_headers, "configuration.yaml")
+        assert original is not None
+        assert (
+            _write_config_file(companion_url, auth_headers, WIRING_AUTOMATION_FILE, WIRING_AUTOMATION).status_code
+            == 200
+        )
+
+        try:
+            labelled = original.rstrip("\n") + f"\nautomation hactlprobe: !include {WIRING_AUTOMATION_FILE}\n"
+            r = _write_config_file(companion_url, auth_headers, "configuration.yaml", labelled)
+            assert r.status_code == 200, f"HA rejected a labelled domain key: {r.text}"
+            _reload_automations(ha_url, ha_token)
+            assert _automation_is_loaded(ha_url, ha_token, WIRING_ENTITY), (
+                f"HA did not load {WIRING_ENTITY} from 'automation hactlprobe: !include ...' — if HA no longer "
+                "honours labelled domain keys, wiring.domain_keys must stop accepting them"
+            )
+
+            before = _read_config_file(companion_url, auth_headers, WIRING_AUTOMATION_FILE)
+            assert _write_config_file(companion_url, auth_headers, "configuration.yaml", original).status_code == 200
+            _reload_automations(ha_url, ha_token)
+            after = _read_config_file(companion_url, auth_headers, WIRING_AUTOMATION_FILE)
+
+            assert before == after, "the backing file changed; this test only proves anything if it did not"
+            assert not _automation_is_loaded(ha_url, ha_token, WIRING_ENTITY), (
+                f"HA still has {WIRING_ENTITY} loaded with no '{WIRING_AUTOMATION_FILE}' include in "
+                "configuration.yaml — the file, not the include, would then be what makes HA read it, and "
+                "the whole wiring guard would be unnecessary"
+            )
+        finally:
+            _write_config_file(companion_url, auth_headers, "configuration.yaml", original)
+            _reload_automations(ha_url, ha_token)
+
+    def test_create_refuses_until_the_include_exists(
+        self, companion_url: str, auth_headers: dict[str, str], _ha_ready: None
+    ) -> None:
+        """D46 end to end on a real instance, in both directions.
+
+        HA's default onboarding configuration.yaml wires `automation:`,
+        `script:` and `scene:` and nothing else — so a stock instance is exactly
+        the D46 case for `template:`, and this route used to answer 201 for an
+        entity that could never appear.
+        """
+        original = _read_config_file(companion_url, auth_headers, "configuration.yaml")
+        assert original is not None
+        seed = '- sensor:\n    - name: Wiring Seed\n      unique_id: hactl_wiring_seed\n      state: "{{ 1 }}"\n'
+        assert _write_config_file(companion_url, auth_headers, "template.yaml", seed).status_code == 200
+
+        body = 'name: "Wiring Probe"\nunique_id: hactl_wiring_probe_tpl\nstate: "{{ 1 }}"\n'
+        post_kwargs = {
+            "params": {"domain": "sensor"},
+            "data": body,
+            "headers": {**auth_headers, "Content-Type": "text/plain"},
+            "timeout": 30,
+        }
+
+        try:
+            unwired = _strip_domain_keys(original, "template")
+            assert _write_config_file(companion_url, auth_headers, "configuration.yaml", unwired).status_code == 200
+
+            before = _read_config_file(companion_url, auth_headers, "template.yaml")
+            r = requests.post(f"{companion_url}/v1/config/template", **post_kwargs)  # type: ignore[arg-type]
+            assert r.status_code == 400, (
+                f"answered {r.status_code} with no 'template:' key in configuration.yaml — HA never reads "
+                f"template.yaml on this instance, so the entity could not appear (D46): {r.text}"
+            )
+            assert "template" in r.json()["error"]["message"]
+            assert _read_config_file(companion_url, auth_headers, "template.yaml") == before, (
+                "refused the create but wrote to template.yaml anyway"
+            )
+
+            wired = unwired.rstrip("\n") + "\ntemplate: !include template.yaml\n"
+            assert _write_config_file(companion_url, auth_headers, "configuration.yaml", wired).status_code == 200
+            r = requests.post(f"{companion_url}/v1/config/template", **post_kwargs)  # type: ignore[arg-type]
+            assert r.status_code == 201, f"guard refused a properly wired instance: {r.text}"
+            assert r.json()["unique_id"] == "hactl_wiring_probe_tpl"
+        finally:
+            requests.delete(
+                f"{companion_url}/v1/config/template",
+                params={"id": "hactl_wiring_probe_tpl"},
+                headers=auth_headers,
+                timeout=30,
+            )
+            _write_config_file(companion_url, auth_headers, "configuration.yaml", original)
+
+    def test_home_assistant_refuses_any_tag_outside_its_vocabulary(
+        self, companion_url: str, auth_headers: dict[str, str], _ha_ready: None
+    ) -> None:
+        """The premise behind C-11's tag enumeration, asked of HA rather than assumed.
+
+        `yaml_resolver.INCLUDE_TAGS | PRESERVED_TAGS` is claimed to be HA's
+        entire YAML vocabulary. If that is true, HA must refuse to load anything
+        else — which makes an unknown tag a *forward*-compatibility signal (an
+        HA newer than this build) rather than an exotic user config, and that is
+        precisely why resolving it to nothing would be so convincing and so
+        wrong.
+
+        The write goes through `PUT /v1/config/file`, which applies, asks HA's
+        check_config, and rolls back on invalid (C-6) — so HA's verdict comes
+        back in the refusal and the file is left as it was.
+        """
+        original = _read_config_file(companion_url, auth_headers, "configuration.yaml")
+        assert original is not None
+
+        for tag in ("!my_custom_thing", "!include_dir_merge_flat"):
+            r = _write_config_file(
+                companion_url, auth_headers, "configuration.yaml", original.rstrip("\n") + f"\nprobe_key: {tag} x\n"
+            )
+            assert r.status_code == 400, f"HA accepted the unknown tag {tag}: {r.status_code} {r.text}"
+            assert "could not determine a constructor" in r.text, (
+                f"HA refused {tag} for some other reason than an unknown tag: {r.text}"
+            )
+            assert _read_config_file(companion_url, auth_headers, "configuration.yaml") == original, (
+                "C-6 rollback did not restore configuration.yaml"
+            )
+
+    def test_unknown_include_tag_is_refused_by_a_live_route(
+        self, companion_url: str, auth_headers: dict[str, str], _ha_ready: None
+    ) -> None:
+        """C-11 through the whole stack: 400 with the tag named, and the file still readable.
+
+        The file is not referenced from configuration.yaml, so HA never parses
+        it and this is the one shape an unknown tag can legitimately have on
+        disk today.
+        """
+        assert (
+            _write_config_file(
+                companion_url, auth_headers, "probe_unknown_tag.yaml", "thing: !include_dir_merge_flat somewhere\n"
+            ).status_code
+            == 200
+        )
+
+        r = requests.get(
+            f"{companion_url}/v1/config/file",
+            params={"path": "probe_unknown_tag.yaml", "resolve": "true"},
+            headers=auth_headers,
+            timeout=15,
+        )
+        assert r.status_code == 400, f"resolved an unimplemented include tag instead of refusing: {r.text}"
+        assert "!include_dir_merge_flat" in r.json()["error"]["message"]
+
+        r = requests.get(
+            f"{companion_url}/v1/config/file",
+            params={"path": "probe_unknown_tag.yaml", "resolve": "false"},
+            headers=auth_headers,
+            timeout=15,
+        )
+        assert r.status_code == 200, "the escape hatch must stay open for exactly the file we refuse to resolve"
+        assert "!include_dir_merge_flat" in r.json()["content"]

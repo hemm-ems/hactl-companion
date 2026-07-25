@@ -116,3 +116,64 @@ the hand-authored `related_fixture` remains valid only as a unit-test *input*.
 
 Client-side counterparts (retry idempotency, CLI confirm gate, vendored-spec
 drift) live in the hactl repo's `INVARIANTS.md`.
+
+## C-10 — A create proves Home Assistant reads the file first
+
+A route that creates a **new** definition in a file it chose by naming
+convention (`template.yaml`, `scripts.yaml`, `automations.yaml`,
+`<helper_domain>.yaml`) must first establish that `configuration.yaml` carries
+a top-level key for that domain which `!include`s it, and must write to the
+file the include actually names. Without that key HA never reads the file: the
+write succeeds, the route answers `201 created`, and the entity never appears
+(D46). Such a create is refused with 400 and writes nothing.
+
+The domain key is matched the way HA matches it — `^<domain>(| .+)$`, so
+`automation ui:` counts (`homeassistant.config.extract_domain_configs`).
+Read/update/delete are deliberately **not** guarded: they act on entries that
+already exist, and refusing them would strand a user cleaning up a file HA
+ignores. They resolve the target through the same function, so a create and the
+list that follows it can never disagree about which file is real. Config
+layouts this cannot prove (`homeassistant: packages:`, `!include_dir_*`,
+several candidate files) are refused with the reason named; `PUT
+/v1/config/file` remains the escape hatch (C-6 validates the result).
+
+- Enforced by: `tests/test_invariants.py::test_create_refuses_when_configuration_does_not_include_the_file`
+  (sweeps every create route in the `FILE_WRITES` probe table) and
+  `tests/test_invariants.py::test_every_file_write_declares_a_wiring_stance`
+  (canary: a new file-writing route must declare `wiring` or a
+  `no_wiring_reason`), `tests/test_wiring.py` (resolution and refusal rules),
+  `tests/integration/test_live.py::TestIncludeWiring::test_create_refuses_until_the_include_exists`
+  (both directions against real HA) and
+  `::test_labelled_domain_key_is_live_config` (HA is asked whether a labelled
+  domain key really is config, and whether removing only the include really
+  unloads the entity — the file on disk unchanged)
+
+## C-11 — An include tag this build does not implement is an error, never a shrug
+
+`yaml_resolver.INCLUDE_TAGS` enumerates every include-family tag the resolver
+implements. A tag outside it that still claims to include content (anything
+matching `!include*`) raises `UnknownIncludeTagError`, surfaced as 400 by
+`server.unsupported_include_middleware` so every current and future route that
+touches the config graph inherits it. Degrading is the bug: whatever the tag
+names is then simply absent from the resolved tree, and a caller cannot tell an
+empty directory from one that was never opened — that is how
+`!include_dir_merge_list` made a whole split automation directory invisible to
+`ent related`, `ref scan` and `config file` while every test stayed green.
+
+`INCLUDE_TAGS | PRESERVED_TAGS` (`!secret`, `!env_var`, `!input`) is HA's entire
+YAML vocabulary, so an unknown tag means an HA newer than this build, not an
+exotic config. The other two tracks are deliberate: value-carrying tags keep
+their directive text (`!secret home_lat` renders as `!secret home_lat`, never
+the bare `home_lat`), and `resolve=false` stays available for any file the
+resolver refuses.
+
+- Enforced by: `tests/test_resolver.py::test_unknown_include_tag_is_refused_not_degraded`,
+  `::test_known_include_tags_still_resolve` (a guard that rejects everything is
+  not a guard), `::test_unknown_include_tag_still_readable_unresolved`,
+  `::test_preserved_tags_are_not_include_family` and
+  `::test_known_include_tags_are_exactly_has_include_vocabulary` (canaries),
+  `tests/test_refscan.py::test_scan_refuses_unknown_include_tag` and
+  `::test_scan_still_follows_every_known_include_dir_tag`, and
+  `tests/integration/test_live.py::TestIncludeWiring::test_unknown_include_tag_is_refused_by_a_live_route`
+  plus `::test_home_assistant_refuses_any_tag_outside_its_vocabulary` (HA's own
+  loader is asked to confirm the vocabulary is closed)
