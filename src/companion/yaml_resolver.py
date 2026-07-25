@@ -14,6 +14,75 @@ class CircularIncludeError(Exception):
     """Raised when a circular !include is detected."""
 
 
+class UnknownIncludeTagError(Exception):
+    """Raised for an include-family tag this resolver does not implement.
+
+    An include tag exists to pull file content into the document. If we do not
+    implement one, the content it names is simply absent from every answer built
+    on the resolved tree — and absence reads as "there is nothing there". That is
+    how ``!include_dir_merge_list`` made a whole split automation directory
+    invisible to ``ent related``, ``ref scan`` and ``config file`` (one of the
+    five root causes of hactl#81) while every test stayed green. Degrading was
+    the bug; failing loudly is the fix.
+    """
+
+
+# Every include-family tag Home Assistant defines, and which this resolver
+# implements. Enumerated rather than prefix-matched so that a *new* HA include
+# tag is an unknown tag (a loud error) instead of quietly matching nothing.
+INCLUDE_TAGS: frozenset[str] = frozenset(
+    {
+        "!include",
+        "!include_dir_list",
+        "!include_dir_merge_list",
+        "!include_dir_named",
+        "!include_dir_merge_named",
+    }
+)
+
+# HA tags that are known, carry no file content, and are deliberately left
+# unresolved — each for a reason recorded here rather than by omission:
+#   !secret   — the value lives in secrets.yaml, which this service must never
+#               read (C-3). The directive text names the KEY, which is the whole
+#               truth we are allowed to tell.
+#   !env_var  — resolving it would substitute the *companion container's*
+#               environment, not Home Assistant's, and invent a value that
+#               differs from the running config.
+#   !input    — a blueprint placeholder; it only has a value once HA
+#               instantiates the blueprint, which happens nowhere near here.
+# Preserving the directive is truthful for all three: nothing is hidden, and the
+# rendered text says exactly what the config says.
+#
+# INCLUDE_TAGS | PRESERVED_TAGS is HA's *entire* YAML tag vocabulary. Verified
+# against a live instance rather than assumed: writing `automation bogus:
+# !my_custom_thing whatever` into configuration.yaml makes HA's own
+# check_config answer
+#     invalid | Error loading /config/configuration.yaml: could not determine a
+#               constructor for the tag '!my_custom_thing'
+# and `automation.reload` return 500 (HA 2026.x, 2026-07-25). HA's loader has a
+# closed constructor set; there is no such thing as a working HA config carrying
+# a tag outside these eight.
+PRESERVED_TAGS: frozenset[str] = frozenset({"!secret", "!env_var", "!input"})
+
+
+def claims_to_include(tag: str) -> bool:
+    """True if ``tag`` advertises that it pulls in content from elsewhere.
+
+    Drawn on the name because the name is all an unimplemented tag gives us, and
+    HA names this family by prefix (``!include``, ``!include_dir_*``). The line
+    is deliberately narrow: a tag has to say "include" to be treated as
+    content-bearing. Wrong in the permissive direction re-creates the bug that
+    hid a whole automation directory behind a tag nobody implemented.
+
+    The realistic case this exists for is *forward* compatibility, not exotic
+    user configs: today's HA refuses to load any tag outside
+    ``INCLUDE_TAGS | PRESERVED_TAGS`` (see the note there), so an unknown tag
+    can only reach us from an HA newer than this build. That is exactly when
+    silently resolving it to nothing would be most convincing and most wrong.
+    """
+    return tag.lstrip("!").lower().startswith("include")
+
+
 class YamlResolver:
     """Resolves HA YAML !include directives, returning complete content."""
 
@@ -84,22 +153,58 @@ class YamlResolver:
         return node
 
     def _resolve_tag(self, tag: str, value: str, context_dir: Path, visited: set[str]) -> Any:
-        """Resolve a single !include-family tag."""
-        if tag == "!include":
-            return self._include_file(context_dir / value.strip(), visited)
-        if tag == "!include_dir_named":
-            return self._include_dir_named(context_dir / value.strip(), visited)
-        if tag == "!include_dir_list":
-            return self._include_dir_list(context_dir / value.strip(), visited)
-        if tag == "!include_dir_merge_list":
-            return self._include_dir_merge_list(context_dir / value.strip(), visited)
-        if tag == "!include_dir_merge_named":
-            return self._include_dir_merge_named(context_dir / value.strip(), visited)
-        # An unresolved tag keeps its directive text. Returning the bare value
-        # made `!secret home_lat` render as the string "home_lat" — a fabricated
-        # value indistinguishable from a real one — and any future include-family
-        # tag would silently degrade the same way rather than being visibly
-        # unresolved. Secrets are never read here; see is_denied/_check_path.
+        """Resolve a single tagged scalar, on one of three tracks.
+
+        The tag decides which, and the boundary between the tracks is the whole
+        point of this function:
+
+        1. **A known include tag** (:data:`INCLUDE_TAGS`) is resolved — the file
+           or directory it names is read and inlined.
+        2. **An unknown tag that claims to include content** — anything else in
+           the ``!include*`` family, e.g. a tag HA adds after this release — is a
+           **hard error**. Preserving it would leave the content it names missing
+           from the answer with nothing to say so, and a caller cannot tell an
+           empty directory from a directory we never opened. That is exactly the
+           `!include_dir_merge_list` failure, and the next one would be silent
+           the same way.
+        3. **Any other tag keeps its directive text.** Chiefly the known
+           value-carrying tags (:data:`PRESERVED_TAGS`). Preserving is truthful
+           for them: they name no file, so nothing is hidden by leaving them
+           alone. Note this is *preserve*, not unwrap — returning the bare value
+           made ``!secret home_lat`` render as the string ``home_lat``, the
+           secret's key standing where its value belongs, indistinguishable from
+           a real setting.
+
+           A tag outside all three sets lands here too, and that is deliberate
+           even though HA itself would refuse to load such a config (see
+           :data:`PRESERVED_TAGS`). Reading a broken config is precisely when
+           somebody needs this service: HA has already failed, and a second
+           refusal on top of HA's would remove the only view they have left.
+           Nothing is concealed by rendering it — the directive is printed as
+           written, and the missing-content problem that justifies track 2 does
+           not arise for a tag that names no file.
+        """
+        if tag in INCLUDE_TAGS:
+            path = context_dir / value.strip()
+            if tag == "!include":
+                return self._include_file(path, visited)
+            if tag == "!include_dir_named":
+                return self._include_dir_named(path, visited)
+            if tag == "!include_dir_list":
+                return self._include_dir_list(path, visited)
+            if tag == "!include_dir_merge_list":
+                return self._include_dir_merge_list(path, visited)
+            return self._include_dir_merge_named(path, visited)
+
+        if claims_to_include(tag):
+            msg = (
+                f"Unsupported include directive {tag!r} (at {value.strip()!r}): this resolver knows "
+                f"{', '.join(sorted(INCLUDE_TAGS))}. Everything {tag} would have pulled in is missing "
+                f"from this answer, so the answer is not shown. Read the file unresolved "
+                f"(resolve=false) to see it as written, and please report the tag."
+            )
+            raise UnknownIncludeTagError(msg)
+
         return f"{tag} {value}".strip()
 
     def _include_file(self, path: Path, visited: set[str]) -> Any:

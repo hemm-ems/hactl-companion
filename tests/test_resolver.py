@@ -7,6 +7,8 @@ from pathlib import Path
 import yaml
 from aiohttp.test_utils import TestClient
 
+from companion.yaml_resolver import INCLUDE_TAGS, PRESERVED_TAGS, claims_to_include
+
 
 async def test_resolve_includes(client: TestClient, auth_headers: dict[str, str]) -> None:
     """Reading configuration.yaml with resolve=true should inline !include content."""
@@ -162,3 +164,122 @@ async def test_unresolved_tag_keeps_its_directive(
 
     latitude = yaml.safe_load(content)["homeassistant"]["latitude"]
     assert latitude == "!secret home_lat", f"expected the directive preserved, got {latitude!r}"
+
+
+# ---------------------------------------------------------------------------
+# C-11: an include-family tag this build does not implement is an error
+# ---------------------------------------------------------------------------
+
+
+def test_preserved_tags_are_not_include_family() -> None:
+    """Canary: the two tag sets must stay disjoint, and neither may shadow the other.
+
+    ``_resolve_tag`` dispatches on ``INCLUDE_TAGS`` first, then on
+    ``claims_to_include``, then preserves. If a preserved tag ever started with
+    "include" the middle branch would swallow it and a value-carrying tag would
+    become a 400; if an include tag were added to PRESERVED_TAGS it would be
+    resolved anyway and the entry would be a lie. Both are cheap to assert and
+    impossible to notice by reading.
+    """
+    assert not (INCLUDE_TAGS & PRESERVED_TAGS)
+    assert not [t for t in PRESERVED_TAGS if claims_to_include(t)]
+    assert all(claims_to_include(t) for t in INCLUDE_TAGS)
+
+
+def test_known_include_tags_are_exactly_has_include_vocabulary() -> None:
+    """Canary: adding an include tag is a reviewed act, not a silent widening.
+
+    Home Assistant's YAML loader has a closed constructor set — verified live on
+    2026-07-25 by writing `!my_custom_thing` into configuration.yaml, where HA's
+    own check_config answers `invalid | could not determine a constructor for
+    the tag` and automation.reload returns 500. If HA ever adds a tag, this
+    canary is the place where somebody has to notice.
+    """
+    assert {
+        "!include",
+        "!include_dir_list",
+        "!include_dir_merge_list",
+        "!include_dir_named",
+        "!include_dir_merge_named",
+    } == INCLUDE_TAGS
+    assert {"!secret", "!env_var", "!input"} == PRESERVED_TAGS
+
+
+async def test_unknown_include_tag_is_refused_not_degraded(
+    client: TestClient, auth_headers: dict[str, str], config_dir: Path
+) -> None:
+    """C-11: an unimplemented `!include_dir_*` tag must fail loudly, not resolve to nothing.
+
+    A future HA release adding an include tag is the realistic source of one
+    (today's HA refuses to load any tag it has no constructor for). Falling back
+    to the preserve-directive branch would leave everything that tag names
+    absent from the answer with nothing to say so — the exact shape of the
+    `!include_dir_merge_list` bug that hid a whole split automation directory
+    while every test stayed green.
+    """
+    split = config_dir / "future_dir"
+    split.mkdir()
+    (split / "a.yaml").write_text("- id: hidden_one\n  alias: Hidden One\n")
+    (config_dir / "future.yaml").write_text("automation: !include_dir_merge_flat future_dir/\n")
+
+    resp = await client.get("/v1/config/file?path=future.yaml&resolve=true", headers=auth_headers)
+    assert resp.status == 400, (
+        f"answered {resp.status} for an unimplemented include tag — the files it names are missing "
+        "from the resolved tree, and a caller cannot tell an empty directory from one never opened"
+    )
+    message = (await resp.json())["error"]["message"]
+    assert "!include_dir_merge_flat" in message, f"refusal does not name the tag: {message}"
+    assert "hidden_one" not in message
+
+
+async def test_unknown_include_tag_still_readable_unresolved(
+    client: TestClient, auth_headers: dict[str, str], config_dir: Path
+) -> None:
+    """The refusal must leave a way to see the file — otherwise it is a wall, not a guard.
+
+    `resolve=false` does no include processing at all, so it stays available for
+    exactly the config the resolver cannot handle.
+    """
+    (config_dir / "future.yaml").write_text("automation: !include_dir_merge_flat future_dir/\n")
+
+    resp = await client.get("/v1/config/file?path=future.yaml&resolve=false", headers=auth_headers)
+    assert resp.status == 200
+    assert "!include_dir_merge_flat" in (await resp.json())["content"]
+
+
+async def test_known_include_tags_still_resolve(
+    client: TestClient, auth_headers: dict[str, str], config_dir: Path
+) -> None:
+    """A guard that rejects everything is not a guard.
+
+    Every implemented tag is exercised in one file, so a future over-broad
+    rejection rule (say, prefix-matching `!include_dir_`) fails here instead of
+    silently breaking real configs.
+    """
+    listdir = config_dir / "tagdir"
+    listdir.mkdir()
+    (listdir / "one.yaml").write_text("- id: item_one\n")
+    # merge_named needs mapping-shaped files: HA's own _include_dir_merge_named
+    # skips anything that is not a dict, and this resolver matches it.
+    nameddir = config_dir / "nameddir"
+    nameddir.mkdir()
+    (nameddir / "two.yaml").write_text("key_two: 2\n")
+    (config_dir / "single.yaml").write_text("value: 1\n")
+    (config_dir / "alltags.yaml").write_text(
+        "a: !include single.yaml\n"
+        "b: !include_dir_list tagdir/\n"
+        "c: !include_dir_merge_list tagdir/\n"
+        "d: !include_dir_named tagdir/\n"
+        "e: !include_dir_merge_named nameddir/\n"
+        "f: !secret some_key\n"
+    )
+
+    resp = await client.get("/v1/config/file?path=alltags.yaml&resolve=true", headers=auth_headers)
+    assert resp.status == 200, await resp.text()
+    parsed = yaml.safe_load((await resp.json())["content"])
+    assert parsed["a"] == {"value": 1}
+    assert parsed["b"] == [[{"id": "item_one"}]]
+    assert parsed["c"] == [{"id": "item_one"}]
+    assert parsed["d"] == {"one": [{"id": "item_one"}]}
+    assert parsed["e"] == {"key_two": 2}
+    assert parsed["f"] == "!secret some_key"

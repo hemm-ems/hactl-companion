@@ -27,6 +27,7 @@ from companion.routes import (
     templates,
     wireguard,
 )
+from companion.yaml_resolver import UnknownIncludeTagError
 
 logger = logging.getLogger("companion.access")
 
@@ -99,6 +100,44 @@ async def error_envelope_middleware(
 
 
 @web.middleware
+async def unsupported_include_middleware(
+    request: web.Request,
+    handler: Callable[[web.Request], Awaitable[web.StreamResponse]],
+) -> web.StreamResponse:
+    """Turn an unsupported include directive into a 400, on every route at once.
+
+    An include-family tag this build does not implement (:mod:`companion.yaml_resolver`)
+    is a deliberate hard failure: whatever the tag names would be silently absent
+    from the resolved config, and a partial answer presented as a whole one is the
+    class of bug this service exists to stop reporting. Handled here rather than in
+    each route so a *new* route that touches the config graph inherits the correct
+    status without anyone remembering to catch it — the same reason the auth and
+    error-envelope rules live at this level.
+
+    400 rather than 5xx: hactl retries idempotent requests on any 5xx
+    (``internal/companion/client.go``: ``shouldRetry`` returns ``idempotent``
+    for ``status >= 500``; ``isIdempotentMethod`` covers GET/HEAD/PUT/DELETE/
+    OPTIONS, and the caller uses ``backoffs = [500ms, 1s]`` for three attempts
+    total). Every route that resolves the config graph is a GET, so a 5xx here
+    would buy three round trips and 1.5 s of backoff for a config that cannot
+    parse differently the second time. A 4xx is delivered once, with the
+    message.
+
+    The status is a compromise and worth naming as one: the *request* is
+    well-formed, so 400 is not literally accurate — the server's data is what
+    this build cannot handle. It is chosen over a semantically tidier 5xx
+    because it is the only status in that family that reaches the user once
+    instead of three times, and it matches the precedent already set by the
+    helper routes, which answer 400 for "your configuration.yaml is not set up
+    for this".
+    """
+    try:
+        return await handler(request)
+    except UnknownIncludeTagError as exc:
+        raise web.HTTPBadRequest(text=str(exc)) from exc
+
+
+@web.middleware
 async def auth_middleware(
     request: web.Request,
     handler: Callable[[web.Request], Awaitable[web.StreamResponse]],
@@ -140,6 +179,7 @@ def create_app(config_base_path: str = "/config") -> web.Application:
             web.normalize_path_middleware(merge_slashes=True, append_slash=False),
             access_log_middleware,
             error_envelope_middleware,
+            unsupported_include_middleware,
             auth_middleware,
         ]
     )

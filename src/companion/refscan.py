@@ -27,7 +27,13 @@ from typing import Any, cast
 from ruamel.yaml.scalarstring import ScalarString
 
 from companion.backups import make_backup
-from companion.yaml_resolver import CircularIncludeError, YamlResolver
+from companion.yaml_resolver import (
+    INCLUDE_TAGS,
+    CircularIncludeError,
+    UnknownIncludeTagError,
+    YamlResolver,
+    claims_to_include,
+)
 
 # An entity_id is domain.object_id: a lowercase/underscore domain, a dot, then a
 # lowercase/digit/underscore object id. Deliberately shape-only — a service name
@@ -44,12 +50,11 @@ from companion.yaml_resolver import CircularIncludeError, YamlResolver
 # parens and spaces.
 _ENTITY_ID_RE = re.compile(r"\b[a-z_]+\.[a-z0-9_]+\b")
 
-_INCLUDE_DIR_TAGS = {
-    "!include_dir_named",
-    "!include_dir_list",
-    "!include_dir_merge_named",
-    "!include_dir_merge_list",
-}
+# Derived from the resolver's enumeration rather than restated: this module and
+# yaml_resolver.py must agree on which tags extend the config graph, and two
+# hand-maintained lists of the same fact drift (TC-7). The resolver owns the
+# fact; here we only subtract the single-file tag.
+_INCLUDE_DIR_TAGS = INCLUDE_TAGS - {"!include"}
 _YAML_SUFFIXES = (".yaml", ".yml")
 
 # A backslash immediately before a line break: inside a double-quoted scalar YAML
@@ -411,12 +416,28 @@ def include_tag(node: Any) -> tuple[str, str] | None:
     was used is semantic, not cosmetic: under an ``automation:`` key,
     ``!include_dir_merge_list`` means "each file holds a *list* of automations"
     while ``!include_dir_list`` means "each file *is* one automation".
+
+    An include-family tag this module does not know raises
+    :class:`UnknownIncludeTagError` rather than returning None. Returning None
+    would drop the files it names out of the walked graph, and everything built
+    on that walk — ``ref scan``'s hit list, ``ref validate``'s dangling-reference
+    verdict, ``ref replace``'s rewrite set — would answer confidently about a
+    config it had only partly read. ``ref replace`` is the sharp end: a file
+    pruned from the walk keeps the old reference while the response reports
+    success.
     """
     if hasattr(node, "tag") and hasattr(node, "value"):
         tag = node.tag.value if hasattr(node.tag, "value") else str(node.tag)
         raw = str(node.value).strip()
-        if raw and (tag == "!include" or tag in _INCLUDE_DIR_TAGS):
+        if raw and tag in INCLUDE_TAGS:
             return tag, raw
+        if raw and claims_to_include(tag):
+            msg = (
+                f"Unsupported include directive {tag!r} (at {raw!r}): this scan knows "
+                f"{', '.join(sorted(INCLUDE_TAGS))}. The files {tag} names would be missing from the "
+                f"config graph, so no answer is given rather than a partial one. Please report the tag."
+            )
+            raise UnknownIncludeTagError(msg)
     return None
 
 
