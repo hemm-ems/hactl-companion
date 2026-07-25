@@ -19,7 +19,7 @@ TEST_TOKEN = "test-supervisor-token-12345"
 
 
 def _inside_tree(path: Path) -> bool:
-    return TREE_ROOT == path or TREE_ROOT in path.parents
+    return path == TREE_ROOT or TREE_ROOT in path.parents
 
 
 def pytest_configure(config: pytest.Config) -> None:
