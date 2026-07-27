@@ -28,3 +28,6 @@ is not done.
 proxy and must reload HA after writes.
 
 **Manage context.** Use subagents for long tasks. Use intermediate files to store knowledge.
+
+**Spec before code.** The ordering ritual — probe HA before assuming (marker rule, lint-gated),
+`ENDPOINT_META` before the route — lives in the workspace `AGENTS.md` one directory up.
