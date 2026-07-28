@@ -69,9 +69,9 @@ def core_api_calls(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
     """
     calls: list[tuple[str, str]] = []
 
-    async def _fake_call_service(domain: str, service: str, data: object = None) -> bool:
+    async def _fake_call_service(domain: str, service: str, data: object = None) -> core_api.ServiceResult:
         calls.append((domain, service))
-        return True
+        return core_api.ServiceResult(True)
 
     async def _fake_check_config() -> tuple[bool, str]:
         return True, ""

@@ -186,15 +186,15 @@ async def post_helper(request: web.Request) -> web.Response:
 
     data[helper_id] = helper_body
     _save_helpers(target, data)
-    reloaded = await core_api.reload_domain(domain)
+    reload = await core_api.reload_domain(domain)
     entity_id = f"{domain}.{helper_id}"
-    entity_created = await _poll_entity_created(entity_id) if reloaded else False
+    entity_created = await _poll_entity_created(entity_id) if reload.ok else False
     return web.json_response(
         {
             "status": "created",
             "id": helper_id,
             "entity_id": entity_id,
-            "reloaded": reloaded,
+            **core_api.reload_fields(reload),
             "entity_created": entity_created,
         },
         status=201,
@@ -258,8 +258,8 @@ async def put_helper(request: web.Request) -> web.Response:
     domain, data, target = _locate_helper(base, helper_id, domain_param)
     data[helper_id] = new_body
     _save_helpers(target, data)
-    reloaded = await core_api.reload_domain(domain)
-    return web.json_response({"status": "applied", "reloaded": reloaded})
+    reload = await core_api.reload_domain(domain)
+    return web.json_response({"status": "applied", **core_api.reload_fields(reload)})
 
 
 async def delete_helper(request: web.Request) -> web.Response:
@@ -273,8 +273,8 @@ async def delete_helper(request: web.Request) -> web.Response:
     domain, data, target = _locate_helper(base, helper_id, domain_param)
     del data[helper_id]
     _save_helpers(target, data)
-    reloaded = await core_api.reload_domain(domain)
-    return web.json_response({"status": "deleted", "reloaded": reloaded})
+    reload = await core_api.reload_domain(domain)
+    return web.json_response({"status": "deleted", **core_api.reload_fields(reload)})
 
 
 routes: list[RouteDef] = [

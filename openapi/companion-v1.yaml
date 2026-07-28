@@ -509,6 +509,11 @@ paths:
                     type: string
                   reloaded:
                     type: boolean
+                  reload_error:
+                    type: string
+                    description: "Why the reload failed: HA's HTTP status plus a bounded
+                      excerpt of its response body, or the transport error class.
+                      Present only when `reloaded` is false; absent otherwise."
         4XX:
           $ref: '#/components/responses/Error'
         5XX:
@@ -551,6 +556,11 @@ paths:
                     type: string
                   reloaded:
                     type: boolean
+                  reload_error:
+                    type: string
+                    description: "Why the reload failed: HA's HTTP status plus a bounded
+                      excerpt of its response body, or the transport error class.
+                      Present only when `reloaded` is false; absent otherwise."
         4XX:
           $ref: '#/components/responses/Error'
         5XX:
@@ -599,6 +609,11 @@ paths:
                     type: string
                   reloaded:
                     type: boolean
+                  reload_error:
+                    type: string
+                    description: "Why the reload failed: HA's HTTP status plus a bounded
+                      excerpt of its response body, or the transport error class.
+                      Present only when `reloaded` is false; absent otherwise."
         4XX:
           $ref: '#/components/responses/Error'
         5XX:
@@ -720,6 +735,11 @@ paths:
                     type: string
                   reloaded:
                     type: boolean
+                  reload_error:
+                    type: string
+                    description: "Why the reload failed: HA's HTTP status plus a bounded
+                      excerpt of its response body, or the transport error class.
+                      Present only when `reloaded` is false; absent otherwise."
         4XX:
           $ref: '#/components/responses/Error'
         5XX:
@@ -867,6 +887,11 @@ paths:
                     nullable: true
                   reloaded:
                     type: boolean
+                  reload_error:
+                    type: string
+                    description: "Why the reload failed: HA's HTTP status plus a bounded
+                      excerpt of its response body, or the transport error class.
+                      Present only when `reloaded` is false; absent otherwise."
         4XX:
           $ref: '#/components/responses/Error'
         5XX:
@@ -989,6 +1014,11 @@ paths:
                     type: string
                   reloaded:
                     type: boolean
+                  reload_error:
+                    type: string
+                    description: "Why the reload failed: HA's HTTP status plus a bounded
+                      excerpt of its response body, or the transport error class.
+                      Present only when `reloaded` is false; absent otherwise."
                   entity_created:
                     type: boolean
         4XX:

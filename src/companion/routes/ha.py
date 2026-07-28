@@ -47,8 +47,9 @@ async def post_reload(request: web.Request) -> web.Response:
     if not _DOMAIN_RE.fullmatch(domain) or domain not in ALLOWED_DOMAINS:
         raise web.HTTPBadRequest(text=f"Domain not allowed: {domain}")
 
-    if not await core_api.reload_domain(domain):
-        raise web.HTTPBadGateway(text=f"Reload failed: {domain}")
+    reload = await core_api.reload_domain(domain)
+    if not reload.ok:
+        raise web.HTTPBadGateway(text=f"Reload failed: {domain}: {reload.error}")
 
     return web.json_response({"status": "ok", "domain": domain})
 

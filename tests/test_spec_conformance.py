@@ -31,9 +31,10 @@ from __future__ import annotations
 
 import logging
 import re
+import shutil
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -41,7 +42,7 @@ import jsonschema
 import pytest
 from aiohttp.test_utils import TestClient
 
-from companion import logbuffer, wg, wg_monitor
+from companion import core_api, logbuffer, wg, wg_monitor
 from companion.openapi import ENDPOINT_META
 from companion.routes import (
     automations,
@@ -55,6 +56,7 @@ from companion.routes import (
     templates,
     wireguard,
 )
+from tests.conftest import FIXTURES_DIR
 from tests.related_fixture import SOURCE_ENTITY_ID, seed_related_fixture
 
 
@@ -283,6 +285,47 @@ def _seed_wg_status(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(wg_monitor._monitors, "wg0", state)
 
 
+def _reload_fails(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Re-seed the fixtures, then make Home Assistant refuse the reload.
+
+    Re-seeding is what lets the derived probe repeat a create or delete the
+    preceding probe already consumed, with a byte-identical request — so the
+    success branch and the failure branch cannot drift into being different
+    requests.
+    """
+    for src in FIXTURES_DIR.iterdir():
+        if src.is_file() and src.suffix in (".yaml", ".yml"):
+            shutil.copy2(src, config_dir / src.name)
+        elif src.is_dir():
+            shutil.copytree(src, config_dir / src.name, dirs_exist_ok=True)
+
+    async def _refused(domain: str, service: str, data: object = None) -> core_api.ServiceResult:
+        return core_api.ServiceResult(False, "HTTP 400: Service not found")
+
+    monkeypatch.setattr(core_api, "call_service", _refused)
+
+
+def _with_reload_failure(probes: tuple[Probe, ...]) -> tuple[Probe, ...]:
+    """``probes``, plus a repeat of the last one with HA refusing the reload.
+
+    ``reload_error`` exists only on that branch, so without this probe the
+    spec→producer direction could not see it and the twelve routes that have to
+    propagate the reason would be trusted rather than checked — the field would
+    be documented, emitted by nothing the suite drives, and free to be forgotten
+    by route #N. It goes last on purpose: the patch it installs lives until the
+    test ends.
+    """
+    last = probes[-1]
+    assert last.setup is None, f"{last.url}: the derived probe would drop the source probe's setup"
+    derived = replace(
+        last,
+        label=f"{last.label or 'apply'}+reload-fails",
+        setup=_reload_fails,
+        expect={**last.expect, "reloaded": False},
+    )
+    return (*probes, derived)
+
+
 RESPONSE_PROBES: dict[tuple[str, str], tuple[Probe, ...]] = {
     ("GET", "/v1/health"): (Probe("/v1/health"),),
     ("GET", "/v1/status"): (Probe("/v1/status"),),
@@ -334,72 +377,86 @@ RESPONSE_PROBES: dict[tuple[str, str], tuple[Probe, ...]] = {
     ("GET", "/v1/config/template"): (Probe("/v1/config/template?id=tpl_energie_zaehler"),),
     # `reloaded` — the exact field D45 lost — is only emitted on apply, so the
     # dry-run probe alone would leave it unobserved on all three PUT routes.
-    ("PUT", "/v1/config/template"): (
-        Probe(
-            "/v1/config/template?id=tpl_energie_zaehler&dry_run=true",
-            label="dry",
-            data='name: "Updated"\nunique_id: tpl_energie_zaehler\nstate: "{{ 1 }}"\n',
-        ),
-        Probe(
-            "/v1/config/template?id=tpl_energie_zaehler&dry_run=false",
-            label="apply",
-            data='name: "Updated"\nunique_id: tpl_energie_zaehler\nstate: "{{ 1 }}"\n',
-        ),
+    ("PUT", "/v1/config/template"): _with_reload_failure(
+        (
+            Probe(
+                "/v1/config/template?id=tpl_energie_zaehler&dry_run=true",
+                label="dry",
+                data='name: "Updated"\nunique_id: tpl_energie_zaehler\nstate: "{{ 1 }}"\n',
+            ),
+            Probe(
+                "/v1/config/template?id=tpl_energie_zaehler&dry_run=false",
+                label="apply",
+                data='name: "Updated"\nunique_id: tpl_energie_zaehler\nstate: "{{ 1 }}"\n',
+            ),
+        )
     ),
-    ("POST", "/v1/config/template"): (
-        Probe(
-            "/v1/config/template?domain=sensor",
-            data='name: "New"\nunique_id: tpl_probe\nstate: "{{ 1 }}"\n',
-        ),
+    ("POST", "/v1/config/template"): _with_reload_failure(
+        (
+            Probe(
+                "/v1/config/template?domain=sensor",
+                data='name: "New"\nunique_id: tpl_probe\nstate: "{{ 1 }}"\n',
+            ),
+        )
     ),
-    ("DELETE", "/v1/config/template"): (Probe("/v1/config/template?id=tpl_energie_zaehler"),),
+    ("DELETE", "/v1/config/template"): _with_reload_failure((Probe("/v1/config/template?id=tpl_energie_zaehler"),)),
     ("GET", "/v1/config/scripts"): (Probe("/v1/config/scripts"),),
     ("GET", "/v1/config/script"): (Probe("/v1/config/script?id=welcome_home"),),
-    ("PUT", "/v1/config/script"): (
-        Probe(
-            "/v1/config/script?id=welcome_home&dry_run=true",
-            label="dry",
-            data="alias: Updated\nsequence:\n  - service: light.turn_on\n",
-        ),
-        Probe(
-            "/v1/config/script?id=welcome_home&dry_run=false",
-            label="apply",
-            data="alias: Updated\nsequence:\n  - service: light.turn_on\n",
-        ),
+    ("PUT", "/v1/config/script"): _with_reload_failure(
+        (
+            Probe(
+                "/v1/config/script?id=welcome_home&dry_run=true",
+                label="dry",
+                data="alias: Updated\nsequence:\n  - service: light.turn_on\n",
+            ),
+            Probe(
+                "/v1/config/script?id=welcome_home&dry_run=false",
+                label="apply",
+                data="alias: Updated\nsequence:\n  - service: light.turn_on\n",
+            ),
+        )
     ),
-    ("POST", "/v1/config/script"): (
-        Probe(
-            "/v1/config/script",
-            data="probe_script:\n  alias: Probe\n  sequence:\n    - service: light.turn_off\n",
-        ),
+    ("POST", "/v1/config/script"): _with_reload_failure(
+        (
+            Probe(
+                "/v1/config/script",
+                data="probe_script:\n  alias: Probe\n  sequence:\n    - service: light.turn_off\n",
+            ),
+        )
     ),
-    ("DELETE", "/v1/config/script"): (Probe("/v1/config/script?id=welcome_home"),),
+    ("DELETE", "/v1/config/script"): _with_reload_failure((Probe("/v1/config/script?id=welcome_home"),)),
     ("GET", "/v1/config/automations"): (Probe("/v1/config/automations"),),
     ("GET", "/v1/config/automation"): (Probe("/v1/config/automation?id=automation.door_light"),),
-    ("PUT", "/v1/config/automation"): (
-        Probe(
-            "/v1/config/automation?id=automation.door_light&dry_run=true",
-            label="dry",
-            data="id: automation.door_light\nalias: Updated\ntrigger: []\naction: []\n",
-        ),
-        Probe(
-            "/v1/config/automation?id=automation.door_light&dry_run=false",
-            label="apply",
-            data="id: automation.door_light\nalias: Updated\ntrigger: []\naction: []\n",
-        ),
+    ("PUT", "/v1/config/automation"): _with_reload_failure(
+        (
+            Probe(
+                "/v1/config/automation?id=automation.door_light&dry_run=true",
+                label="dry",
+                data="id: automation.door_light\nalias: Updated\ntrigger: []\naction: []\n",
+            ),
+            Probe(
+                "/v1/config/automation?id=automation.door_light&dry_run=false",
+                label="apply",
+                data="id: automation.door_light\nalias: Updated\ntrigger: []\naction: []\n",
+            ),
+        )
     ),
-    ("POST", "/v1/config/automation"): (
-        Probe("/v1/config/automation", data="id: automation.probe\nalias: Probe\ntrigger: []\naction: []\n"),
+    ("POST", "/v1/config/automation"): _with_reload_failure(
+        (Probe("/v1/config/automation", data="id: automation.probe\nalias: Probe\ntrigger: []\naction: []\n"),)
     ),
-    ("DELETE", "/v1/config/automation"): (Probe("/v1/config/automation?id=automation.door_light"),),
+    ("DELETE", "/v1/config/automation"): _with_reload_failure(
+        (Probe("/v1/config/automation?id=automation.door_light"),)
+    ),
     ("GET", "/v1/config/helpers"): (Probe("/v1/config/helpers"),),
     ("GET", "/v1/config/helper"): (Probe("/v1/config/helper?id=guest_mode"),),
     # P2-3: entity_id/reloaded/entity_created were produced but undocumented.
-    ("POST", "/v1/config/helper"): (
-        Probe("/v1/config/helper?domain=input_boolean", data="probe_helper:\n  name: Probe\n"),
+    ("POST", "/v1/config/helper"): _with_reload_failure(
+        (Probe("/v1/config/helper?domain=input_boolean", data="probe_helper:\n  name: Probe\n"),)
     ),
-    ("PUT", "/v1/config/helper"): (Probe("/v1/config/helper?id=guest_mode", data="name: Probe 2\n"),),
-    ("DELETE", "/v1/config/helper"): (Probe("/v1/config/helper?id=guest_mode"),),
+    ("PUT", "/v1/config/helper"): _with_reload_failure(
+        (Probe("/v1/config/helper?id=guest_mode", data="name: Probe 2\n"),)
+    ),
+    ("DELETE", "/v1/config/helper"): _with_reload_failure((Probe("/v1/config/helper?id=guest_mode"),)),
     ("POST", "/v1/ha/reload/{domain}"): (Probe("/v1/ha/reload/automation"),),
     ("POST", "/v1/ha/check-config"): (Probe("/v1/ha/check-config"),),
     ("GET", "/v1/logs"): (Probe("/v1/logs?component=wireguard", setup=_seed_logbuffer),),

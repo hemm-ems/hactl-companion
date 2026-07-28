@@ -199,8 +199,8 @@ async def put_automation(request: web.Request) -> web.Response:
 
             data[idx] = new_item
             _save_automations(target, data)
-            reloaded = await core_api.reload_domain("automation")
-            return web.json_response({"status": "applied", "reloaded": reloaded})
+            reload = await core_api.reload_domain("automation")
+            return web.json_response({"status": "applied", **core_api.reload_fields(reload)})
 
     raise web.HTTPNotFound(text=f"Automation not found: {automation_id}")
 
@@ -233,10 +233,11 @@ async def post_automation(request: web.Request) -> web.Response:
 
     data.append(new_item)
     _save_automations(target, data)
-    reloaded = await core_api.reload_domain("automation")
-    entity_id = await _poll_automation_entity_id(new_item["id"]) if reloaded else None
+    reload = await core_api.reload_domain("automation")
+    entity_id = await _poll_automation_entity_id(new_item["id"]) if reload.ok else None
     return web.json_response(
-        {"status": "created", "id": new_item["id"], "entity_id": entity_id, "reloaded": reloaded}, status=201
+        {"status": "created", "id": new_item["id"], "entity_id": entity_id, **core_api.reload_fields(reload)},
+        status=201,
     )
 
 
@@ -264,8 +265,8 @@ async def delete_automation(request: web.Request) -> web.Response:
         idx, _item = match
         data.pop(idx)
         _save_automations(target, data)
-        reloaded = await core_api.reload_domain("automation")
-        return web.json_response({"status": "deleted", "reloaded": reloaded})
+        reload = await core_api.reload_domain("automation")
+        return web.json_response({"status": "deleted", **core_api.reload_fields(reload)})
 
     raise web.HTTPNotFound(text=f"Automation not found: {automation_id}")
 

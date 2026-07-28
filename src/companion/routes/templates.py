@@ -277,8 +277,8 @@ async def put_template(request: web.Request) -> web.Response:
 
             data[s["group_idx"]][s["domain"]][s["item_idx"]] = new_item
             _save_templates(target, data)
-            reloaded = await core_api.reload_domain("template")
-            return web.json_response({"status": "applied", "reloaded": reloaded})
+            reload = await core_api.reload_domain("template")
+            return web.json_response({"status": "applied", **core_api.reload_fields(reload)})
 
     raise web.HTTPNotFound(text=f"Template not found: {uid}")
 
@@ -321,9 +321,9 @@ async def post_template(request: web.Request) -> web.Response:
         first_uid = _create_bare_item(request, data, new_item, existing_ids)
 
     _save_templates(target, data)
-    reloaded = await core_api.reload_domain("template")
+    reload = await core_api.reload_domain("template")
     return web.json_response(
-        {"status": "created", "unique_id": first_uid, "reloaded": reloaded},
+        {"status": "created", "unique_id": first_uid, **core_api.reload_fields(reload)},
         status=201,
     )
 
@@ -398,8 +398,8 @@ async def delete_template(request: web.Request) -> web.Response:
             if isinstance(group, dict) and not any(d in group for d in _ENTITY_DOMAINS):
                 data.pop(s["group_idx"])
             _save_templates(target, data)
-            reloaded = await core_api.reload_domain("template")
-            return web.json_response({"status": "deleted", "reloaded": reloaded})
+            reload = await core_api.reload_domain("template")
+            return web.json_response({"status": "deleted", **core_api.reload_fields(reload)})
 
     raise web.HTTPNotFound(text=f"Template not found: {uid}")
 
