@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import pytest
@@ -9,12 +10,17 @@ from aiohttp import web
 
 # Bind the real implementations at import time: the autouse core_api_calls
 # fixture replaces the module attributes, but these references stay intact.
-from companion.core_api import CoreAPIUnavailableError, call_service, check_config, get_state
+from companion.core_api import _EXCERPT_CHARS, CoreAPIUnavailableError, call_service, check_config, get_state
 
 TOKEN = "core-api-test-token"
 
 
-def _make_core_app(check_result: dict[str, Any] | None = None, fail: bool = False) -> web.Application:
+def _make_core_app(
+    check_result: dict[str, Any] | None = None,
+    fail: bool = False,
+    fail_status: int = 500,
+    fail_body: str = '{"message": "boom"}',
+) -> web.Application:
     """Fake HA core API recording service calls."""
     app = web.Application()
     app["service_calls"] = []
@@ -24,7 +30,7 @@ def _make_core_app(check_result: dict[str, Any] | None = None, fail: bool = Fals
         app["auth_headers"].append(request.headers.get("Authorization", ""))
         app["service_calls"].append((request.match_info["domain"], request.match_info["service"]))
         if fail:
-            return web.json_response({"message": "boom"}, status=500)
+            return web.Response(text=fail_body, status=fail_status, content_type="application/json")
         return web.json_response([])
 
     async def handle_check(request: web.Request) -> web.Response:
@@ -47,26 +53,59 @@ async def test_call_service_success(aiohttp_server: Any, core_env: pytest.Monkey
     server = await aiohttp_server(app)
     core_env.setenv("CORE_API_URL", str(server.make_url("")))
 
-    assert await call_service("automation", "reload") is True
+    result = await call_service("automation", "reload")
+    assert result.ok is True
+    assert result.error is None
     assert app["service_calls"] == [("automation", "reload")]
     assert app["auth_headers"] == [f"Bearer {TOKEN}"]
 
 
 async def test_call_service_http_error(aiohttp_server: Any, core_env: pytest.MonkeyPatch) -> None:
-    server = await aiohttp_server(_make_core_app(fail=True))
+    """A refusal by HA is reported as not-ok **and** says what HA said.
+
+    The status and HA's own words are the whole diagnosis: with only a bool, a
+    "Service not found" (the integration is not loaded) and a "not authorized"
+    are the same unactionable failure to everyone upstream.
+    """
+    server = await aiohttp_server(
+        _make_core_app(fail=True, fail_status=400, fail_body='{"message": "Service not found"}')
+    )
     core_env.setenv("CORE_API_URL", str(server.make_url("")))
 
-    assert await call_service("automation", "reload") is False
+    result = await call_service("automation", "reload")
+    assert result.ok is False
+    assert result.error is not None
+    assert "HTTP 400" in result.error
+    assert "Service not found" in result.error
+    assert TOKEN not in result.error, "the reason must never carry the Supervisor token"
+
+
+async def test_call_service_error_body_is_bounded(aiohttp_server: Any, core_env: pytest.MonkeyPatch) -> None:
+    """HA's body is excerpted, not forwarded whole — the reason goes on the wire."""
+    server = await aiohttp_server(_make_core_app(fail=True, fail_status=400, fail_body="x" * 5000))
+    core_env.setenv("CORE_API_URL", str(server.make_url("")))
+
+    result = await call_service("automation", "reload")
+    assert result.error is not None
+    assert result.error.count("x") == _EXCERPT_CHARS
+    assert len(result.error) < 2 * _EXCERPT_CHARS
 
 
 async def test_call_service_no_token(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("SUPERVISOR_TOKEN", raising=False)
-    assert await call_service("automation", "reload") is False
+    result = await call_service("automation", "reload")
+    assert result.ok is False
+    assert result.error == "SUPERVISOR_TOKEN not set"
 
 
 async def test_call_service_unreachable(core_env: pytest.MonkeyPatch) -> None:
+    """A transport failure names the exception class — there is no HTTP status to name."""
     core_env.setenv("CORE_API_URL", "http://127.0.0.1:1")
-    assert await call_service("automation", "reload") is False
+    result = await call_service("automation", "reload")
+    assert result.ok is False
+    assert result.error is not None
+    assert re.match(r"^\w+Error: ", result.error), result.error
+    assert TOKEN not in result.error
 
 
 async def test_check_config_valid(aiohttp_server: Any, core_env: pytest.MonkeyPatch) -> None:

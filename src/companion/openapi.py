@@ -223,6 +223,18 @@ _AUTOMATION_SCHEMA = {
     "type": "object",
     "properties": {"id": {"type": "string"}, "content": {"type": "string"}},
 }
+# Every response that carries `reloaded` carries this alongside it, and only when
+# the reload failed: a bare `reloaded: false` sent the operator hunting for a
+# reason this service already had (HA's status and body excerpt, or the transport
+# error class). Optional and absent on success — a successful response is
+# byte-identical to the one sent before the field existed.
+# The description is shared, the field dict is not: ruamel emits an anchor/alias
+# pair for a dict that appears twice, which would renumber the anchors of the
+# schemas already in the committed YAML — noise in a change that adds a field.
+_RELOAD_ERROR_DESC = (
+    "Why the reload failed: HA's HTTP status plus a bounded excerpt of its response body, or the "
+    "transport error class. Present only when `reloaded` is false; absent otherwise."
+)
 # PUT template/script/automation: dry-run returns a diff; apply returns `reloaded`.
 _WRITE_RESULT_SCHEMA = {
     "type": "object",
@@ -231,13 +243,18 @@ _WRITE_RESULT_SCHEMA = {
         "status": {"type": "string"},
         "diff": {"type": "string"},
         "reloaded": {"type": "boolean"},
+        "reload_error": {"type": "string", "description": _RELOAD_ERROR_DESC},
     },
 }
 # DELETE (template/script/automation/helper) and PUT helper: {status, reloaded}.
 _RELOAD_RESULT_SCHEMA = {
     "type": "object",
     "required": ["status"],
-    "properties": {"status": {"type": "string"}, "reloaded": {"type": "boolean"}},
+    "properties": {
+        "status": {"type": "string"},
+        "reloaded": {"type": "boolean"},
+        "reload_error": {"type": "string", "description": _RELOAD_ERROR_DESC},
+    },
 }
 _RELOAD_SCHEMA = {
     "type": "object",
@@ -254,7 +271,12 @@ _CHECK_CONFIG_SCHEMA = {
 _CREATED_SCRIPT_SCHEMA = {
     "type": "object",
     "required": ["status"],
-    "properties": {"status": {"type": "string"}, "id": {"type": "string"}, "reloaded": {"type": "boolean"}},
+    "properties": {
+        "status": {"type": "string"},
+        "id": {"type": "string"},
+        "reloaded": {"type": "boolean"},
+        "reload_error": {"type": "string", "description": _RELOAD_ERROR_DESC},
+    },
 }
 _CREATED_AUTOMATION_SCHEMA = {
     "type": "object",
@@ -264,12 +286,18 @@ _CREATED_AUTOMATION_SCHEMA = {
         "id": {"type": "string"},
         "entity_id": {"type": "string", "nullable": True},
         "reloaded": {"type": "boolean"},
+        "reload_error": {"type": "string", "description": _RELOAD_ERROR_DESC},
     },
 }
 _CREATED_UID_SCHEMA = {
     "type": "object",
     "required": ["status"],
-    "properties": {"status": {"type": "string"}, "unique_id": {"type": "string"}, "reloaded": {"type": "boolean"}},
+    "properties": {
+        "status": {"type": "string"},
+        "unique_id": {"type": "string"},
+        "reloaded": {"type": "boolean"},
+        "reload_error": {"type": "string", "description": _RELOAD_ERROR_DESC},
+    },
 }
 _CREATED_HELPER_SCHEMA = {
     "type": "object",
@@ -279,6 +307,7 @@ _CREATED_HELPER_SCHEMA = {
         "id": {"type": "string"},
         "entity_id": {"type": "string"},
         "reloaded": {"type": "boolean"},
+        "reload_error": {"type": "string", "description": _RELOAD_ERROR_DESC},
         "entity_created": {"type": "boolean"},
     },
 }

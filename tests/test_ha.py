@@ -34,14 +34,20 @@ async def test_reload_invalid_domain_chars(client: TestClient, auth_headers: dic
 
 
 async def test_reload_core_api_failure(client: TestClient, auth_headers: dict[str, str]) -> None:
-    """Failed reload service call should return 502."""
+    """Failed reload service call should return 502 — carrying HA's reason.
 
-    async def _fail(domain: str, service: str, data: object = None) -> bool:
-        return False
+    ``post_reload`` used to branch on the bare truthiness of the reload result;
+    a two-field result is truthy either way, so this also guards the inversion
+    that change could have introduced.
+    """
+
+    async def _fail(domain: str, service: str, data: object = None) -> core_api.ServiceResult:
+        return core_api.ServiceResult(False, "HTTP 400: Service not found")
 
     with patch("companion.core_api.call_service", _fail):
         resp = await client.post("/v1/ha/reload/automation", headers=auth_headers)
         assert resp.status == 502
+        assert "HTTP 400: Service not found" in await resp.text()
 
 
 async def test_check_config_ok(client: TestClient, auth_headers: dict[str, str]) -> None:

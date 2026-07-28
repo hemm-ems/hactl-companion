@@ -194,8 +194,8 @@ async def put_script(request: web.Request) -> web.Response:
 
     data[script_id] = script_body
     _save_scripts(target, data)
-    reloaded = await core_api.reload_domain("script")
-    return web.json_response({"status": "applied", "reloaded": reloaded})
+    reload = await core_api.reload_domain("script")
+    return web.json_response({"status": "applied", **core_api.reload_fields(reload)})
 
 
 async def post_script(request: web.Request) -> web.Response:
@@ -223,8 +223,8 @@ async def post_script(request: web.Request) -> web.Response:
 
     data[script_id] = script_body
     _save_scripts(target, data)
-    reloaded = await core_api.reload_domain("script")
-    return web.json_response({"status": "created", "id": script_id, "reloaded": reloaded}, status=201)
+    reload = await core_api.reload_domain("script")
+    return web.json_response({"status": "created", "id": script_id, **core_api.reload_fields(reload)}, status=201)
 
 
 async def delete_script(request: web.Request) -> web.Response:
@@ -240,8 +240,8 @@ async def delete_script(request: web.Request) -> web.Response:
 
     del data[script_id]
     _save_scripts(target, data)
-    reloaded = await core_api.reload_domain("script")
-    return web.json_response({"status": "deleted", "reloaded": reloaded})
+    reload = await core_api.reload_domain("script")
+    return web.json_response({"status": "deleted", **core_api.reload_fields(reload)})
 
 
 routes: list[RouteDef] = [
