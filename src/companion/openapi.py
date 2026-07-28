@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from companion import __version__
 
 # Response schemas for each endpoint group
@@ -75,6 +77,54 @@ _RELATED_ENTITY_SCHEMA = {
     },
 }
 
+# Every route that walks the config file graph carries this, and only when the
+# walk could not read the whole graph: a 200 with a complete-looking result is
+# what let a caller certify "no dangling references" over a config half it never
+# opened. Optional and absent when nothing was skipped — a complete scan's
+# response is byte-identical to the one sent before the field existed.
+# The descriptions are shared, the field dict is not: ruamel emits an
+# anchor/alias pair for a dict that appears twice, which would rewrite the
+# schemas already in the committed YAML — noise in a change that adds a field.
+# Hence a factory rather than a constant.
+_SKIPPED_DESC = (
+    "Config files this walk did not read, so the result covers less than the config does: a renamed "
+    "or deleted `!include` target, a file the path guard refuses (`secrets.yaml`), an `!include_dir_*` "
+    "naming a directory that is not there, an include that leaves the config directory. Present only "
+    "when at least one file was skipped; absent — not empty, not null — otherwise. A client that "
+    "certifies something about the whole config (no dangling references, a completed rename) must "
+    'treat any entry here as "cannot certify": what is missing from the result may only be missing '
+    "because it was never opened. Note a YAML syntax error is not in this list — it fails the request "
+    "outright rather than being skipped."
+)
+_SKIP_REASON_DESC = (
+    "Why the file was not read: `missing` (not there), `unreadable` (refused by the path guard, by "
+    "the OS, or for lying outside the config directory), `unparseable` (could not be turned into a "
+    "tree), `circular` (include cycle)."
+)
+
+
+def _skipped_schema() -> dict[str, Any]:
+    """A fresh `skipped` array schema per call (see the anchor/alias note above)."""
+    return {
+        "type": "array",
+        "description": _SKIPPED_DESC,
+        "items": {
+            "type": "object",
+            "required": ["location", "reason"],
+            "properties": {
+                "location": {
+                    "type": "string",
+                    "description": (
+                        "Config-relative path of the file or directory, e.g. `packages/energy.yaml` — "
+                        "the same form as `location` elsewhere in this API, never an absolute path."
+                    ),
+                },
+                "reason": {"type": "string", "description": _SKIP_REASON_DESC},
+            },
+        },
+    }
+
+
 _REF_SCAN_SCHEMA = {
     "type": "object",
     "required": ["target", "hits"],
@@ -92,6 +142,7 @@ _REF_SCAN_SCHEMA = {
                 },
             },
         },
+        "skipped": _skipped_schema(),
     },
 }
 _REF_ENTITIES_SCHEMA = {
@@ -111,6 +162,7 @@ _REF_ENTITIES_SCHEMA = {
                 },
             },
         },
+        "skipped": _skipped_schema(),
     },
 }
 _REF_REPLACE_SCHEMA = {
@@ -131,6 +183,7 @@ _REF_REPLACE_SCHEMA = {
                 },
             },
         },
+        "skipped": _skipped_schema(),
     },
 }
 _REF_REPLACE_BODY = {

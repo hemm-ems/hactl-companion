@@ -13,6 +13,17 @@ Each file is parsed on its own (``resolve=False``) so a hit reports the concrete
 file it lives in (e.g. ``automations.yaml``) rather than a fully-inlined blob.
 The ``{location, path, matched_value}`` shape mirrors the Go ``jsonwalk`` output
 so a caller can merge YAML and dashboard hits into one uniform result set.
+
+The walk is deliberately tolerant — a file it cannot read is stepped over rather
+than aborting the whole scan, because the commonest such file is ``secrets.yaml``
+on a perfectly healthy instance. Tolerance without a record is the bug though:
+the answer then covers less config than the caller thinks, and a caller
+certifying something about the *whole* config (``ref validate``: "no dangling
+references"; ``ref replace``: "renamed everywhere") certifies over a half it
+never saw. So every walk takes an optional :class:`SkipLog` and every place a
+file drops out of the graph writes to it; :func:`skipped_fields` turns that into
+the wire field. The walk itself is unchanged — what is skipped is exactly what
+was skipped before, only now it is sayable.
 """
 
 from __future__ import annotations
@@ -78,18 +89,167 @@ class EntityRef:
     matched_value: str  # the entity_id-shaped value found at this leaf
 
 
+# Why a file the config graph names was not read. A closed vocabulary, and
+# deliberately no finer than the distinctions the walk already makes: each value
+# below is one branch the code already had, given a name. A reason the walk
+# cannot actually tell apart would be invented rather than observed.
+SKIP_MISSING = "missing"  # the file or include directory is not there
+SKIP_UNREADABLE = "unreadable"  # refused: path guard (secrets.yaml), OS permissions, outside the config dir
+SKIP_UNPARSEABLE = "unparseable"  # the file could not be turned into a tree
+SKIP_CIRCULAR = "circular"  # an include cycle
+
+
+@dataclass(frozen=True)
+class SkippedFile:
+    location: str  # config-relative path of the file or directory, e.g. "packages/energy.yaml"
+    reason: str  # one of SKIP_* above
+
+
+class SkipLog:
+    """What a config walk did not read, collected while it walks.
+
+    One log passed into the walk rather than a second return value, because both
+    walkers here are shaped differently — :func:`iter_config_trees` is a
+    generator (whose ``return`` value only surfaces through ``StopIteration``)
+    and :func:`replace_yaml_literal` already returns its change list. An
+    accumulator both hand the same object to is the one mechanism that cannot
+    drift into two half-agreeing ones, which is how ``ref scan`` and ``ent
+    related`` once disagreed about the same config.
+
+    Records are deduplicated and sorted: two files can ``!include`` the same
+    missing target, and the walk does not mark a file it never read as seen, so
+    the raw stream repeats. A caller reads a set of facts about the config, not
+    a trace of the traversal.
+    """
+
+    __slots__ = ("_records",)
+
+    def __init__(self) -> None:
+        self._records: set[tuple[str, str]] = set()
+
+    def record(self, location: str, reason: str) -> None:
+        self._records.add((location, reason))
+
+    def files(self) -> list[SkippedFile]:
+        return [SkippedFile(location, reason) for location, reason in sorted(self._records)]
+
+    def __bool__(self) -> bool:
+        return bool(self._records)
+
+    def __len__(self) -> int:
+        return len(self._records)
+
+
+def skipped_fields(skipped: SkipLog | None) -> dict[str, Any]:
+    """The wire fields a config-walking route adds for what it could not read.
+
+    ``skipped`` is **absent** — not empty, not null — when the walk read the
+    whole graph, so a complete scan's response is byte-identical to the one this
+    service sent before the field existed and no existing consumer can see a
+    difference. Present, it means the answer covers less than the config does.
+
+    One helper rather than one literal per route, for the same reason
+    :func:`companion.core_api.reload_fields` is one: "absent unless abnormal" is
+    the kind of rule that gets re-derived correctly n-1 times (#94).
+    """
+    if not skipped:
+        return {}
+    return {"skipped": [{"location": f.location, "reason": f.reason} for f in skipped.files()]}
+
+
+def _record_skip(skipped: SkipLog | None, location: str, reason: str) -> None:
+    """Note one unread file, if the caller asked to be told. Never alters the walk."""
+    if skipped is not None:
+        skipped.record(location, reason)
+
+
+class _Unread:
+    """Sentinel: this file was not read, and the reason has been recorded.
+
+    Not ``None`` — an empty YAML file legitimately parses to ``None``, and
+    conflating "nothing in it" with "never opened" is the confusion this whole
+    change exists to remove.
+    """
+
+
+_UNREAD = _Unread()
+
+
+def _load_or_skip(resolver: YamlResolver, rel: str, location: str, skipped: SkipLog | None) -> Any:
+    """Parse one file, or return :data:`_UNREAD` having recorded why it was not read.
+
+    The single classification site: both walkers call it, so the read path and
+    the write path cannot label the same failure differently. The exception set
+    is exactly the one both loops already caught — this only gives each branch a
+    name.
+
+    Reachability is uneven and worth stating rather than implying. ``missing``
+    and ``unreadable`` are ordinary (a renamed ``!include`` target; ``!include
+    secrets.yaml``, which the path guard refuses on a perfectly healthy
+    instance). ``unparseable`` and ``circular`` are near-unreachable *here*:
+    ``resolve=False`` follows no include, so no cycle can form, and ruamel
+    signals a YAML syntax error with ``YAMLError``, which is **not** a
+    ``ValueError`` and so is not caught — a malformed file aborts the scan
+    loudly today. They are classified anyway because the handler already catches
+    them, and a branch that is caught but unnamed is how a reason goes missing
+    later.
+    """
+    try:
+        return resolver.load(rel, resolve=False)
+    except FileNotFoundError:
+        _record_skip(skipped, location, SKIP_MISSING)
+    except PermissionError:
+        _record_skip(skipped, location, SKIP_UNREADABLE)
+    except CircularIncludeError:
+        _record_skip(skipped, location, SKIP_CIRCULAR)
+    except ValueError:
+        _record_skip(skipped, location, SKIP_UNPARSEABLE)
+    return _UNREAD
+
+
+def _enqueue_includes(
+    data: Any,
+    abs_path: Path,
+    base_path: Path,
+    queue: deque[str],
+    skipped: SkipLog | None,
+) -> None:
+    """Queue every file this tree includes, and record the ones the walk cannot follow.
+
+    Two kinds of include leave the graph shorter than the config says it is, and
+    both were dropped without a trace: an ``!include_dir_*`` naming a directory
+    that is not there (:func:`include_dir_files` answers with an empty list,
+    which reads exactly like an empty directory — the confusion C-11 exists to
+    stop, one level down from the tag), and an include target outside the config
+    directory (refused by containment, C-3). Neither behaviour changes here.
+    """
+    for inc in _include_targets(data, abs_path.parent, base_path, skipped):
+        rel_inc = _rel_within(inc, base_path)
+        if rel_inc is None:
+            _record_skip(skipped, _rel_to(inc, base_path), SKIP_UNREADABLE)
+        else:
+            queue.append(rel_inc)
+
+
 def iter_config_trees(
     base: str | Path,
     entry_file: str = "configuration.yaml",
     *,
     contains: str | None = None,
+    skipped: SkipLog | None = None,
 ) -> Iterator[tuple[str, Path, Any]]:
     """Yield ``(location, absolute path, parsed tree)`` for every reachable config file.
 
     One breadth-first walk of the ``!include`` / ``!include_dir_*`` graph starting
     at ``entry_file``. Each file is parsed on its own (``resolve=False``) so a
-    caller can attribute what it finds to the concrete file it lives in. Files
-    that cannot be read or parsed are skipped rather than aborting the walk.
+    caller can attribute what it finds to the concrete file it lives in. A file
+    the walk cannot read is stepped over rather than aborting the walk — and
+    written to ``skipped`` when one is supplied, so the caller can tell a config
+    that holds nothing from a config this walk only partly read.
+
+    A YAML *syntax* error is the one failure that is not stepped over: ruamel
+    raises ``YAMLError``, which is not among the exceptions caught here, so it
+    propagates. That is deliberate for now — see :func:`_load_or_skip`.
 
     A file is only enqueued after its includer has been yielded, so a consumer
     that needs parent context (e.g. "``automation:`` pointed at this file") can
@@ -103,7 +263,10 @@ def iter_config_trees(
     few-hundred-KiB config costs ~0.5s, and this endpoint runs it per request,
     so the pre-filter is what keeps the scan affordable. See :func:`_may_contain`
     for exactly when a file is deemed skippable — it is deliberately
-    conservative: when in doubt, parse.
+    conservative: when in doubt, parse. Such a file is *not* recorded in
+    ``skipped``: it was read, proven incapable of holding the target or of
+    extending the graph, and dropped on the evidence — nothing about the answer
+    is partial because of it.
     """
     base_path = Path(base).resolve()
     resolver = YamlResolver(base_path)
@@ -113,24 +276,28 @@ def iter_config_trees(
     while queue:
         rel = queue.popleft()
         abs_path = (base_path / rel).resolve()
-        if str(abs_path) in seen or not abs_path.is_file():
+        if str(abs_path) in seen:
+            continue
+        location = _rel_to(abs_path, base_path)
+        if not abs_path.is_file():
+            # An `!include` naming a file that was renamed or deleted. The walk
+            # goes on — one broken include must not blind the rest of the scan —
+            # but the caller is told, because everything downstream of here
+            # reports on a config graph one file shorter than the config says.
+            _record_skip(skipped, location, SKIP_MISSING)
             continue
         seen.add(str(abs_path))
 
         if contains is not None and not _may_contain(abs_path, contains):
             continue
 
-        try:
-            data = resolver.load(rel, resolve=False)
-        except (FileNotFoundError, PermissionError, ValueError, CircularIncludeError):
+        data = _load_or_skip(resolver, rel, location, skipped)
+        if data is _UNREAD:
             continue
 
-        yield _rel_to(abs_path, base_path), abs_path, data
+        yield location, abs_path, data
 
-        for inc in _include_targets(data, abs_path.parent):
-            rel_inc = _rel_within(inc, base_path)
-            if rel_inc is not None:
-                queue.append(rel_inc)
+        _enqueue_includes(data, abs_path, base_path, queue, skipped)
 
 
 def _may_contain(path: Path, needle: str) -> bool:
@@ -175,6 +342,8 @@ def scan_yaml_for_literal(
     base: str | Path,
     target: str,
     entry_file: str = "configuration.yaml",
+    *,
+    skipped: SkipLog | None = None,
 ) -> list[ScanHit]:
     """Find every string leaf containing ``target`` as a whole token, across the config file graph.
 
@@ -184,12 +353,14 @@ def scan_yaml_for_literal(
     for why ``\\b`` boundaries are the right notion of "whole token" here.
 
     Starts from ``entry_file`` and follows ``!include`` / ``!include_dir_*``
-    directives, scanning each reachable file's own parsed tree. Files that cannot
-    be read or parsed are skipped rather than aborting the whole scan.
+    directives, scanning each reachable file's own parsed tree. A file that
+    cannot be read is skipped rather than aborting the whole scan, and named in
+    ``skipped`` when a :class:`SkipLog` is supplied — an empty hit list over a
+    config with an unreadable file means "not found *here*", not "not there".
     """
     hits = [
         ScanHit(location, path, target)
-        for location, _abs_path, data in iter_config_trees(base, entry_file, contains=target)
+        for location, _abs_path, data in iter_config_trees(base, entry_file, contains=target, skipped=skipped)
         for path in scan_tree_for_literal(data, target)
     ]
     hits.sort(key=lambda h: (h.location, h.path))
@@ -199,6 +370,8 @@ def scan_yaml_for_literal(
 def scan_yaml_for_entities(
     base: str | Path,
     entry_file: str = "configuration.yaml",
+    *,
+    skipped: SkipLog | None = None,
 ) -> list[EntityRef]:
     """Find every entity_id-shaped string leaf across the config file graph.
 
@@ -211,10 +384,15 @@ def scan_yaml_for_entities(
     This is the bulk-enumeration primitive a caller uses to validate references:
     diff the returned values against the live entity set to find dangling ones.
     It is intentionally unfiltered — the caller decides which keys are entities.
+
+    That use is exactly why ``skipped`` matters most here: the diff is a claim
+    about the whole config, and a file this walk never opened cannot contribute
+    a reference to it. Supply a :class:`SkipLog` and the caller learns whether
+    its "no dangling references" verdict covers everything.
     """
     refs = [
         EntityRef(location, render_path(match_path), _terminal_key(match_path), value)
-        for location, _abs_path, data in iter_config_trees(base, entry_file)
+        for location, _abs_path, data in iter_config_trees(base, entry_file, skipped=skipped)
         for match_path, value in _entity_leaves(data)
     ]
     refs.sort(key=lambda r: (r.location, r.path))
@@ -262,6 +440,7 @@ def replace_yaml_literal(
     entry_file: str = "configuration.yaml",
     *,
     dry_run: bool,
+    skipped: SkipLog | None = None,
 ) -> list[dict[str, str]]:
     """Rewrite every whole-token occurrence of ``target`` to ``replacement``, per file.
 
@@ -280,6 +459,12 @@ def replace_yaml_literal(
     Returns ``[{location, path, before, after}]`` for every rewritten leaf. When
     ``dry_run`` is true the report is identical but no file is written. Each
     rewritten file is backed up (see :mod:`companion.backups`) before it is saved.
+
+    A file this walk cannot read is never written — and, with a :class:`SkipLog`
+    supplied, is named in it. This is the sharp end of the whole mechanism: a
+    rename reported as done while an unread file quietly keeps the old id leaves
+    a dangling pointer behind a success message. The change list says what *was*
+    rewritten; ``skipped`` is the only thing that can say the rename was partial.
     """
     base_path = Path(base).resolve()
     resolver = YamlResolver(base_path)
@@ -291,17 +476,19 @@ def replace_yaml_literal(
     while queue:
         rel = queue.popleft()
         abs_path = (base_path / rel).resolve()
-        if str(abs_path) in seen or not abs_path.is_file():
+        if str(abs_path) in seen:
+            continue
+        location = _rel_to(abs_path, base_path)
+        if not abs_path.is_file():
+            _record_skip(skipped, location, SKIP_MISSING)
             continue
         seen.add(str(abs_path))
 
-        try:
-            data = resolver.load(rel, resolve=False)
-        except (FileNotFoundError, PermissionError, ValueError, CircularIncludeError):
-            # Missing / denied (e.g. secrets.yaml) / circular — skip, never write.
+        # Missing / denied (e.g. secrets.yaml) / circular — skip, never write.
+        data = _load_or_skip(resolver, rel, location, skipped)
+        if data is _UNREAD:
             continue
 
-        location = _rel_to(abs_path, base_path)
         match_paths = _replace_tree(data, pattern, replacement)
         if match_paths:
             for match_path in match_paths:
@@ -319,10 +506,7 @@ def replace_yaml_literal(
                 make_backup(abs_path)
                 resolver.save(rel, data)
 
-        for inc in _include_targets(data, abs_path.parent):
-            rel_inc = _rel_within(inc, base_path)
-            if rel_inc is not None:
-                queue.append(rel_inc)
+        _enqueue_includes(data, abs_path, base_path, queue, skipped)
 
     changes.sort(key=lambda c: (c["location"], c["path"]))
     return changes
@@ -448,8 +632,17 @@ def include_dir_files(directory: Path) -> list[Path]:
     return sorted(f.resolve() for f in directory.iterdir() if f.is_file() and f.suffix in _YAML_SUFFIXES)
 
 
-def _include_targets(node: Any, context_dir: Path) -> list[Path]:
-    """Absolute paths of files reachable via !include* tags in an unresolved tree."""
+def _include_targets(node: Any, context_dir: Path, base_path: Path, skipped: SkipLog | None) -> list[Path]:
+    """Absolute paths of files reachable via !include* tags in an unresolved tree.
+
+    A single ``!include`` naming a file that is not there stays a target: the
+    walk enqueues it and records it as missing when it fails to open, so the
+    location it reports is the file the config actually names. An
+    ``!include_dir_*`` naming a directory that is not there never becomes a
+    target at all — :func:`include_dir_files` answers with an empty list, which
+    is indistinguishable from an empty directory — so it is recorded here, at the
+    only point where the difference is still visible.
+    """
     targets: list[Path] = []
 
     def walk(value: Any) -> None:
@@ -469,6 +662,8 @@ def _include_targets(node: Any, context_dir: Path) -> list[Path]:
         if tag == "!include":
             targets.append(dest)
         elif tag in _INCLUDE_DIR_TAGS:
+            if not dest.is_dir():
+                _record_skip(skipped, _rel_to(dest, base_path), SKIP_MISSING)
             targets.extend(include_dir_files(dest))
 
     walk(node)
