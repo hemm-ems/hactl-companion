@@ -313,6 +313,39 @@ paths:
                           type: string
                         matched_value:
                           type: string
+                  skipped:
+                    type: array
+                    description: 'Config files this walk did not read, so the result
+                      covers less than the config does: a renamed or deleted `!include`
+                      target, a file the path guard refuses (`secrets.yaml`), an `!include_dir_*`
+                      naming a directory that is not there, an include that leaves
+                      the config directory. Present only when at least one file was
+                      skipped; absent — not empty, not null — otherwise. A client
+                      that certifies something about the whole config (no dangling
+                      references, a completed rename) must treat any entry here as
+                      "cannot certify": what is missing from the result may only be
+                      missing because it was never opened. Note a YAML syntax error
+                      is not in this list — it fails the request outright rather than
+                      being skipped.'
+                    items:
+                      type: object
+                      required:
+                      - location
+                      - reason
+                      properties:
+                        location:
+                          type: string
+                          description: Config-relative path of the file or 
+                            directory, e.g. `packages/energy.yaml` — the same 
+                            form as `location` elsewhere in this API, never an 
+                            absolute path.
+                        reason:
+                          type: string
+                          description: 'Why the file was not read: `missing` (not
+                            there), `unreadable` (refused by the path guard, by the
+                            OS, or for lying outside the config directory), `unparseable`
+                            (could not be turned into a tree), `circular` (include
+                            cycle).'
         4XX:
           $ref: '#/components/responses/Error'
         5XX:
@@ -356,6 +389,39 @@ paths:
                           type: string
                         matched_value:
                           type: string
+                  skipped:
+                    type: array
+                    description: 'Config files this walk did not read, so the result
+                      covers less than the config does: a renamed or deleted `!include`
+                      target, a file the path guard refuses (`secrets.yaml`), an `!include_dir_*`
+                      naming a directory that is not there, an include that leaves
+                      the config directory. Present only when at least one file was
+                      skipped; absent — not empty, not null — otherwise. A client
+                      that certifies something about the whole config (no dangling
+                      references, a completed rename) must treat any entry here as
+                      "cannot certify": what is missing from the result may only be
+                      missing because it was never opened. Note a YAML syntax error
+                      is not in this list — it fails the request outright rather than
+                      being skipped.'
+                    items:
+                      type: object
+                      required:
+                      - location
+                      - reason
+                      properties:
+                        location:
+                          type: string
+                          description: Config-relative path of the file or 
+                            directory, e.g. `packages/energy.yaml` — the same 
+                            form as `location` elsewhere in this API, never an 
+                            absolute path.
+                        reason:
+                          type: string
+                          description: 'Why the file was not read: `missing` (not
+                            there), `unreadable` (refused by the path guard, by the
+                            OS, or for lying outside the config directory), `unparseable`
+                            (could not be turned into a tree), `circular` (include
+                            cycle).'
         4XX:
           $ref: '#/components/responses/Error'
         5XX:
@@ -397,6 +463,39 @@ paths:
                           type: string
                         after:
                           type: string
+                  skipped:
+                    type: array
+                    description: 'Config files this walk did not read, so the result
+                      covers less than the config does: a renamed or deleted `!include`
+                      target, a file the path guard refuses (`secrets.yaml`), an `!include_dir_*`
+                      naming a directory that is not there, an include that leaves
+                      the config directory. Present only when at least one file was
+                      skipped; absent — not empty, not null — otherwise. A client
+                      that certifies something about the whole config (no dangling
+                      references, a completed rename) must treat any entry here as
+                      "cannot certify": what is missing from the result may only be
+                      missing because it was never opened. Note a YAML syntax error
+                      is not in this list — it fails the request outright rather than
+                      being skipped.'
+                    items:
+                      type: object
+                      required:
+                      - location
+                      - reason
+                      properties:
+                        location:
+                          type: string
+                          description: Config-relative path of the file or 
+                            directory, e.g. `packages/energy.yaml` — the same 
+                            form as `location` elsewhere in this API, never an 
+                            absolute path.
+                        reason:
+                          type: string
+                          description: 'Why the file was not read: `missing` (not
+                            there), `unreadable` (refused by the path guard, by the
+                            OS, or for lying outside the config directory), `unparseable`
+                            (could not be turned into a tree), `circular` (include
+                            cycle).'
         4XX:
           $ref: '#/components/responses/Error'
         5XX:

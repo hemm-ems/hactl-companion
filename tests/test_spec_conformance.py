@@ -167,6 +167,28 @@ def _seed_ref_target(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     (config_dir / "configuration.yaml").write_text("sensor:\n  value: sensor.gone\n", encoding="utf-8")
 
 
+#: What the ``skipped`` probes below expect back, spelled once. Every ref route
+#: walks the same graph, so a route that reported a different location or reason
+#: for the same broken config would be disagreeing with its siblings.
+SKIPPED_PROBE_EXPECT = [{"location": "packages/renamed.yaml", "reason": "missing"}]
+
+
+def _seed_ref_skipped(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A config graph with one `!include` naming a file that is not there.
+
+    ``skipped[]`` exists only on this branch, so without a probe that reaches it
+    the spec→producer direction could not see the field at all: it would be
+    documented, produced by nothing the suite drives, and free to be dropped by
+    the next hand that touches a ref route — the D45 shape. The target still
+    resolves in the file that *is* readable, so the probe also proves the walk
+    keeps going rather than abandoning the scan.
+    """
+    (config_dir / "configuration.yaml").write_text(
+        "automation: !include packages/renamed.yaml\nsensor:\n  value: sensor.gone\n",
+        encoding="utf-8",
+    )
+
+
 def _seed_related(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     seed_related_fixture(config_dir)
 
@@ -364,13 +386,33 @@ RESPONSE_PROBES: dict[tuple[str, str], tuple[Probe, ...]] = {
             expect={"stale": True},
         ),
     ),
-    ("GET", "/v1/ref/scan"): (Probe("/v1/ref/scan?target=sensor.gone", setup=_seed_ref_target),),
-    ("GET", "/v1/ref/entities"): (Probe("/v1/ref/entities"),),
+    # Second probe on each ref route: `skipped[]` is emitted only when the walk
+    # could not read the whole config graph, and all three routes must report it.
+    ("GET", "/v1/ref/scan"): (
+        Probe("/v1/ref/scan?target=sensor.gone", setup=_seed_ref_target),
+        Probe(
+            "/v1/ref/scan?target=sensor.gone",
+            label="skipped",
+            setup=_seed_ref_skipped,
+            expect={"skipped": SKIPPED_PROBE_EXPECT},
+        ),
+    ),
+    ("GET", "/v1/ref/entities"): (
+        Probe("/v1/ref/entities"),
+        Probe("/v1/ref/entities", label="skipped", setup=_seed_ref_skipped, expect={"skipped": SKIPPED_PROBE_EXPECT}),
+    ),
     ("POST", "/v1/ref/replace"): (
         Probe(
             "/v1/ref/replace",
             setup=_seed_ref_target,
             json_body={"old": "sensor.gone", "new": "sensor.new", "dry_run": True},
+        ),
+        Probe(
+            "/v1/ref/replace",
+            label="skipped",
+            setup=_seed_ref_skipped,
+            json_body={"old": "sensor.gone", "new": "sensor.new", "dry_run": True},
+            expect={"skipped": SKIPPED_PROBE_EXPECT},
         ),
     ),
     ("GET", "/v1/config/templates"): (Probe("/v1/config/templates"),),
