@@ -6,8 +6,12 @@ WG_COMPOSE_FILE := docker-compose.wireguard.yaml
 # check-markers — a [NEEDS ORACLE: ...] marker records an assumption about HA
 # that has not been verified against a live instance. Markers may exist on a
 # branch; they may not merge. Resolve by probing, then delete the marker.
+#
+# The exclusions are the files that *document* the rule and so must be free to
+# name the token: this Makefile, AGENTS.md, and docs/testing.md. Everywhere
+# else, naming it means owning an unresolved assumption.
 check-markers:
-	@if git grep -n --untracked "NEEDS ORACLE" -- ':!Makefile' ':!AGENTS.md'; then \
+	@if git grep -n --untracked "NEEDS ORACLE" -- ':!Makefile' ':!AGENTS.md' ':!docs/testing.md'; then \
 	  echo "ERROR: unresolved [NEEDS ORACLE] markers — probe a live HA, then remove them."; \
 	  exit 1; \
 	fi
