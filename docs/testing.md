@@ -1,235 +1,229 @@
 # hactl-companion — Testing Guide
 
-This document explains how hactl-companion is tested, what the tests verify, how to run them locally, and where coverage gaps exist.
+How hactl-companion is tested, what the tests prove, how to run them, and where the
+gaps still are.
 
-hactl-companion is a small Python (aiohttp) sidecar service that provides YAML file access to HA configuration — the one thing the HA REST/WS API cannot do. Testing it is simpler than testing hactl itself, but still requires care: the service touches the filesystem, handles security-sensitive paths, and must interoperate with a live Home Assistant instance in production.
-
----
-
-## The Two Layers
-
-Tests are organized into two layers with different scope and cost.
-
-**Unit tests** are fast, isolated, and require nothing beyond Python. They use `pytest-aiohttp`'s built-in test client to exercise every endpoint against a temporary config directory populated with YAML fixtures. No Docker, no network, no running HA. They run in under 5 seconds.
-
-**Integration tests** start a real Home Assistant instance and the companion container side-by-side using Docker Compose, sharing a `/config` volume. They exercise the full stack: Docker networking, auth middleware, filesystem operations on a real HA config directory, and interplay between the two containers.
-
-Each layer has its own `make` target and its own CI job.
+The companion is a small Python (aiohttp) sidecar that gives hactl YAML-level access to
+a Home Assistant config directory — the things HA's REST/WS API cannot do. It touches
+the filesystem, guards security-sensitive paths, and has to interoperate with a live HA.
+So the suite is not only "does this endpoint work": most of it is machinery that makes a
+rule hold for routes nobody has written yet.
 
 ---
 
-## Layer 1: Unit Tests
+## The shape of the suite
 
-Unit tests live in `tests/` (excluding `tests/integration/`). They use `pytest-aiohttp` which provides the `aiohttp_client` fixture for testing aiohttp applications without starting a real server.
+Three tiers, each with its own `make` target and its own CI job.
 
-### Running
+| Tier | Tests | Docker | Command | Time |
+|---|---|---|---|---|
+| Unit | **596** | no | `make test` | ~10s |
+| Integration | **50** | yes (HA Core + companion) | `make test-int` | ~40s warm |
+| WireGuard | **17** | yes (real WG server) | `make test-wg` | ~85s |
 
-```bash
-make test
-# equivalent: uv run pytest tests/ --ignore=tests/integration -v --tb=short
-```
-
-This takes roughly 3–5 seconds and requires only Python 3.12+ and dev dependencies.
-
-### What the unit tests cover
-
-| Test file | What it checks |
-|---|---|
-| `test_health.py` | Liveness endpoint returns `{"status": "ok", "version": "..."}`, no auth required |
-| `test_auth.py` | Bearer token validation, invalid/missing token → 401, Ingress header bypass, health exemption |
-| `test_config.py` | File listing, file read, block read, secrets exclusion, path traversal rejection |
-| `test_config_write.py` | Dry-run diff, apply with backup, validation failure restores backup, empty/invalid YAML rejected |
-| `test_resolver.py` | `!include` resolution, `!include_dir_named`, secrets include denied, circular include, null handling |
-| `test_templates.py` | Template CRUD: list, get by unique_id, create, update (dry-run + apply), delete, duplicate/missing errors |
-| `test_scripts.py` | Script CRUD: list with fields metadata, get, create, update (dry-run + apply), delete, duplicate errors |
-| `test_automations.py` | Automation CRUD: list, get by id, create, update (dry-run + apply), delete, duplicate/missing errors |
-| `test_ha.py` | HA reload endpoint: domain allowlist, subprocess mocking, error handling |
-| `test_openapi.py` | OpenAPI spec validates, all routes have spec entries, all spec entries have routes, 21 endpoints |
-| `test_cli.py` | Argument parsing: `--version`, `--help`, custom host/port, log-level |
-
-**86 unit tests** covering all 21 API endpoints plus security boundaries.
-
-### Test fixtures
-
-Fixtures live in `testdata/fixtures/` and are copied into a fresh `tmp_path` for each test:
-
-```
-testdata/fixtures/
-├── configuration.yaml    # With !include template.yaml and !include_dir_named packages
-├── template.yaml         # 2 sensors + 1 binary_sensor with unique_ids
-├── scripts.yaml          # 3 scripts (one with fields)
-├── automations.yaml      # 3 automations
-└── packages/
-    ├── energy.yaml       # Package with template sensors
-    └── security.yaml     # Package with security automations
-```
-
-The `conftest.py` creates a temporary directory for each test, copying all fixtures into it. This ensures tests never interfere with each other — mutations from write tests don't leak across test boundaries.
-
-### Security test coverage
-
-Security is tested explicitly:
-
-- **Path traversal**: Requests with `../etc/passwd` paths → 400
-- **secrets.yaml**: Read, write, include, and listing all deny access → 403
-- **Empty/invalid YAML**: Rejected before any file is written → 400
-- **Auth enforcement**: Missing/invalid tokens → 401
-- **Domain allowlist**: HA reload only accepts known integration domains → 400
+Counts are what the suite collects today, not a target.
 
 ---
 
-## Layer 2: Integration Tests
+## The part that matters: tests derived from the route table
 
-Integration tests live in `tests/integration/` and use Docker Compose to stand up the full stack.
+The 2026-07 review found the companion's worst bugs — an auth spoof, write-gate holes —
+were never a misunderstood feature. They were *route #N forgetting a rule that routes
+#1..N-1 followed*. Example-based tests cannot catch that class, because the example for
+the new route is the one nobody wrote.
 
-### Architecture
+So the cross-cutting rules are **quantified over `ENDPOINT_META`** — the same table that
+generates the OpenAPI spec and that `test_openapi.py` proves complete against the
+registered routes. Add a route, and it is covered by construction.
 
-The Docker Compose file (`docker-compose.integration.yaml`) creates:
-
-1. **homeassistant** — Official HA stable image with a shared `ha-config` volume
-2. **companion** — Built from the local Dockerfile, same shared volume, `SUPERVISOR_TOKEN` set
-
-Both containers share the `ha-net` network. The companion has direct filesystem access to HA's `/config` directory, exactly as it would in production.
-
-### Running
-
-```bash
-make test-int
-# Steps: docker compose up -d --build → pytest tests/integration → docker compose down -v
-```
-
-The first run takes 2–3 minutes (Docker pulls the HA image, ~1 GB). Subsequent runs are faster with a cached image (~60 seconds).
-
-### HA Onboarding
-
-The integration `conftest.py` automates HA's interactive onboarding:
-
-1. Wait for HA's `/api/onboarding` endpoint to respond
-2. `POST /api/onboarding/users` — create owner account
-3. Exchange `auth_code` for access token
-4. Complete `core_config` and `analytics` wizard steps
-5. Create long-lived access token via WebSocket API
-
-This produces a valid HA token that proves HA is fully started and `/config` is populated.
-
-### What the integration tests cover
-
-| Test file | What it checks |
-|---|---|
-| `test_auth.py` | Auth enforcement on a real container: no token → 401, wrong token → 401, valid token → 200, Ingress bypass |
-| `test_live.py` `TestHealth` | Health endpoint responds on the live container |
-| `test_live.py` `TestConfigRead` | File listing on real HA config, secrets exclusion, path traversal, read real `configuration.yaml` |
-| `test_live.py` `TestConfigWrite` | Dry-run no-op, write new file + verify, path traversal rejected, invalid YAML rejected |
-| `test_live.py` `TestAutomationsCRUD` | Create automations.yaml, list, get by id |
-| `test_live.py` `TestScriptsCRUD` | Create scripts.yaml, list, get by id |
-| `test_live.py` `TestTemplatesCRUD` | Create template.yaml, list, get by id |
-| `test_no_supervisor.py` | `POST /v1/ha/reload` returns 502 (no `ha` CLI in container), invalid domain → 400 |
-
----
-
-## CI/CD Enforcement
-
-The CI pipeline (`.github/workflows/ci.yml`) runs on every push to `main` and every PR targeting `main`. It has four parallel jobs:
-
-| Job | What it does | Blocks merge |
+| Module | Tests | What it enforces |
 |---|---|---|
-| **Lint** | `ruff check` + `ruff format --check` + `mypy` strict mode | Yes |
-| **Unit Tests** | `uv run pytest tests/ --ignore=tests/integration` | Yes |
-| **OpenAPI Contract** | Regenerates spec from code and diffs against committed file | Yes |
-| **Docker Build** | `docker build` — ensures the image still builds | Yes |
+| `test_invariants.py` | 133 | `INVARIANTS.md` C-1..C-12, every rule swept across the whole route table |
+| `test_spec_conformance.py` | 49 | Field-level request/response contract, both directions (C-12) |
+| `test_wiring.py` | 19 | C-10 — a create proves HA actually reads the file first |
+| `test_openapi.py` | 17 | Spec is generated from code, complete, and validates |
+| `test_versions.py` | 4 | One version across all four version-bearing files and the CHANGELOG |
 
-The release workflow (`.github/workflows/release.yml`) triggers on version tags (`v*`):
-1. Runs the unit test suite
-2. Builds multi-platform Docker images (amd64 + arm64)
-3. Pushes to GitHub Container Registry (`ghcr.io`)
+The sharpest of these is a **classification canary**: a new *mutating* route fails the
+suite until a human sorts it into `FILE_WRITES` (with a request probe) or
+`SERVICE_ENDPOINTS` (with a stated reason). You cannot add a write path and quietly skip
+the write rules — the failure is the point.
 
-### Branch protection
-
-All four CI jobs must pass before a PR can merge.
+`INVARIANTS.md` at the repo root is the prose; this is the enforcement. Read them together.
 
 ---
 
-## Running Tests Locally
+## Layer 1: unit tests
 
-The only prerequisite for unit tests is Python 3.12 and `uv`. For integration tests, you also need Docker.
+`tests/`, everything except `tests/integration/`. They use `pytest-aiohttp`'s
+`aiohttp_client` against a temp config dir — no Docker, no network, no HA.
 
-| Goal | Command | Docker needed | Approx. time |
+```bash
+make test     # uv run pytest tests/ --ignore=tests/integration -v --tb=short
+```
+
+Beyond the derived modules above, by concern:
+
+| Concern | Modules | Tests |
+|---|---|---|
+| Routes & CRUD | `test_automations` `test_scripts` `test_templates` `test_helpers` `test_config` `test_config_write` `test_ha` `test_health` `test_status` `test_root` `test_logs` | 124 |
+| WireGuard | `test_wireguard` `test_wg_dns` `test_wg_monitor` `test_wg_supervisor` | 110 |
+| Reference scanning | `test_refscan` `test_refscan_routes` `test_refscan_skipped` `test_related` | 80 |
+| Plumbing | `test_resolver` `test_core_api` `test_cli` `test_reload_error` `test_backups` `test_main` | 42 |
+| Security | `test_auth` `test_pathguard` `test_paths` | 18 |
+
+### Fixtures
+
+`testdata/fixtures/` is copied into a fresh `tmp_path` per test, so write tests cannot
+leak into each other:
+
+```
+configuration.yaml      # !include template.yaml + !include_dir_named packages
+template.yaml           scripts.yaml           automations.yaml
+counter.yaml            timer.yaml             input_boolean.yaml  input_number.yaml
+home-assistant.log      packages/{energy,security}.yaml
+```
+
+`testdata/wireguard/` holds the WG server image and entrypoint used by the tunnel tier.
+
+### Security is tested as a rule, not a case
+
+Path traversal → 400, `secrets.yaml` (read/write/include/list) → 403, missing or invalid
+token → 401, fail-closed when no token is configured, empty/invalid YAML refused before
+anything is written. These are C-1, C-2, C-3 and C-8 in `test_invariants.py`, so they
+apply to every route in the table rather than to the handful someone remembered.
+
+---
+
+## Layer 2: integration tests
+
+`tests/integration/`, via `docker-compose.integration.yaml`: an official HA image and the
+companion built from the local Dockerfile, sharing the `ha-config` volume on `ha-net`.
+The companion sees HA's real `/config`, exactly as in production.
+
+```bash
+make test-int     # down -v → pytest → down -v, always torn down
+```
+
+`conftest.py` drives HA's onboarding headlessly — wait for `/api/onboarding`, create the
+owner, exchange `auth_code` for a token, finish `core_config` and `analytics`, then mint a
+long-lived token over WebSocket. Getting a token is itself the proof that HA is up and
+`/config` is populated.
+
+| Module | Tests | Covers |
+|---|---|---|
+| `test_live.py` | 43 | status, root, health, config read/write, `ref replace`, HA reload, automation/helper/script/template CRUD, startup + access logs, include wiring |
+| `test_auth.py` | 5 | auth on a real container: no/wrong token → 401, health exempt, and a **client-supplied `X-Ingress-Path` does not bypass auth** — the 2026-07 spoof, pinned |
+| `test_related.py` | 2 | the related-entity graph, reconciled against HA's own `search/related` (C-9) |
+
+That last one is worth naming: the graph is not compared to a fixture we wrote, it is
+compared to **HA's own answer**. A fixture only proves we still agree with ourselves.
+
+---
+
+## Layer 3: WireGuard
+
+`make test-wg` uses a separate compose file to stand up a **real WireGuard server**
+container and bring a real tunnel up — handshake, dyndns re-resolution, supervisor
+restart behaviour. 17 tests, its own CI job, and a separate compose teardown.
+
+---
+
+## Gates and CI
+
+`make lint` runs `check-markers` first, then `ruff check`, `ruff format --check`, and
+`mypy`.
+
+**`check-markers` is the spec-before-code gate.** A `[NEEDS ORACLE: ...]` marker records
+an assumption about HA that has not been checked against a live instance. Markers are
+fine on a branch; they may not merge. You clear one by probing a real HA and deleting it —
+not by deleting the doubt. The ordering ritual itself lives in the workspace `AGENTS.md`.
+
+CI (`.github/workflows/ci.yml`) runs on every push to `main` and every PR into it:
+
+| Job | What it does |
+|---|---|
+| Lint | markers + ruff + format check + mypy |
+| Unit Tests | the 596 |
+| OpenAPI Contract | regenerates the spec from code and diffs it against the committed file |
+| Docker Build | the image still builds |
+| Integration Tests | the Docker tier, matrixed over HA **stable** and **prev** |
+| WireGuard Integration | the tunnel tier |
+| All Gates Green | aggregator — verifies every job above actually succeeded |
+
+Plus CodeQL (`codeql.yml`) contributing `CodeQL` and `Analyze`.
+
+**Branch protection on `main`** requires `All Gates Green`, `CodeQL` and `Analyze`, with
+`strict: true` (branch must be current) and **`enforce_admins: true`** — direct pushes to
+`main` do not work for anyone. Every change goes through a PR whose checks pass.
+
+The spec is **generated**: edit `companion/openapi.py` and run `make spec`. Never
+hand-edit `openapi/companion-v1.yaml` — `test_openapi.py` and the CI job both enforce it,
+and hactl vendors a pinned copy of that file.
+
+---
+
+## Running locally
+
+| Goal | Command | Docker | Time |
 |---|---|---|---|
-| Quick sanity check | `make test` | No | ~5 seconds |
-| Lint + type check | `make lint` | No | ~3 seconds |
-| Full integration suite | `make test-int` | Yes | ~2 min first, ~60s cached |
-| Regenerate OpenAPI spec | `make spec` | No | ~1 second |
-| Format code | `make fmt` | No | ~1 second |
+| Quick check | `make test` | no | ~10s |
+| Lint + types + markers | `make lint` | no | ~5s |
+| Integration suite | `make test-int` | yes | ~40s warm |
+| WireGuard suite | `make test-wg` | yes | ~85s |
+| Regenerate spec | `make spec` | no | ~1s |
+| Format | `make fmt` | no | ~1s |
+| Tear down strays | `make clean` | yes | — |
 
-**Prerequisites check**:
+Prerequisites: Python 3.12+ and `uv`; Docker for the two container tiers.
+
+**Troubleshooting**
+
+- *`aiohttp_client` fixture missing* — `uv sync --extra dev`.
+- *First integration run is slow* — it pulls the HA image (~1 GB). Pre-pull with
+  `docker pull ghcr.io/home-assistant/home-assistant:stable`.
+- *Compose fails instantly* — check `docker info` first; a stopped daemon reports as a
+  build failure, not as "Docker is off".
+- *Strays after an interrupted run* — `make clean` tears down both compose files.
+
+---
+
+## Honest gaps
+
+Stated so this page is not read as exhaustive-by-omission.
+
+- **No real Supervisor.** The stack is HA Core plus the companion; `conftest.py` says so
+  outright and hands the companion a synthetic `SUPERVISOR_TOKEN`. Supervisor-proxy calls
+  are exercised against Core directly, so add-on-install and Ingress specifics are proven
+  only at the unit level.
+- **No HA `dev` leg.** The matrix is `stable` and `prev`. hactl tests against `dev` too,
+  so a breaking Core change lands there first, not here.
+- **Scale is untested.** Fixtures are small. A config with hundreds of automations, or a
+  very large single YAML, has no coverage — neither for correctness nor for time.
+- **Backups are not atomic.** Concurrent writes are now tested for *corruption*
+  (`test_concurrent_writes_no_corruption`, last-write-wins cleanly), but the
+  backup-then-write sequence is still not a transaction.
+
+Closed since this page was last honest (2026-05-18), recorded so nobody re-opens them:
+concurrent writes are covered; every `!include_dir_*` variant is implemented and an
+unknown tag is a hard error rather than a shrug (C-11); the `ha` CLI is gone from the
+write path entirely — config validation goes through `POST /config/core/check_config` on
+the core API.
+
+---
+
+## Quick reference
 
 ```bash
-# Python + uv
-uv --version
-python --version  # must be 3.12+
+make test        # 596 unit tests, no Docker
+make lint        # markers + ruff + format + mypy
+make fmt         # auto-format
+make spec        # regenerate the OpenAPI spec from code
 
-# Docker (only for integration tests)
-docker info
+make test-int    # 50 integration tests, HA Core + companion
+make test-wg     # 17 WireGuard tests, real tunnel
+make clean       # tear down both compose stacks
 ```
 
-**Troubleshooting**:
-
-- *`aiohttp_client` fixture not found*: Run `uv sync --extra dev` to install `pytest-aiohttp`.
-- *Docker Compose fails*: Ensure Docker daemon is running and no port conflicts exist.
-- *HA container times out*: First start downloads ~1 GB image. Increase timeout or pre-pull: `docker pull ghcr.io/home-assistant/home-assistant:stable`.
-- *Orphaned containers*: `make clean` or `docker compose -f docker-compose.integration.yaml down -v`.
-
----
-
-## What Is Covered
-
-| Feature | Unit | Integration |
-|---|---|---|
-| Health endpoint | ✓ | ✓ |
-| Auth middleware | ✓ | ✓ |
-| Config file list | ✓ | ✓ |
-| Config file read | ✓ | ✓ |
-| Config file write (dry-run + apply) | ✓ | ✓ |
-| Config block read | ✓ | — |
-| `!include` resolution | ✓ | — |
-| `!include_dir_named` resolution | ✓ | — |
-| Template CRUD | ✓ | ✓ |
-| Script CRUD | ✓ | ✓ |
-| Automation CRUD | ✓ | ✓ |
-| HA reload | ✓ | ✓ (502) |
-| Path traversal blocked | ✓ | ✓ |
-| secrets.yaml denied | ✓ | ✓ |
-| Backup creation | ✓ | ✓ |
-| OpenAPI spec validity | ✓ | — |
-| CLI arg parsing | ✓ | — |
-| Docker image builds | — | ✓ (CI) |
-
----
-
-## Honest Gaps
-
-- **Concurrent writes**: No tests verify behaviour when two requests write the same file simultaneously. The backup mechanism is not atomic.
-- **Large files**: Fixtures are small. Performance on a real HA config with hundreds of automations is untested.
-- **HA version matrix**: Integration tests run against `stable` only. Changes in HA's default `configuration.yaml` format could surface issues.
-- **`!include_dir_list` and `!include_dir_merge_named`**: Implemented and unit-tested via the resolver, but no dedicated integration test exercises them against a real HA directory.
-- **Config validation fallback**: The `_validate_config()` function calls `ha core check-config`, which is only available in HAOS. The fallback (skip validation) is tested, but the success path is not exercised in CI.
-- **WebSocket/streaming**: The companion does not use WebSocket, but if HA ever changes how it populates `/config`, the companion would not know.
-
----
-
-## Quick Reference
-
-```bash
-# Development workflow
-make test                    # Unit tests only (~5s)
-make lint                    # ruff + mypy
-make fmt                     # Auto-format
-make spec                    # Regenerate OpenAPI spec
-
-# Integration testing
-make test-int                # Full Docker Compose cycle (~2 min)
-make clean                   # Tear down orphaned containers
-
-# CI pipeline (runs automatically on push/PR)
-# Lint → Unit Tests → OpenAPI Contract → Docker Build
-```
+CI: Lint · Unit · OpenAPI Contract · Docker Build · Integration (stable, prev) ·
+WireGuard · All Gates Green — plus CodeQL and Analyze.
