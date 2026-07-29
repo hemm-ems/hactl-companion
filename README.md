@@ -113,7 +113,11 @@ docker compose -f docker-compose.integration.yaml down -v
 
 ## hactl integration
 
-For instructions on implementing companion support in the hactl Go CLI (downloading from GitHub, Docker test setup, Go client, end-to-end tests), see [HACTL_INTEGRATION.md](HACTL_INTEGRATION.md).
+The interface between this add-on and the hactl Go CLI — which capabilities need the companion
+at all, and the shape of every endpoint — is defined by the API contract in the hactl repo:
+[docs/HACTL_INTEGRATION.md](https://github.com/hemm-ems/hactl/blob/main/docs/HACTL_INTEGRATION.md).
+The OpenAPI spec in [`openapi/`](openapi/) is generated from this repo's routes and is what both
+sides test against.
 
 ## License
 
