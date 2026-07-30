@@ -344,6 +344,20 @@ def test_every_file_write_declares_a_wiring_stance() -> None:
     assert CREATES, "no create routes carry a 'wiring' declaration — did the probe table lose its C-10 coverage?"
 
 
+def _inline_domain(config_dir: Path, domain: str) -> None:
+    """Replace the domain's include with an inline mapping.
+
+    The layout that produced the defect: the domain *is* configured, HA does
+    read it, and there is still no file this route can append to. It is invisible
+    to a "does configuration.yaml mention the domain?" check, which is exactly
+    why the preview must ask the same function the create asks.
+    """
+    _unwire_domain(config_dir, domain)
+    config_path = config_dir / "configuration.yaml"
+    with config_path.open("a", encoding="utf-8") as f:
+        f.write(f"\n{domain}:\n  probe_inline_entry:\n    name: Inline\n")
+
+
 def _unwire_domain(config_dir: Path, domain: str) -> None:
     """Delete every ``<domain>:``/``<domain> <label>:`` line from configuration.yaml.
 
@@ -386,3 +400,53 @@ async def test_create_refuses_when_configuration_does_not_include_the_file(
     assert domain in body["error"]["message"], f"refusal does not name the missing key: {body}"
 
     assert _snapshot(config_dir) == before, f"{method} {path}: refused the create but still modified files on disk"
+
+
+@pytest.mark.parametrize(("method", "path"), _params(CREATES.keys()))
+async def test_wiring_probe_agrees_with_the_create_it_predicts(
+    client: TestClient, auth_headers: dict[str, str], config_dir: Path, method: str, path: str
+) -> None:
+    """C-10, asked in advance: the probe's verdict is the create's verdict, on every layout.
+
+    hactl's H-2 says a preview fails exactly where the confirmed run would. It
+    could not: the layout check lived inside the create, so `helper create`'s
+    dry run printed "would create" for all eight domains on an instance where
+    all eight `--confirm` runs were a deterministic 400 (`input_boolean:` inline
+    in configuration.yaml). A client can only keep that promise if it can ask
+    the question, so `GET /v1/config/wiring` answers it — and this asserts the
+    two answers are *equal*, over every create route in the probe table and
+    every layout, rather than pinning two hand-written expectations that could
+    drift apart one release later.
+
+    The reason is compared verbatim: a preview that fails for the same input but
+    explains it differently sends the operator somewhere else than the confirmed
+    run would have.
+    """
+    probe = CREATES[(method, path)]
+    domain = probe["wiring"]["domain"]
+    kwargs = _request_kwargs(probe, auth_headers)
+
+    for layout, apply_layout in (
+        ("wired", lambda: None),
+        ("inline", lambda: _inline_domain(config_dir, domain)),
+        ("absent", lambda: _unwire_domain(config_dir, domain)),
+    ):
+        apply_layout()
+
+        answer = await client.get(f"/v1/config/wiring?domain={domain}", headers=auth_headers)
+        assert answer.status == 200, f"[{layout}] probe failed: {await answer.text()}"
+        verdict = await answer.json()
+
+        create = await client.request(method, probe["url"], **kwargs)
+        created = create.status == 201
+
+        assert verdict["wired"] == created, (
+            f"{method} {path} [{layout}]: probe said wired={verdict['wired']} but the create answered "
+            f"{create.status} — a preview built on this probe would lie in exactly that direction"
+        )
+        if not created:
+            assert verdict["reason"] == (await create.json())["error"]["message"], (
+                f"{method} {path} [{layout}]: probe and create refuse for the same reason but say it differently"
+            )
+        else:
+            assert verdict["file"], f"{method} {path} [{layout}]: wired verdict names no file"

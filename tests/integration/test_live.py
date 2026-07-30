@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import re
 import subprocess
 import time
@@ -984,3 +985,201 @@ class TestIncludeWiring:
         )
         assert r.status_code == 200, "the escape hatch must stay open for exactly the file we refuse to resolve"
         assert "!include_dir_merge_flat" in r.json()["content"]
+
+
+# ---------------------------------------------------------------------------
+# Storage-backed helpers and the create-layout probe, against the live HA
+# ---------------------------------------------------------------------------
+
+#: Minimal `<domain>/create` payloads for every helper domain this service can
+#: read. Only the fields HA requires — the point is what HA writes back, not
+#: what we send.
+UI_HELPER_CREATES: dict[str, dict[str, object]] = {
+    "input_boolean": {"name": "Live Bool", "icon": "mdi:toggle-switch"},
+    "input_number": {"name": "Live Number", "min": 0, "max": 100},
+    "input_select": {"name": "Live Select", "options": ["a", "b"]},
+    "input_text": {"name": "Live Text"},
+    "input_datetime": {"name": "Live Datetime", "has_date": True, "has_time": True},
+    "input_button": {"name": "Live Button"},
+    "counter": {"name": "Live Counter"},
+    "timer": {"name": "Live Timer", "duration": "00:05:00"},
+    "schedule": {"name": "Live Schedule", "monday": [{"from": "08:00:00", "to": "17:00:00"}]},
+}
+
+
+def _wait_for_helper(companion_url: str, auth_headers: dict[str, str], helper_id: str, timeout: int = 60):
+    """Poll GET /v1/config/helper until it answers 200, or fail with the last body.
+
+    HA persists a collection change to `.storage` on a delay, so a helper made a
+    moment ago is genuinely not on disk yet. That freshness window is a property
+    of HA, not of this lookup; the retry is here so the test measures the lookup.
+    """
+    deadline = time.monotonic() + timeout
+    last = None
+    while time.monotonic() < deadline:
+        last = requests.get(
+            f"{companion_url}/v1/config/helper", params={"id": helper_id}, headers=auth_headers, timeout=15
+        )
+        if last.status_code == 200:
+            return last
+        time.sleep(2)
+    raise AssertionError(
+        f"{helper_id} never became readable: {last.status_code if last else '-'} {last.text if last else ''}"
+    )
+
+
+class TestStorageHelpers:
+    """A helper made the normal way — in HA's UI — must be readable here.
+
+    On a UI-managed instance every helper is storage-backed, so a lookup that
+    only searched the YAML files answered "Helper not found" for 100% of them
+    while the listing beside it enumerated them all.
+    """
+
+    def test_ui_created_helpers_are_readable_in_every_domain(
+        self,
+        companion_url: str,
+        auth_headers: dict[str, str],
+        ha_ws_command,
+        ha_url: str,
+        ha_token: str,
+        _ha_ready: None,
+    ) -> None:
+        """HA creates them, HA names them, and this service must find every one.
+
+        The expected entity_id and definition come from HA's own create result
+        and its live state at test time — never from a fixture, which could be
+        wrong in the same direction as the code that reads it.
+        """
+        created: dict[str, dict] = {}
+        try:
+            for domain, payload in UI_HELPER_CREATES.items():
+                created[domain] = ha_ws_command(f"{domain}/create", **payload)
+
+            for domain, item in created.items():
+                entity_id = f"{domain}.{item['id']}"
+                state = requests.get(
+                    f"{ha_url}/api/states/{entity_id}",
+                    headers={"Authorization": f"Bearer {ha_token}"},
+                    timeout=15,
+                )
+                assert state.status_code == 200, f"HA did not materialise {entity_id}: {state.text}"
+
+                resp = _wait_for_helper(companion_url, auth_headers, entity_id)
+                body = resp.json()
+                assert body["id"] == entity_id
+                assert body["domain"] == domain
+                assert body["source"] == "storage", f"{entity_id} reported source={body['source']}"
+                assert str(item["name"]) in body["content"], (
+                    f"{entity_id}: definition does not carry the name HA reports: {body['content']}"
+                )
+
+                bare = requests.get(
+                    f"{companion_url}/v1/config/helper",
+                    params={"id": item["id"]},
+                    headers=auth_headers,
+                    timeout=15,
+                )
+                assert bare.status_code == 200, f"collection id {item['id']} did not resolve: {bare.text}"
+        finally:
+            for domain, item in created.items():
+                # Cleanup is best-effort: a helper that never appeared must not
+                # replace the real failure with a teardown error.
+                with contextlib.suppress(AssertionError):
+                    ha_ws_command(f"{domain}/delete", **{f"{domain}_id": item["id"]})
+
+    def test_the_write_half_explains_instead_of_denying(
+        self, companion_url: str, auth_headers: dict[str, str], ha_ws_command, _ha_ready: None
+    ) -> None:
+        """DELETE cannot act on a UI helper — and must say why, now that GET finds it.
+
+        hactl resolves a delete target through GET before printing its plan, so a
+        GET that resolves storage helpers while DELETE answers a bare 404 would
+        turn a correct refusal into a confident plan for an impossible delete.
+        """
+        item = ha_ws_command("input_boolean/create", name="Live Refusal Probe")
+        entity_id = f"input_boolean.{item['id']}"
+        try:
+            _wait_for_helper(companion_url, auth_headers, entity_id)
+            r = requests.delete(
+                f"{companion_url}/v1/config/helper", params={"id": entity_id}, headers=auth_headers, timeout=30
+            )
+            assert r.status_code == 409, f"answered {r.status_code}: {r.text}"
+            assert "storage" in r.json()["error"]["message"]
+
+            still = requests.get(
+                f"{companion_url}/v1/config/helper", params={"id": entity_id}, headers=auth_headers, timeout=15
+            )
+            assert still.status_code == 200, "the refused delete removed the helper anyway"
+        finally:
+            ha_ws_command("input_boolean/delete", input_boolean_id=item["id"])
+
+
+class TestWiringProbeAgreesWithTheCreate:
+    """H-2 across the wire: what the probe predicts is what the create does.
+
+    The unit tier sweeps this over every create route with a synthetic config
+    dir. This is the layout that produced the defect on a real instance —
+    `input_boolean:` written inline in configuration.yaml, which HA accepts and
+    loads, so nothing short of the actual wiring resolution can tell that a
+    create is impossible.
+    """
+
+    def test_inline_and_included_layouts_predict_their_own_create(
+        self, companion_url: str, auth_headers: dict[str, str], _ha_ready: None
+    ) -> None:
+        original = _read_config_file(companion_url, auth_headers, "configuration.yaml")
+        assert original is not None
+        stripped = _strip_domain_keys(original, "input_boolean")
+
+        def probe() -> dict:
+            r = requests.get(
+                f"{companion_url}/v1/config/wiring",
+                params={"domain": "input_boolean"},
+                headers=auth_headers,
+                timeout=15,
+            )
+            assert r.status_code == 200, r.text
+            return dict(r.json())
+
+        def create(helper_id: str) -> requests.Response:
+            return requests.post(
+                f"{companion_url}/v1/config/helper",
+                params={"domain": "input_boolean"},
+                data=f"{helper_id}:\n  name: Wiring Parity Probe\n",
+                headers={**auth_headers, "Content-Type": "text/plain"},
+                timeout=30,
+            )
+
+        try:
+            inline = stripped.rstrip("\n") + "\ninput_boolean:\n  live_inline_flag:\n    name: Live Inline\n"
+            assert _write_config_file(companion_url, auth_headers, "configuration.yaml", inline).status_code == 200, (
+                "HA rejected an inline input_boolean mapping — then this is not the layout the real instance has"
+            )
+            verdict = probe()
+            attempt = create("parity_probe_inline")
+            assert verdict["wired"] is False, f"probe called an inline layout wired: {verdict}"
+            assert attempt.status_code == 400, f"create succeeded on an inline layout: {attempt.text}"
+            assert verdict["reason"] == attempt.json()["error"]["message"], (
+                "probe and create refuse the same layout with different explanations"
+            )
+
+            assert (
+                _write_config_file(companion_url, auth_headers, "input_boolean.yaml", "# parity probe\n").status_code
+                == 200
+            )
+            wired = stripped.rstrip("\n") + "\ninput_boolean: !include input_boolean.yaml\n"
+            assert _write_config_file(companion_url, auth_headers, "configuration.yaml", wired).status_code == 200
+            verdict = probe()
+            attempt = create("parity_probe_included")
+            assert verdict["wired"] is True, f"probe called a wired layout unwired: {verdict}"
+            assert attempt.status_code == 201, f"create refused a wired layout: {attempt.text}"
+            assert verdict["file"] == "input_boolean.yaml", verdict
+        finally:
+            requests.delete(
+                f"{companion_url}/v1/config/helper",
+                params={"id": "parity_probe_included"},
+                headers=auth_headers,
+                timeout=30,
+            )
+            _write_config_file(companion_url, auth_headers, "configuration.yaml", original)

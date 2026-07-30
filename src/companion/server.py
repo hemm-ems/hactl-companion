@@ -26,6 +26,7 @@ from companion.routes import (
     status,
     templates,
     wireguard,
+    wiring,
 )
 from companion.yaml_resolver import UnknownIncludeTagError
 
@@ -202,5 +203,6 @@ def create_app(config_base_path: str = "/config") -> web.Application:
     register_routes(app, logs)
     register_routes(app, related)
     register_routes(app, refscan)
+    register_routes(app, wiring)
 
     return app

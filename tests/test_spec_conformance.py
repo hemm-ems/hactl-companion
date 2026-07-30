@@ -55,9 +55,11 @@ from companion.routes import (
     status,
     templates,
     wireguard,
+    wiring,
 )
 from tests.conftest import FIXTURES_DIR
 from tests.related_fixture import SOURCE_ENTITY_ID, seed_related_fixture
+from tests.storage_fixture import seed_storage_helpers
 
 
 def _to_jsonschema(schema: Any) -> Any:
@@ -187,6 +189,20 @@ def _seed_ref_skipped(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None
         "automation: !include packages/renamed.yaml\nsensor:\n  value: sensor.gone\n",
         encoding="utf-8",
     )
+
+
+def _seed_storage_helpers(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A helper created in HA's UI — the only kind a normally-configured instance has."""
+    seed_storage_helpers(config_dir, ["input_boolean"])
+
+
+def _seed_unwired_script(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Drop the `script:` include, so the probe answers with a reason instead of a file."""
+    config = config_dir / "configuration.yaml"
+    kept = [
+        line for line in config.read_text(encoding="utf-8").splitlines(keepends=True) if not line.startswith("script")
+    ]
+    config.write_text("".join(kept), encoding="utf-8")
 
 
 def _seed_related(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -494,7 +510,17 @@ RESPONSE_PROBES: dict[tuple[str, str], tuple[Probe, ...]] = {
         (Probe("/v1/config/automation?id=automation.door_light"),)
     ),
     ("GET", "/v1/config/helpers"): (Probe("/v1/config/helpers"),),
-    ("GET", "/v1/config/helper"): (Probe("/v1/config/helper?id=guest_mode"),),
+    # Both sources, because they are two branches of one route and only the
+    # second one is the shape a UI-managed instance actually has.
+    ("GET", "/v1/config/helper"): (
+        Probe("/v1/config/helper?id=guest_mode", label="yaml", expect={"source": "yaml"}),
+        Probe(
+            "/v1/config/helper?id=input_boolean.probe_bool",
+            label="storage",
+            setup=_seed_storage_helpers,
+            expect={"source": "storage"},
+        ),
+    ),
     # P2-3: entity_id/reloaded/entity_created were produced but undocumented.
     ("POST", "/v1/config/helper"): _with_reload_failure(
         (Probe("/v1/config/helper?domain=input_boolean", data="probe_helper:\n  name: Probe\n"),)
@@ -503,6 +529,17 @@ RESPONSE_PROBES: dict[tuple[str, str], tuple[Probe, ...]] = {
         (Probe("/v1/config/helper?id=guest_mode", data="name: Probe 2\n"),)
     ),
     ("DELETE", "/v1/config/helper"): _with_reload_failure((Probe("/v1/config/helper?id=guest_mode"),)),
+    # `file` and `reason` are mutually exclusive branches: one probe alone would
+    # leave the other documented and produced by nothing (the D45 shape).
+    ("GET", "/v1/config/wiring"): (
+        Probe("/v1/config/wiring?domain=script", label="wired", expect={"wired": True, "file": "scripts.yaml"}),
+        Probe(
+            "/v1/config/wiring?domain=script",
+            label="unwired",
+            setup=_seed_unwired_script,
+            expect={"wired": False},
+        ),
+    ),
     ("POST", "/v1/ha/reload/{domain}"): (Probe("/v1/ha/reload/automation"),),
     ("POST", "/v1/ha/check-config"): (Probe("/v1/ha/check-config"),),
     ("GET", "/v1/logs"): (Probe("/v1/logs?component=wireguard", setup=_seed_logbuffer),),
@@ -631,7 +668,7 @@ async def test_route_response_conformance(
 
 _QUERY_READ_RE = re.compile(r"request\.query(?:\.get\(|\[)\s*[\"']([a-zA-Z_]+)[\"']")
 
-_ROUTE_MODULES = [config, related, refscan, templates, scripts, automations, helpers, status, logs, wireguard]
+_ROUTE_MODULES = [config, related, refscan, templates, scripts, automations, helpers, status, logs, wireguard, wiring]
 
 
 @pytest.mark.parametrize("module", _ROUTE_MODULES, ids=lambda m: m.__name__.rsplit(".", 1)[-1])
