@@ -400,3 +400,32 @@ def test_backup_is_written_on_both_paths(tmp_path: Path) -> None:
         backups = list((target / BACKUP_DIRNAME).glob("target.yaml.bak.*"))
         assert len(backups) == 1
         assert backups[0].read_text(encoding="utf-8") == text
+
+
+@pytest.mark.parametrize("index", [0, 2], ids=["first", "last"])
+def test_deleting_an_entry_at_either_end_keeps_the_file_s_own_comments(tmp_path: Path, index: int) -> None:
+    """The ends are where the span arithmetic has no neighbour to bound it.
+
+    Deleting the last entry bounds the span at EOF, so the trailing comment is
+    inside it unless the scan back over blank and comment lines is right; the
+    first entry has the header comment directly above its own first line.
+    """
+    after, surgical = _write(tmp_path, HOSTILE_LIST, lambda d: d.pop(index), Edit("delete", index))
+    assert surgical
+    assert "# Hand-maintained automations. Do not let a tool eat this comment." in after
+    assert "# dangling comment at end of file" in after
+    assert len(_load(after)) == 2
+
+
+def test_deleting_the_only_entry_falls_back_rather_than_guessing(tmp_path: Path) -> None:
+    """Emptying a file leaves nothing for a top-level list to be parsed from.
+
+    The splice would leave only comments, which reads back as ``None`` rather
+    than the empty list the route means to write — the verification sees the
+    difference and the whole-file dump produces a file that is honestly empty.
+    Recorded because deleting your last automation is a real thing to do.
+    """
+    single = "# a comment\n- id: only\n  alias: Only\n"
+    after, surgical = _write(tmp_path, single, lambda d: d.pop(0), Edit("delete", 0))
+    assert not surgical
+    assert _load(after) == []
