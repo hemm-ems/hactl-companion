@@ -10,6 +10,16 @@ share one trigger set.
 This module keeps that block structure intact. In particular ``post_template``
 must not (a) nest a trigger inside an entity item, nor (b) merge a plain
 state-based entity into an existing trigger-based block — both corrupt the file.
+
+**The top-level list item is Home Assistant's blast radius.** Measured against a
+live HA (2026.7, throwaway container, config rewritten and HA restarted between
+rounds — see :func:`_new_bare_item_block`): when one entity in a block fails
+schema validation, HA drops the *entire* top-level list item. Its valid siblings
+do not merely go stale — they leave the state machine and come back as
+``unavailable`` with ``restored: true``. Entities in a *different* top-level item
+are untouched. So which block an entry is written into decides whose entities a
+later mistake can take down, and this module never writes into a block it did
+not create.
 """
 
 from __future__ import annotations
@@ -179,6 +189,52 @@ def _save_templates(target: Any, data: list[Any]) -> None:
         yaml.dump(data, f)
 
 
+def _append_block(target: Any, data: list[Any], block: dict[str, Any]) -> None:
+    """Append one top-level block as *text*, leaving every existing byte alone.
+
+    A create adds an item at the end, so it has no business re-emitting the rest
+    of the file — but ``yaml.dump(data)`` does exactly that, in the dumper's own
+    style rather than the file's. The fixture's four-space sequence indent comes
+    back as two, which means an append at the end rewrites every untouched block
+    above it: semantically lossless, and still the reformat-the-whole-file
+    behaviour this project treats as a defect elsewhere. Round-tripping cannot
+    fix it in general (a file may mix styles), so the create does not
+    round-trip.
+
+    Text concatenation can only ever be wrong by producing a file that no longer
+    parses as ``old + [block]`` — a flow-style top-level list is the plausible
+    case — so that is checked directly, and the structural dump remains the
+    fallback for it.
+    """
+    from pathlib import Path
+
+    from companion.backups import make_backup
+
+    path = Path(target)
+    original = path.read_text(encoding="utf-8")
+
+    stream = StringIO()
+    yaml.dump([block], stream)
+    appended = original + ("" if not original or original.endswith("\n") else "\n") + stream.getvalue()
+
+    if not _parses_as_appended(appended, data, block):
+        data.append(block)
+        _save_templates(target, data)
+        return
+
+    make_backup(path)
+    path.write_text(appended, encoding="utf-8")
+
+
+def _parses_as_appended(text: str, data: list[Any], block: dict[str, Any]) -> bool:
+    """True if ``text`` reads back as exactly ``data`` with ``block`` appended."""
+    try:
+        reparsed = yaml.load(StringIO(text))
+    except Exception:
+        return False
+    return isinstance(reparsed, list) and len(reparsed) == len(data) + 1 and reparsed[-1] == block
+
+
 async def get_templates(request: web.Request) -> web.Response:
     """GET /v1/config/templates — list all template sensor definitions."""
     base = request.app["config_base_path"]
@@ -288,8 +344,9 @@ async def post_template(request: web.Request) -> web.Response:
 
     Accepts two input shapes:
 
-    * a **bare entity item** (``unique_id`` + ``state`` + …), placed into a
-      state-based block for ``?domain=`` (the legacy shape); or
+    * a **bare entity item** (``unique_id`` + ``state`` + …), appended as a new
+      state-based block of its own for ``?domain=`` (the legacy shape) — never
+      merged into a block it did not write, see :func:`_new_bare_item_block`; or
     * a **full block** (declares any template entity domain — ``sensor:``,
       ``number:``, ``select:``, ``button:``, ``weather:``, … — optionally with
       block-level ``triggers:``/``actions:``/``conditions:``), appended verbatim
@@ -316,11 +373,11 @@ async def post_template(request: web.Request) -> web.Response:
     existing_ids = _all_unique_ids(data)
 
     if _is_block(new_item):
-        first_uid = _create_block(data, new_item, existing_ids)
+        block, first_uid = _new_block(new_item, existing_ids)
     else:
-        first_uid = _create_bare_item(request, data, new_item, existing_ids)
+        block, first_uid = _new_bare_item_block(request, new_item, existing_ids)
 
-    _save_templates(target, data)
+    _append_block(target, data, block)
     reload = await core_api.reload_domain("template")
     return web.json_response(
         {"status": "created", "unique_id": first_uid, **core_api.reload_fields(reload)},
@@ -328,8 +385,8 @@ async def post_template(request: web.Request) -> web.Response:
     )
 
 
-def _create_block(data: list[Any], block: dict[str, Any], existing_ids: set[str]) -> str:
-    """Append a full block verbatim as its own list item. Returns first unique_id."""
+def _new_block(block: dict[str, Any], existing_ids: set[str]) -> tuple[dict[str, Any], str]:
+    """A full block, verbatim, as its own list item. Returns (block, first unique_id)."""
     new_ids = _block_unique_ids(block)
     if not new_ids:
         raise web.HTTPBadRequest(text="Template block must define at least one entity with a unique_id")
@@ -338,12 +395,46 @@ def _create_block(data: list[Any], block: dict[str, Any], existing_ids: set[str]
     if dup is not None:
         raise web.HTTPConflict(text=f"Template with unique_id already exists: {dup}")
 
-    data.append(block)
-    return new_ids[0]
+    return block, new_ids[0]
 
 
-def _create_bare_item(request: web.Request, data: list[Any], item: dict[str, Any], existing_ids: set[str]) -> str:
-    """Place a bare entity item into a state-based block. Returns its unique_id."""
+def _new_bare_item_block(
+    request: web.Request, item: dict[str, Any], existing_ids: set[str]
+) -> tuple[dict[str, Any], str]:
+    """Wrap a bare entity item in its own new top-level block. Returns (block, unique_id).
+
+    It used to be appended into the first *existing* state-based block declaring
+    the same domain. On a real instance that block belongs to the user: the
+    first ``- sensor:`` block held two production sensors, the first
+    ``- binary_sensor:`` block the flat's occupancy sensor. Sharing a block with
+    them is not a cosmetic choice, because HA's unit of rejection is the whole
+    top-level item — one invalid entry darks every entity beside it.
+
+    Oracle (live HA 2026.7, file rewritten and HA restarted between rounds):
+
+    * two separate ``- sensor:`` items, four entities across four items — all
+      registered. HA has no objection to repeating a domain at the top level, so
+      isolation costs nothing.
+    * one invalid sibling (``device_class: not_a_real_device_class``) added to
+      the first item: that item's *valid* sensor went ``unavailable`` /
+      ``restored: true`` — the exact symptom the live-fire run observed on a
+      real production sensor — while the sensor in the second item kept its
+      value. Repeated with the live-fire ``select`` shape (``options`` as a YAML
+      list instead of a template string): both selects in the shared item
+      disappeared, the select in its own item stayed up.
+
+    So a per-entry block bounds the damage of a bad entry to that entry. There
+    is no pre-write gate to lean on instead: ``POST /config/core/check_config``
+    answered ``{"result": "valid"}`` for *both* poisoned files above, while HA's
+    own setup logged ``Invalid config for 'template' at template.yaml`` for
+    them — entity-level template schema errors are found when the platform sets
+    up, not by the config check. A gate built on it would have passed exactly
+    the payloads that cause this.
+
+    The alternative — one tool-owned block per domain, shared by everything
+    hactl creates — was rejected for the same reason: it keeps a blast radius
+    larger than one entry, just with different victims.
+    """
     if "unique_id" not in item:
         raise web.HTTPBadRequest(text="Template must have a unique_id")
 
@@ -364,15 +455,11 @@ def _create_bare_item(request: web.Request, data: list[Any], item: dict[str, Any
     if uid in existing_ids:
         raise web.HTTPConflict(text=f"Template with unique_id already exists: {uid}")
 
-    # Merge into the first STATE-BASED block that already has this domain; skip
-    # trigger-based blocks so a plain entity never gets bound to a trigger.
-    for group in data:
-        if isinstance(group, dict) and domain in group and not _block_is_trigger_based(group):
-            group[domain].append(item)
-            break
-    else:
-        data.append({domain: [item]})
-    return uid
+    # Its own state-based block. Never an existing one — not even a state-based
+    # one carrying the same domain (the docstring's oracle), and so never a
+    # trigger-based one either, which is how a plain entity used to risk being
+    # bound to somebody else's trigger.
+    return {domain: [item]}, uid
 
 
 async def delete_template(request: web.Request) -> web.Response:

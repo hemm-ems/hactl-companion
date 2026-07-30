@@ -647,12 +647,15 @@ ENDPOINT_META: dict[tuple[str, str], dict[str, object]] = {
             "Home Assistant never reads `template.yaml` and the new entry would be written and "
             "ignored. The entry is written to the file the include names, not to `template.yaml` "
             "by convention. "
-            "Body is either a bare entity item (placed into a state-based block for `domain`) or a "
-            "full block (declares any template entity domain — `sensor:`, `number:`, `select:`, "
-            "`button:`, `weather:`, … — optionally with block-level `triggers:`/`actions:`/"
-            "`conditions:`), appended as its own list item. The latter is how trigger-based and "
-            "multi-domain entries are created. A bare item carrying a block-level trigger key is "
-            "rejected (400)."
+            "Body is either a bare entity item or a full block (declares any template entity "
+            "domain — `sensor:`, `number:`, `select:`, `button:`, `weather:`, … — optionally with "
+            "block-level `triggers:`/`actions:`/`conditions:`); a full block is how trigger-based "
+            "and multi-domain entries are created. Either way the entry is appended as its own new "
+            "top-level list item — a bare item gets a fresh state-based block for `domain` and is "
+            "never merged into a pre-existing block, because Home Assistant drops a whole "
+            "top-level item when any one entity in it fails validation, which would take the "
+            "user's own entities in that block down with it. A bare item carrying a block-level "
+            "trigger key is rejected (400)."
         ),
         "tags": ["templates"],
         "parameters": [
