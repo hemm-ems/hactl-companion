@@ -547,7 +547,23 @@ ENDPOINT_META: dict[tuple[str, str], dict[str, object]] = {
         "tags": ["config"],
         "parameters": [
             {"name": "path", "in": "query", "required": True, "schema": {"type": "string"}},
-            {"name": "id", "in": "query", "required": True, "schema": {"type": "string"}},
+            {
+                "name": "id",
+                "in": "query",
+                "required": True,
+                "schema": {"type": "string"},
+                "description": (
+                    "Block address: `id:` or `alias:` of a direct item in a "
+                    "list-rooted file (automations.yaml), a top-level key in a "
+                    "mapping-rooted file (scripts.yaml), or — for list-rooted "
+                    "files — a zero-based list index, bare (`3`) or bracketed "
+                    "(`[3]`) exactly as `ref scan` prints it in path prefixes. "
+                    "An id/alias match wins over a bare numeric index (HA's UI "
+                    "mints purely numeric automation ids; the bracketed form "
+                    "never collides). An out-of-range index is a 404 naming "
+                    "the valid range."
+                ),
+            },
         ],
         "response_schema": _CONFIG_BLOCK_SCHEMA,
     },

@@ -370,7 +370,11 @@ RESPONSE_PROBES: dict[tuple[str, str], tuple[Probe, ...]] = {
             expect={"validated": True},
         ),
     ),
-    ("GET", "/v1/config/block"): (Probe("/v1/config/block?path=automations.yaml&id=automation.door_light"),),
+    ("GET", "/v1/config/block"): (
+        Probe("/v1/config/block?path=automations.yaml&id=automation.door_light"),
+        # The index form — bracketed exactly as `ref scan` prints it.
+        Probe("/v1/config/block?path=template.yaml&id=%5B0%5D"),
+    ),
     ("GET", "/v1/related/entity"): (
         Probe(
             f"/v1/related/entity?entity_id={SOURCE_ENTITY_ID}",

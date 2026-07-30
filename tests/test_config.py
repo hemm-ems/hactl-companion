@@ -71,6 +71,83 @@ async def test_read_block_not_found(client: TestClient, auth_headers: dict[str, 
     assert resp.status == 404
 
 
+async def test_read_block_by_bare_index(client: TestClient, auth_headers: dict[str, str]) -> None:
+    """A list-rooted file is addressable by zero-based position."""
+    resp = await client.get(
+        "/v1/config/block?path=automations.yaml&id=0",
+        headers=auth_headers,
+    )
+    assert resp.status == 200
+    data = await resp.json()
+    assert "Door Light" in data["content"]
+
+
+async def test_read_block_by_bracketed_index_addresses_template_yaml(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """`[0]` — the exact prefix `ref scan` prints — pastes back as an address.
+
+    This is the acceptance case of hemm-ems/hactl-companion#84: template.yaml
+    blocks carry neither `id:` nor `alias:`, so before the index form NO input
+    could address them and every call 404ed.
+    """
+    resp = await client.get(
+        "/v1/config/block?path=template.yaml&id=%5B0%5D",  # url-encoded [0]
+        headers=auth_headers,
+    )
+    assert resp.status == 200
+    data = await resp.json()
+    assert "tpl_energie_zaehler" in data["content"]
+
+
+async def test_read_block_index_out_of_range_names_the_range(client: TestClient, auth_headers: dict[str, str]) -> None:
+    resp = await client.get(
+        "/v1/config/block?path=automations.yaml&id=99",
+        headers=auth_headers,
+    )
+    assert resp.status == 404
+    body = await resp.text()
+    assert "index out of range" in body
+    assert "0.." in body
+
+
+async def test_read_block_index_on_mapping_rooted_file_is_404(client: TestClient, auth_headers: dict[str, str]) -> None:
+    """Positions only exist in list-rooted files; scripts.yaml is a mapping."""
+    resp = await client.get(
+        "/v1/config/block?path=scripts.yaml&id=0",
+        headers=auth_headers,
+    )
+    assert resp.status == 404
+
+
+async def test_read_block_numeric_id_wins_over_index(
+    client: TestClient, config_dir: Path, auth_headers: dict[str, str]
+) -> None:
+    """HA's UI mints purely numeric automation ids (millisecond timestamps);
+    a bare number that matches an existing id must keep resolving as that id
+    (H-17 over in hactl: printed identifiers resolve), never as a position.
+    The bracketed form stays available for unambiguous positional access."""
+    (config_dir / "numeric_ids.yaml").write_text(
+        "- id: '1'\n  alias: First By Position\n- id: '0'\n  alias: Zero By Id\n",
+        encoding="utf-8",
+    )
+    resp = await client.get(
+        "/v1/config/block?path=numeric_ids.yaml&id=0",
+        headers=auth_headers,
+    )
+    assert resp.status == 200
+    data = await resp.json()
+    assert "Zero By Id" in data["content"]
+
+    resp = await client.get(
+        "/v1/config/block?path=numeric_ids.yaml&id=%5B0%5D",
+        headers=auth_headers,
+    )
+    assert resp.status == 200
+    data = await resp.json()
+    assert "First By Position" in data["content"]
+
+
 async def test_path_traversal_rejected(client: TestClient, auth_headers: dict[str, str]) -> None:
     resp = await client.get("/v1/config/file?path=../etc/passwd", headers=auth_headers)
     assert resp.status == 400

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import difflib
 import os
+import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -111,7 +112,12 @@ async def get_config_block(request: web.Request) -> web.Response:
     if data is None:
         raise web.HTTPNotFound(text=f"Block not found: {block_id}")
 
-    # Search for block by id or alias in list-type configs
+    # Search for block by id or alias in list-type configs. This scan runs
+    # BEFORE the index fallback below on purpose: HA's UI mints purely
+    # numeric automation ids (millisecond timestamps), so a bare number must
+    # keep resolving as the id it always was — a printed id that stopped
+    # resolving would be the H-17 failure. Index addressing loses that tie;
+    # the bracketed form (`[3]`) never collides with an id.
     if isinstance(data, list):
         for item in data:
             if isinstance(item, dict):
@@ -122,6 +128,28 @@ async def get_config_block(request: web.Request) -> web.Response:
                     stream = StringIO()
                     yaml.dump(item, stream)
                     return web.json_response({"path": rel_path, "id": block_id, "content": stream.getvalue()})
+
+    # A list-rooted file is also addressable by position, bare (`3`) or
+    # bracketed (`[3]`) — the exact prefix `ref scan` prints in its paths, so
+    # a printed address pastes back (hemm-ems/hactl#107 / hactl D-13). For
+    # template.yaml this is the FIRST working address: its blocks carry
+    # neither id nor alias. Deliberately the only new scheme — nested
+    # unique_ids stay `tpl cat`'s job, not a fourth addressing form here.
+    index_match = re.fullmatch(r"\[?(\d+)\]?", block_id)
+    if index_match and isinstance(data, list):
+        index = int(index_match.group(1))
+        if index >= len(data):
+            raise web.HTTPNotFound(
+                text=(
+                    f"Block not found: {block_id} (index out of range; "
+                    f"{rel_path} has {len(data)} blocks, 0..{len(data) - 1})"
+                )
+            )
+        from io import StringIO
+
+        stream = StringIO()
+        yaml.dump(data[index], stream)
+        return web.json_response({"path": rel_path, "id": block_id, "content": stream.getvalue()})
 
     # Search in dict-type configs
     if isinstance(data, dict) and block_id in data:
