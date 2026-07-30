@@ -22,10 +22,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from aiohttp import web
 from ruamel.yaml import YAML
 
 from companion.backups import BACKUP_DIRNAME
-from companion.surgical import Edit, read_source, save_entry, write_fields
+from companion.surgical import Edit, contained, read_source, save_entry, write_fields
 
 # A file with everything a hand-maintained config has and a tool tends to eat:
 # a header comment, a comment that documents the entry below it, a long
@@ -136,14 +137,14 @@ def _write(tmp_path: Path, text: str, mutate: Any, edit: Edit) -> tuple[str, boo
     with open(path, "w", encoding="utf-8", newline="") as stream:
         stream.write(text)
     yaml = _yaml()
-    source = read_source(path)
+    source = read_source(tmp_path, path)
     data = yaml.load(StringIO(source))
     if data is None:
         # What every route does with an empty file before it mutates it.
         data = [] if edit.kind != "replace" and not isinstance(edit.where, str) else {}
     mutate(data)
-    surgical = save_entry(path, data, source, edit, yaml)
-    return read_source(path), surgical
+    surgical = save_entry(tmp_path, path, data, source, edit, yaml)
+    return read_source(tmp_path, path), surgical
 
 
 def _replace_second(data: Any) -> None:
@@ -429,3 +430,25 @@ def test_deleting_the_only_entry_falls_back_rather_than_guessing(tmp_path: Path)
     after, surgical = _write(tmp_path, single, lambda d: d.pop(0), Edit("delete", 0))
     assert not surgical
     assert _load(after) == []
+
+
+def test_a_write_outside_the_config_base_is_refused(tmp_path: Path) -> None:
+    """C-3 at the point of use: the chokepoint does not inherit its precondition.
+
+    The routes reach here through the wiring resolver, which already contains the
+    path — but this module is the one place where being wrong is unrecoverable,
+    so it checks rather than trusting, and a caller that skips the resolver gets
+    the same answer.
+    """
+    base = tmp_path / "config"
+    base.mkdir()
+    outside = tmp_path / "elsewhere.yaml"
+    outside.write_text("- id: a\n", encoding="utf-8")
+
+    with pytest.raises(web.HTTPBadRequest):
+        read_source(base, outside)
+    with pytest.raises(web.HTTPBadRequest):
+        save_entry(base, outside, [], "", Edit("append"), _yaml())
+    with pytest.raises(web.HTTPForbidden):
+        contained(base, base / "secrets.yaml")
+    assert outside.read_text(encoding="utf-8") == "- id: a\n"

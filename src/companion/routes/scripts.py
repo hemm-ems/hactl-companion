@@ -35,10 +35,10 @@ def _load_scripts(base: str) -> tuple[dict[str, Any], Path, str]:
     The file is whichever one ``configuration.yaml`` wires ``script:`` to,
     falling back to the conventional name when that cannot be established.
     """
-    return _load_scripts_from(wired_target_or_default(base, SCRIPT_DOMAIN, SCRIPTS_FILE))
+    return _load_scripts_from(base, wired_target_or_default(base, SCRIPT_DOMAIN, SCRIPTS_FILE))
 
 
-def _load_scripts_from(target: Path) -> tuple[dict[str, Any], Path, str]:
+def _load_scripts_from(base: str, target: Path) -> tuple[dict[str, Any], Path, str]:
     """Load an explicit script file, returning (data_dict, path, source_text).
 
     The source text travels with the parsed data so a write can rewrite only the
@@ -46,7 +46,7 @@ def _load_scripts_from(target: Path) -> tuple[dict[str, Any], Path, str]:
     """
     if not target.is_file():
         raise web.HTTPNotFound(text=f"File not found: {target.name}")
-    source = read_source(target)
+    source = read_source(base, target)
     data = yaml.load(StringIO(source))
     if data is None:
         data = {}
@@ -185,7 +185,7 @@ async def put_script(request: web.Request) -> web.Response:
         return web.json_response({"status": "dry_run", "diff": diff})
 
     data[script_id] = script_body
-    surgical = save_entry(target, data, source, Edit("replace", script_id), yaml)
+    surgical = save_entry(base, target, data, source, Edit("replace", script_id), yaml)
     reload = await core_api.reload_domain("script")
     return web.json_response({"status": "applied", **write_fields(surgical), **core_api.reload_fields(reload)})
 
@@ -209,12 +209,12 @@ async def post_script(request: web.Request) -> web.Response:
     script_body = new_data[script_id]
 
     # C-10: prove HA reads this file before claiming the script was created.
-    data, target, source = _load_scripts_from(require_wired_target(base, SCRIPT_DOMAIN, SCRIPTS_FILE))
+    data, target, source = _load_scripts_from(base, require_wired_target(base, SCRIPT_DOMAIN, SCRIPTS_FILE))
     if script_id in data:
         raise web.HTTPConflict(text=f"Script already exists: {script_id}")
 
     data[script_id] = script_body
-    surgical = save_entry(target, data, source, Edit("append", script_id), yaml)
+    surgical = save_entry(base, target, data, source, Edit("append", script_id), yaml)
     reload = await core_api.reload_domain("script")
     return web.json_response(
         {"status": "created", "id": script_id, **write_fields(surgical), **core_api.reload_fields(reload)},
@@ -234,7 +234,7 @@ async def delete_script(request: web.Request) -> web.Response:
         raise web.HTTPNotFound(text=f"Script not found: {script_id}")
 
     del data[script_id]
-    surgical = save_entry(target, data, source, Edit("delete", script_id), yaml)
+    surgical = save_entry(base, target, data, source, Edit("delete", script_id), yaml)
     reload = await core_api.reload_domain("script")
     return web.json_response({"status": "deleted", **write_fields(surgical), **core_api.reload_fields(reload)})
 

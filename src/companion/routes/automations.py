@@ -35,10 +35,10 @@ def _load_automations(base: str) -> tuple[list[Any], Path, str]:
     The file is whichever one ``configuration.yaml`` wires ``automation:`` to,
     falling back to the conventional name when that cannot be established.
     """
-    return _load_automations_from(wired_target_or_default(base, AUTOMATION_DOMAIN, AUTOMATIONS_FILE))
+    return _load_automations_from(base, wired_target_or_default(base, AUTOMATION_DOMAIN, AUTOMATIONS_FILE))
 
 
-def _load_automations_from(target: Path) -> tuple[list[Any], Path, str]:
+def _load_automations_from(base: str, target: Path) -> tuple[list[Any], Path, str]:
     """Load an explicit automation file, returning (data_list, path, source_text).
 
     The source text travels with the parsed data because a write only rewrites
@@ -48,7 +48,7 @@ def _load_automations_from(target: Path) -> tuple[list[Any], Path, str]:
     """
     if not target.is_file():
         raise web.HTTPNotFound(text=f"File not found: {target.name}")
-    source = read_source(target)
+    source = read_source(base, target)
     data = yaml.load(StringIO(source))
     if data is None:
         data = []
@@ -192,7 +192,7 @@ async def put_automation(request: web.Request) -> web.Response:
                 return web.json_response({"status": "dry_run", "diff": diff})
 
             data[idx] = new_item
-            surgical = save_entry(target, data, source, Edit("replace", idx), yaml)
+            surgical = save_entry(base, target, data, source, Edit("replace", idx), yaml)
             reload = await core_api.reload_domain("automation")
             return web.json_response({"status": "applied", **write_fields(surgical), **core_api.reload_fields(reload)})
 
@@ -218,7 +218,7 @@ async def post_automation(request: web.Request) -> web.Response:
         raise web.HTTPBadRequest(text="Automation must have an id field")
 
     # C-10: prove HA reads this file before claiming the automation was created.
-    data, target, source = _load_automations_from(require_wired_target(base, AUTOMATION_DOMAIN, AUTOMATIONS_FILE))
+    data, target, source = _load_automations_from(base, require_wired_target(base, AUTOMATION_DOMAIN, AUTOMATIONS_FILE))
 
     # Check for duplicate id
     for item in data:
@@ -226,7 +226,7 @@ async def post_automation(request: web.Request) -> web.Response:
             raise web.HTTPConflict(text=f"Automation already exists: {new_item['id']}")
 
     data.append(new_item)
-    surgical = save_entry(target, data, source, Edit("append"), yaml)
+    surgical = save_entry(base, target, data, source, Edit("append"), yaml)
     reload = await core_api.reload_domain("automation")
     entity_id = await _poll_automation_entity_id(new_item["id"]) if reload.ok else None
     return web.json_response(
@@ -264,7 +264,7 @@ async def delete_automation(request: web.Request) -> web.Response:
     if match is not None:
         idx, _item = match
         data.pop(idx)
-        surgical = save_entry(target, data, source, Edit("delete", idx), yaml)
+        surgical = save_entry(base, target, data, source, Edit("delete", idx), yaml)
         reload = await core_api.reload_domain("automation")
         return web.json_response({"status": "deleted", **write_fields(surgical), **core_api.reload_fields(reload)})
 

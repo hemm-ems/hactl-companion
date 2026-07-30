@@ -82,10 +82,10 @@ def _load_templates(base: str) -> tuple[list[Any], Path, str]:
     The file is whichever one ``configuration.yaml`` wires ``template:`` to,
     falling back to the conventional name when that cannot be established.
     """
-    return _load_templates_from(wired_target_or_default(base, TEMPLATE_DOMAIN, TEMPLATE_FILE))
+    return _load_templates_from(base, wired_target_or_default(base, TEMPLATE_DOMAIN, TEMPLATE_FILE))
 
 
-def _load_templates_from(target: Path) -> tuple[list[Any], Path, str]:
+def _load_templates_from(base: str, target: Path) -> tuple[list[Any], Path, str]:
     """Load and parse an explicit template file, returning (raw_data, path, source_text).
 
     The source text travels with the parsed data so a write can rewrite only the
@@ -95,7 +95,7 @@ def _load_templates_from(target: Path) -> tuple[list[Any], Path, str]:
     """
     if not target.is_file():
         raise web.HTTPNotFound(text=f"File not found: {target.name}")
-    source = read_source(target)
+    source = read_source(base, target)
     data = yaml.load(StringIO(source))
     if data is None:
         data = []
@@ -270,7 +270,7 @@ async def put_template(request: web.Request) -> web.Response:
                 return web.json_response({"status": "dry_run", "diff": diff})
 
             data[s["group_idx"]][s["domain"]][s["item_idx"]] = new_item
-            surgical = save_entry(target, data, source, Edit("replace", s["group_idx"]), yaml)
+            surgical = save_entry(base, target, data, source, Edit("replace", s["group_idx"]), yaml)
             reload = await core_api.reload_domain("template")
             return web.json_response({"status": "applied", **write_fields(surgical), **core_api.reload_fields(reload)})
 
@@ -306,7 +306,7 @@ async def post_template(request: web.Request) -> web.Response:
     # C-10: a template.yaml no `template:` key !include's is written happily and
     # never read — the entity simply never appears. Prove HA reads this file
     # before claiming to have created anything in it.
-    data, target, source = _load_templates_from(require_wired_target(base, TEMPLATE_DOMAIN, TEMPLATE_FILE))
+    data, target, source = _load_templates_from(base, require_wired_target(base, TEMPLATE_DOMAIN, TEMPLATE_FILE))
     existing_ids = _all_unique_ids(data)
 
     if _is_block(new_item):
@@ -314,7 +314,7 @@ async def post_template(request: web.Request) -> web.Response:
     else:
         first_uid, edit = _create_bare_item(request, data, new_item, existing_ids)
 
-    surgical = save_entry(target, data, source, edit, yaml)
+    surgical = save_entry(base, target, data, source, edit, yaml)
     reload = await core_api.reload_domain("template")
     return web.json_response(
         {"status": "created", "unique_id": first_uid, **write_fields(surgical), **core_api.reload_fields(reload)},
@@ -402,7 +402,7 @@ async def delete_template(request: web.Request) -> web.Response:
             if isinstance(group, dict) and not any(d in group for d in _ENTITY_DOMAINS):
                 data.pop(s["group_idx"])
                 edit = Edit("delete", s["group_idx"])
-            surgical = save_entry(target, data, source, edit, yaml)
+            surgical = save_entry(base, target, data, source, edit, yaml)
             reload = await core_api.reload_domain("template")
             return web.json_response({"status": "deleted", **write_fields(surgical), **core_api.reload_fields(reload)})
 

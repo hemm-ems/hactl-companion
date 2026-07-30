@@ -45,7 +45,7 @@ def _yaml_file_for_domain(domain: str) -> str:
     return f"{domain}.yaml"
 
 
-def _load_helpers_from(target: Path) -> tuple[dict[str, Any], str]:
+def _load_helpers_from(base: str, target: Path) -> tuple[dict[str, Any], str]:
     """Load a helper YAML file's dict content from an explicit path.
 
     Returns ``(data, source_text)``; an absent file is an empty mapping and empty
@@ -54,7 +54,7 @@ def _load_helpers_from(target: Path) -> tuple[dict[str, Any], str]:
     """
     if not target.is_file():
         return {}, ""
-    source = read_source(target)
+    source = read_source(base, target)
     data = yaml.load(StringIO(source))
     if data is None:
         data = {}
@@ -75,7 +75,7 @@ def _load_helpers(base: str, domain: str) -> tuple[dict[str, Any], Path, str]:
     invisible to the ``helper ls`` that follows it.
     """
     target = wired_target_or_default(base, domain, _yaml_file_for_domain(domain))
-    data, source = _load_helpers_from(target)
+    data, source = _load_helpers_from(base, target)
     return data, target, source
 
 
@@ -171,12 +171,12 @@ async def post_helper(request: web.Request) -> web.Response:
     helper_id = next(iter(new_data))
     helper_body = new_data[helper_id]
 
-    data, source = _load_helpers_from(target)
+    data, source = _load_helpers_from(base, target)
     if helper_id in data:
         raise web.HTTPConflict(text=f"Helper already exists: {helper_id}")
 
     data[helper_id] = helper_body
-    surgical = save_entry(target, data, source, Edit("append", helper_id), yaml)
+    surgical = save_entry(base, target, data, source, Edit("append", helper_id), yaml)
     reload = await core_api.reload_domain(domain)
     entity_id = f"{domain}.{helper_id}"
     entity_created = await _poll_entity_created(entity_id) if reload.ok else False
@@ -249,7 +249,7 @@ async def put_helper(request: web.Request) -> web.Response:
 
     domain, data, target, source = _locate_helper(base, helper_id, domain_param)
     data[helper_id] = new_body
-    surgical = save_entry(target, data, source, Edit("replace", helper_id), yaml)
+    surgical = save_entry(base, target, data, source, Edit("replace", helper_id), yaml)
     reload = await core_api.reload_domain(domain)
     return web.json_response({"status": "applied", **write_fields(surgical), **core_api.reload_fields(reload)})
 
@@ -264,7 +264,7 @@ async def delete_helper(request: web.Request) -> web.Response:
 
     domain, data, target, source = _locate_helper(base, helper_id, domain_param)
     del data[helper_id]
-    surgical = save_entry(target, data, source, Edit("delete", helper_id), yaml)
+    surgical = save_entry(base, target, data, source, Edit("delete", helper_id), yaml)
     reload = await core_api.reload_domain(domain)
     return web.json_response({"status": "deleted", **write_fields(surgical), **core_api.reload_fields(reload)})
 

@@ -51,10 +51,12 @@ from io import StringIO
 from pathlib import Path
 from typing import Any, Literal
 
+from aiohttp import web
 from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
 
 from companion.backups import make_backup
+from companion.pathguard import is_denied, is_within
 
 #: What the route did to the container it loaded.
 #:
@@ -73,7 +75,27 @@ class Edit:
     where: int | str = -1
 
 
-def read_source(path: Path) -> str:
+def contained(base: str | Path, path: str | Path) -> Path:
+    """``path``, proven to be a config file this service may touch (C-3).
+
+    The routes reach their target through :mod:`companion.wiring`, which already
+    resolves the ``!include`` inside the config base. This re-establishes the
+    precondition at the point of use rather than inheriting it: an unchecked
+    write is the one mistake here that cannot be taken back, and a future caller
+    that reaches this module without going through the wiring resolver would
+    otherwise get no check at all. The rules are ``pathguard``'s, the same ones
+    ``PUT /v1/config/file`` applies.
+    """
+    root = Path(base).resolve()
+    target = Path(path).resolve()
+    if not is_within(target, root):
+        raise web.HTTPBadRequest(text="Path traversal is not allowed")
+    if is_denied(target.name):
+        raise web.HTTPForbidden(text=f"Access to {target.name} is denied")
+    return target
+
+
+def read_source(base: str | Path, path: str | Path) -> str:
     """The file's text with its line endings intact.
 
     ``Path.read_text`` runs universal-newline translation, so a CRLF file arrives
@@ -82,7 +104,7 @@ def read_source(path: Path) -> str:
     bytes honest; :func:`_splice` then emits its replacement in the file's own
     convention.
     """
-    with open(path, encoding="utf-8", newline="") as stream:
+    with open(contained(base, path), encoding="utf-8", newline="") as stream:
         return stream.read()
 
 
@@ -103,7 +125,7 @@ def write_fields(surgical: bool) -> dict[str, Any]:
     return {} if surgical else {"reformatted": True}
 
 
-def save_entry(path: Path, data: Any, source: str, edit: Edit, yaml: YAML) -> bool:
+def save_entry(base: str | Path, path: str | Path, data: Any, source: str, edit: Edit, yaml: YAML) -> bool:
     """Write ``data`` back to ``path``, rewriting only the bytes ``edit`` names.
 
     ``source`` is the file text the route parsed ``data`` from, before it
@@ -113,12 +135,13 @@ def save_entry(path: Path, data: Any, source: str, edit: Edit, yaml: YAML) -> bo
     The prior content is backed up first (C-5) either way. Returns True when the
     surgical path produced the file, False when the whole-file dump did.
     """
+    target = contained(base, path)
     spliced = _splice(source, data, edit, yaml)
     if spliced is not None and not _parses_back_to(spliced, data, yaml):
         spliced = None
 
-    make_backup(path)
-    with path.open("w", encoding="utf-8", newline="") as stream:
+    make_backup(target)
+    with target.open("w", encoding="utf-8", newline="") as stream:
         if spliced is None:
             yaml.dump(data, stream)
         else:
