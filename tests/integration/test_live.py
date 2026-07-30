@@ -984,3 +984,151 @@ class TestIncludeWiring:
         )
         assert r.status_code == 200, "the escape hatch must stay open for exactly the file we refuse to resolve"
         assert "!include_dir_merge_flat" in r.json()["content"]
+
+
+# ---------------------------------------------------------------------------
+# C-13: a single-entry write rewrites only that entry's bytes
+# ---------------------------------------------------------------------------
+
+# A hand-maintained file: a header comment, a comment that introduces the entry
+# below it, long unwrapped Jinja lines and non-default sequence indentation.
+# Every one of those is something a whole-document re-serialization rewrites.
+SURGICAL_AUTOMATIONS = """\
+# Hand-maintained automations. A tool must not eat this comment.
+- id: surgical_first
+  alias: Surgical First
+  trigger:
+      - platform: state
+        entity_id: input_boolean.surgical_probe
+  action:
+      - service: persistent_notification.create
+        data:
+          message: JansPos:{{ states.input_number.posclock_jan.state }}:{{states.input_number.posclock_speed.state|int}}
+  mode: single
+
+# The middle entry is the one every write below names.
+- id: surgical_middle
+  alias: Surgical Middle
+  trigger: []
+  action: []
+  mode: single
+
+- id: surgical_last
+  alias: Surgical Last
+  description: |-
+    Alle Phasen mit water=high und fan=high;
+    zweiter Absatz bleibt erhalten.
+  trigger: []
+  action: []
+  mode: single
+# dangling comment at end of file
+"""
+
+_UNTOUCHED_LINES = (
+    "# Hand-maintained automations. A tool must not eat this comment.\n",
+    "          message: JansPos:{{ states.input_number.posclock_jan.state }}:"
+    "{{states.input_number.posclock_speed.state|int}}\n",
+    "      - platform: state\n",
+    "  description: |-\n",
+    "# dangling comment at end of file\n",
+)
+
+
+class TestSurgicalWrites:
+    """C-13 against a real Home Assistant, and the boundary of what it can cover."""
+
+    def test_single_entry_write_keeps_every_other_byte_and_ha_still_loads_the_file(
+        self, companion_url: str, auth_headers: dict[str, str], ha_url: str, ha_token: str, _ha_ready: None
+    ) -> None:
+        """One automation updated; the other two byte-identical; HA reads the result.
+
+        Both halves are the test. Byte preservation alone would be satisfied by a
+        writer that produces a file Home Assistant refuses — so HA is asked
+        whether the spliced file is still valid configuration and whether the
+        edited automation is actually live, rather than being trusted to be.
+
+        The unit tier proves the splice against fixtures; this proves the file it
+        produces is one HA accepts, which no amount of in-process testing can.
+        """
+        original = _read_config_file(companion_url, auth_headers, "automations.yaml")
+        try:
+            assert (
+                _write_config_file(companion_url, auth_headers, "automations.yaml", SURGICAL_AUTOMATIONS).status_code
+                == 200
+            )
+            before = _read_config_file(companion_url, auth_headers, "automations.yaml")
+            assert before == SURGICAL_AUTOMATIONS
+
+            r = requests.put(
+                f"{companion_url}/v1/config/automation",
+                params={"id": "surgical_middle", "dry_run": "false"},
+                data="id: surgical_middle\nalias: Surgical Middle Renamed\ntrigger: []\naction: []\nmode: single\n",
+                headers=auth_headers,
+                timeout=60,
+            )
+            assert r.status_code == 200, r.text
+            body = r.json()
+            assert "reformatted" not in body, f"fell back to a whole-file re-serialization: {body}"
+            assert body["reloaded"] is True, body
+
+            after = _read_config_file(companion_url, auth_headers, "automations.yaml")
+            assert after is not None
+            assert "Surgical Middle Renamed" in after
+            for line in _UNTOUCHED_LINES:
+                assert line in after, f"a line outside the edited entry was rewritten: {line!r}"
+
+            # HA's own verdict on the file this write produced.
+            check = requests.post(
+                f"{ha_url}/api/config/core/check_config",
+                headers={"Authorization": f"Bearer {ha_token}"},
+                timeout=90,
+            )
+            assert check.status_code == 200, check.text
+            assert check.json()["result"] == "valid", check.json()
+            _reload_automations(ha_url, ha_token)
+            assert _automation_is_loaded(ha_url, ha_token, "automation.surgical_middle_renamed"), (
+                "HA did not load the automation from the spliced file"
+            )
+        finally:
+            if original is not None:
+                _write_config_file(companion_url, auth_headers, "automations.yaml", original)
+
+    def test_home_assistants_own_config_api_reserializes_the_whole_file(
+        self, companion_url: str, auth_headers: dict[str, str], ha_url: str, ha_token: str, _ha_ready: None
+    ) -> None:
+        """The boundary: HA's `/api/config/automation/config/<id>` rewrites everything.
+
+        This is not a defect in this service and it is not fixable here — it is
+        recorded because it decides where the fix can reach. `hactl auto apply`
+        and `auto rollback` post to this endpoint rather than to
+        `PUT /v1/config/automation`, so they keep reformatting whole files until
+        hactl is changed to route through the companion. Asserting HA's behaviour
+        instead of describing it means the day HA stops doing this, the claim
+        fails instead of quietly becoming folklore.
+        """
+        original = _read_config_file(companion_url, auth_headers, "automations.yaml")
+        try:
+            assert (
+                _write_config_file(companion_url, auth_headers, "automations.yaml", SURGICAL_AUTOMATIONS).status_code
+                == 200
+            )
+
+            r = requests.post(
+                f"{ha_url}/api/config/automation/config/surgical_middle",
+                headers={"Authorization": f"Bearer {ha_token}"},
+                json={"alias": "Surgical Middle Via HA", "trigger": [], "action": [], "mode": "single"},
+                timeout=60,
+            )
+            assert r.status_code == 200, r.text
+
+            after = _read_config_file(companion_url, auth_headers, "automations.yaml")
+            assert after is not None
+            assert "Surgical Middle Via HA" in after, "HA did not apply the edit — the comparison below is vacuous"
+            survivors = [line for line in _UNTOUCHED_LINES if line in after]
+            assert not survivors, (
+                "HA's config API preserved lines outside the edited entry — the premise of the note in "
+                f"INVARIANTS.md C-13 no longer holds, survivors: {survivors}"
+            )
+        finally:
+            if original is not None:
+                _write_config_file(companion_url, auth_headers, "automations.yaml", original)

@@ -24,6 +24,7 @@ from ruamel.yaml import YAML
 
 from companion import core_api
 from companion.params import parse_bool_param
+from companion.surgical import Edit, read_source, save_entry, write_fields
 from companion.wiring import require_wired_target, wired_target_or_default
 
 yaml = YAML()
@@ -75,8 +76,8 @@ class RouteDef:
     handler: object
 
 
-def _load_templates(base: str) -> tuple[list[Any], Any]:
-    """Load and parse the template file, returning (raw_data, target_path).
+def _load_templates(base: str) -> tuple[list[Any], Path, str]:
+    """Load and parse the template file, returning (raw_data, target_path, source_text).
 
     The file is whichever one ``configuration.yaml`` wires ``template:`` to,
     falling back to the conventional name when that cannot be established.
@@ -84,17 +85,23 @@ def _load_templates(base: str) -> tuple[list[Any], Any]:
     return _load_templates_from(wired_target_or_default(base, TEMPLATE_DOMAIN, TEMPLATE_FILE))
 
 
-def _load_templates_from(target: Path) -> tuple[list[Any], Any]:
-    """Load and parse an explicit template file, returning (raw_data, path)."""
+def _load_templates_from(target: Path) -> tuple[list[Any], Path, str]:
+    """Load and parse an explicit template file, returning (raw_data, path, source_text).
+
+    The source text travels with the parsed data so a write can rewrite only the
+    block it was asked to change (see :mod:`companion.surgical`). The unit here is
+    the top-level *block*, not the entity inside it: editing one entity in a
+    multi-entity block re-serializes that block and nothing else.
+    """
     if not target.is_file():
         raise web.HTTPNotFound(text=f"File not found: {target.name}")
-    with open(target, encoding="utf-8") as f:
-        data = yaml.load(f)
+    source = read_source(target)
+    data = yaml.load(StringIO(source))
     if data is None:
         data = []
     if not isinstance(data, list):
         raise web.HTTPInternalServerError(text="template.yaml must be a top-level list")
-    return data, target
+    return data, target, source
 
 
 def _block_is_trigger_based(block: dict[str, Any]) -> bool:
@@ -166,23 +173,10 @@ def _extract_entities(data: list[Any]) -> list[dict[str, Any]]:
     return entities
 
 
-def _save_templates(target: Any, data: list[Any]) -> None:
-    """Write template data back to file with backup."""
-    from pathlib import Path
-
-    from companion.backups import make_backup
-
-    path = Path(target)
-    make_backup(path)
-
-    with open(path, "w", encoding="utf-8") as f:
-        yaml.dump(data, f)
-
-
 async def get_templates(request: web.Request) -> web.Response:
     """GET /v1/config/templates — list all template sensor definitions."""
     base = request.app["config_base_path"]
-    data, _target = _load_templates(base)
+    data, _target, _source = _load_templates(base)
     entities = _extract_entities(data)
     result = [
         {
@@ -210,7 +204,7 @@ async def get_template(request: web.Request) -> web.Response:
     if not uid:
         raise web.HTTPBadRequest(text="Missing id parameter")
 
-    data, _target = _load_templates(base)
+    data, _target, _source = _load_templates(base)
     entities = _extract_entities(data)
 
     for s in entities:
@@ -253,7 +247,7 @@ async def put_template(request: web.Request) -> web.Response:
     if stray is not None:
         raise web.HTTPBadRequest(text=f"'{stray}' belongs at the block level, not inside an entity item")
 
-    data, target = _load_templates(base)
+    data, target, source = _load_templates(base)
     entities = _extract_entities(data)
 
     for s in entities:
@@ -276,9 +270,9 @@ async def put_template(request: web.Request) -> web.Response:
                 return web.json_response({"status": "dry_run", "diff": diff})
 
             data[s["group_idx"]][s["domain"]][s["item_idx"]] = new_item
-            _save_templates(target, data)
+            surgical = save_entry(target, data, source, Edit("replace", s["group_idx"]), yaml)
             reload = await core_api.reload_domain("template")
-            return web.json_response({"status": "applied", **core_api.reload_fields(reload)})
+            return web.json_response({"status": "applied", **write_fields(surgical), **core_api.reload_fields(reload)})
 
     raise web.HTTPNotFound(text=f"Template not found: {uid}")
 
@@ -312,24 +306,28 @@ async def post_template(request: web.Request) -> web.Response:
     # C-10: a template.yaml no `template:` key !include's is written happily and
     # never read — the entity simply never appears. Prove HA reads this file
     # before claiming to have created anything in it.
-    data, target = _load_templates_from(require_wired_target(base, TEMPLATE_DOMAIN, TEMPLATE_FILE))
+    data, target, source = _load_templates_from(require_wired_target(base, TEMPLATE_DOMAIN, TEMPLATE_FILE))
     existing_ids = _all_unique_ids(data)
 
     if _is_block(new_item):
-        first_uid = _create_block(data, new_item, existing_ids)
+        first_uid, edit = _create_block(data, new_item, existing_ids)
     else:
-        first_uid = _create_bare_item(request, data, new_item, existing_ids)
+        first_uid, edit = _create_bare_item(request, data, new_item, existing_ids)
 
-    _save_templates(target, data)
+    surgical = save_entry(target, data, source, edit, yaml)
     reload = await core_api.reload_domain("template")
     return web.json_response(
-        {"status": "created", "unique_id": first_uid, **core_api.reload_fields(reload)},
+        {"status": "created", "unique_id": first_uid, **write_fields(surgical), **core_api.reload_fields(reload)},
         status=201,
     )
 
 
-def _create_block(data: list[Any], block: dict[str, Any], existing_ids: set[str]) -> str:
-    """Append a full block verbatim as its own list item. Returns first unique_id."""
+def _create_block(data: list[Any], block: dict[str, Any], existing_ids: set[str]) -> tuple[str, Edit]:
+    """Append a full block verbatim as its own list item.
+
+    Returns ``(first unique_id, the edit it made)`` — the write path needs to be
+    told which top-level block changed so it can rewrite only that one.
+    """
     new_ids = _block_unique_ids(block)
     if not new_ids:
         raise web.HTTPBadRequest(text="Template block must define at least one entity with a unique_id")
@@ -339,11 +337,17 @@ def _create_block(data: list[Any], block: dict[str, Any], existing_ids: set[str]
         raise web.HTTPConflict(text=f"Template with unique_id already exists: {dup}")
 
     data.append(block)
-    return new_ids[0]
+    return new_ids[0], Edit("append")
 
 
-def _create_bare_item(request: web.Request, data: list[Any], item: dict[str, Any], existing_ids: set[str]) -> str:
-    """Place a bare entity item into a state-based block. Returns its unique_id."""
+def _create_bare_item(
+    request: web.Request, data: list[Any], item: dict[str, Any], existing_ids: set[str]
+) -> tuple[str, Edit]:
+    """Place a bare entity item into a state-based block.
+
+    Returns ``(unique_id, the edit it made)``: merging into an existing block
+    rewrites that block, opening a new one appends.
+    """
     if "unique_id" not in item:
         raise web.HTTPBadRequest(text="Template must have a unique_id")
 
@@ -366,13 +370,12 @@ def _create_bare_item(request: web.Request, data: list[Any], item: dict[str, Any
 
     # Merge into the first STATE-BASED block that already has this domain; skip
     # trigger-based blocks so a plain entity never gets bound to a trigger.
-    for group in data:
+    for group_idx, group in enumerate(data):
         if isinstance(group, dict) and domain in group and not _block_is_trigger_based(group):
             group[domain].append(item)
-            break
-    else:
-        data.append({domain: [item]})
-    return uid
+            return uid, Edit("replace", group_idx)
+    data.append({domain: [item]})
+    return uid, Edit("append")
 
 
 async def delete_template(request: web.Request) -> web.Response:
@@ -382,7 +385,7 @@ async def delete_template(request: web.Request) -> web.Response:
     if not uid:
         raise web.HTTPBadRequest(text="Missing id parameter")
 
-    data, target = _load_templates(base)
+    data, target, source = _load_templates(base)
     entities = _extract_entities(data)
 
     for s in entities:
@@ -395,11 +398,13 @@ async def delete_template(request: web.Request) -> web.Response:
             # If no entity domains remain, drop the whole block — including any
             # orphaned trigger/action, which HA would otherwise reject as an
             # incomplete template configuration.
+            edit = Edit("replace", s["group_idx"])
             if isinstance(group, dict) and not any(d in group for d in _ENTITY_DOMAINS):
                 data.pop(s["group_idx"])
-            _save_templates(target, data)
+                edit = Edit("delete", s["group_idx"])
+            surgical = save_entry(target, data, source, edit, yaml)
             reload = await core_api.reload_domain("template")
-            return web.json_response({"status": "deleted", **core_api.reload_fields(reload)})
+            return web.json_response({"status": "deleted", **write_fields(surgical), **core_api.reload_fields(reload)})
 
     raise web.HTTPNotFound(text=f"Template not found: {uid}")
 

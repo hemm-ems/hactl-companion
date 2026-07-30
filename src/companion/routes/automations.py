@@ -12,6 +12,7 @@ from ruamel.yaml import YAML
 
 from companion import core_api
 from companion.params import parse_bool_param
+from companion.surgical import Edit, read_source, save_entry, write_fields
 from companion.wiring import require_wired_target, wired_target_or_default
 
 yaml = YAML()
@@ -28,8 +29,8 @@ class RouteDef:
     handler: object
 
 
-def _load_automations(base: str) -> tuple[list[Any], Any]:
-    """Load the automation file, returning (data_list, file_path).
+def _load_automations(base: str) -> tuple[list[Any], Path, str]:
+    """Load the automation file, returning (data_list, file_path, source_text).
 
     The file is whichever one ``configuration.yaml`` wires ``automation:`` to,
     falling back to the conventional name when that cannot be established.
@@ -37,17 +38,23 @@ def _load_automations(base: str) -> tuple[list[Any], Any]:
     return _load_automations_from(wired_target_or_default(base, AUTOMATION_DOMAIN, AUTOMATIONS_FILE))
 
 
-def _load_automations_from(target: Path) -> tuple[list[Any], Any]:
-    """Load an explicit automation file, returning (data_list, path)."""
+def _load_automations_from(target: Path) -> tuple[list[Any], Path, str]:
+    """Load an explicit automation file, returning (data_list, path, source_text).
+
+    The source text travels with the parsed data because a write only rewrites
+    the entry it was asked to change (see :mod:`companion.surgical`), and that
+    needs the exact bytes the tree was parsed from — not a re-read, which would
+    be a second, later view of the file.
+    """
     if not target.is_file():
         raise web.HTTPNotFound(text=f"File not found: {target.name}")
-    with open(target, encoding="utf-8") as f:
-        data = yaml.load(f)
+    source = read_source(target)
+    data = yaml.load(StringIO(source))
     if data is None:
         data = []
     if not isinstance(data, list):
         raise web.HTTPInternalServerError(text="automations.yaml must be a top-level list")
-    return data, target
+    return data, target, source
 
 
 def _find_automation(data: list[Any], candidate: str) -> tuple[int, dict[str, Any]] | None:
@@ -103,23 +110,10 @@ async def _poll_automation_entity_id(config_id: str, attempts: int = 5, delay: f
     return None
 
 
-def _save_automations(target: Any, data: list[Any]) -> None:
-    """Write automation data back to file with backup."""
-    from pathlib import Path
-
-    from companion.backups import make_backup
-
-    path = Path(target)
-    make_backup(path)
-
-    with open(path, "w", encoding="utf-8") as f:
-        yaml.dump(data, f)
-
-
 async def get_automations(request: web.Request) -> web.Response:
     """GET /v1/config/automations — list all automation definitions."""
     base = request.app["config_base_path"]
-    data, _target = _load_automations(base)
+    data, _target, _source = _load_automations(base)
 
     result: list[dict[str, Any]] = []
     for item in data:
@@ -144,7 +138,7 @@ async def get_automation(request: web.Request) -> web.Response:
     if not automation_id:
         raise web.HTTPBadRequest(text="Missing id parameter")
 
-    data, _target = _load_automations(base)
+    data, _target, _source = _load_automations(base)
 
     for item in data:
         if isinstance(item, dict) and item.get("id") == automation_id:
@@ -176,7 +170,7 @@ async def put_automation(request: web.Request) -> web.Response:
     if not isinstance(new_item, dict):
         raise web.HTTPBadRequest(text="Automation must be a YAML mapping")
 
-    data, target = _load_automations(base)
+    data, target, source = _load_automations(base)
 
     for idx, item in enumerate(data):
         if isinstance(item, dict) and item.get("id") == automation_id:
@@ -198,9 +192,9 @@ async def put_automation(request: web.Request) -> web.Response:
                 return web.json_response({"status": "dry_run", "diff": diff})
 
             data[idx] = new_item
-            _save_automations(target, data)
+            surgical = save_entry(target, data, source, Edit("replace", idx), yaml)
             reload = await core_api.reload_domain("automation")
-            return web.json_response({"status": "applied", **core_api.reload_fields(reload)})
+            return web.json_response({"status": "applied", **write_fields(surgical), **core_api.reload_fields(reload)})
 
     raise web.HTTPNotFound(text=f"Automation not found: {automation_id}")
 
@@ -224,7 +218,7 @@ async def post_automation(request: web.Request) -> web.Response:
         raise web.HTTPBadRequest(text="Automation must have an id field")
 
     # C-10: prove HA reads this file before claiming the automation was created.
-    data, target = _load_automations_from(require_wired_target(base, AUTOMATION_DOMAIN, AUTOMATIONS_FILE))
+    data, target, source = _load_automations_from(require_wired_target(base, AUTOMATION_DOMAIN, AUTOMATIONS_FILE))
 
     # Check for duplicate id
     for item in data:
@@ -232,11 +226,17 @@ async def post_automation(request: web.Request) -> web.Response:
             raise web.HTTPConflict(text=f"Automation already exists: {new_item['id']}")
 
     data.append(new_item)
-    _save_automations(target, data)
+    surgical = save_entry(target, data, source, Edit("append"), yaml)
     reload = await core_api.reload_domain("automation")
     entity_id = await _poll_automation_entity_id(new_item["id"]) if reload.ok else None
     return web.json_response(
-        {"status": "created", "id": new_item["id"], "entity_id": entity_id, **core_api.reload_fields(reload)},
+        {
+            "status": "created",
+            "id": new_item["id"],
+            "entity_id": entity_id,
+            **write_fields(surgical),
+            **core_api.reload_fields(reload),
+        },
         status=201,
     )
 
@@ -253,7 +253,7 @@ async def delete_automation(request: web.Request) -> web.Response:
     if not automation_id:
         raise web.HTTPBadRequest(text="Missing id parameter")
 
-    data, target = _load_automations(base)
+    data, target, source = _load_automations(base)
 
     match = _find_automation(data, automation_id)
     if match is None:
@@ -264,9 +264,9 @@ async def delete_automation(request: web.Request) -> web.Response:
     if match is not None:
         idx, _item = match
         data.pop(idx)
-        _save_automations(target, data)
+        surgical = save_entry(target, data, source, Edit("delete", idx), yaml)
         reload = await core_api.reload_domain("automation")
-        return web.json_response({"status": "deleted", **core_api.reload_fields(reload)})
+        return web.json_response({"status": "deleted", **write_fields(surgical), **core_api.reload_fields(reload)})
 
     raise web.HTTPNotFound(text=f"Automation not found: {automation_id}")
 

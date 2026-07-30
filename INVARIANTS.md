@@ -209,6 +209,49 @@ as stale.
   (the canary), `::test_route_response_conformance` (both directions, one case
   per route), and `::test_unobserved_field_exemptions_are_for_known_routes`
 
+## C-13 — A single-entry write rewrites only that entry's bytes
+
+`POST`/`PUT`/`DELETE` on `/v1/config/{automation,script,template,helper}` change
+one entry, so they change one entry's lines in the file and leave every other
+byte exactly as it was. Comments, blank lines, line folding, indentation and
+quote style elsewhere in the file survive verbatim; only the touched entry gets
+tool-normalized formatting.
+
+The defect this closes was not a misunderstood feature. All four route families
+wrote their file back with a whole-document `yaml.dump(data, f)`, so one
+confirmed automation write came back having reformatted ~34 unrelated real
+automations (live-fire 2026-07-30, P1 #4) — semantically lossless, which is why
+every value-level test in the suite stayed green, and still a defect: it
+clobbers hand-maintained formatting and makes `git diff` on a config repo
+useless. **The check is therefore on bytes, never on parsed values.**
+
+`companion/surgical.py` performs the write as a line splice and *verifies it*:
+the spliced text is re-parsed and compared against the tree the route meant to
+write, and any disagreement — an unparseable result, an anchor whose definition
+lived in the replaced entry, a layout the span arithmetic does not cover — falls
+back to the whole-file dump. A fallback is never silent: the response carries
+`reformatted: true` (absent otherwise, the same shape `reload_error` uses), so a
+caller keeping its config in git is told the difference between "your entry
+changed" and "the file was rewritten".
+
+A route that rewrites a whole file by nature (`PUT /v1/config/file`, whose
+caller supplies the content; `POST /v1/ref/replace`, which rewrites scalars
+scattered across a whole `!include` graph — leaf-granular splicing is #88)
+declares a `whole_file_reason` instead. The canary enforces the choice.
+
+- Enforced by: `tests/test_invariants.py::test_single_entry_write_leaves_every_other_byte_alone`
+  (sweeps every route declaring `surgical`, and carries an anti-vacuity guard
+  that re-runs the old whole-file writer on the same input and requires it to
+  have damaged lines outside the edited region — so a fixture that is already in
+  ruamel's canonical form cannot make the sweep pass against either writer) and
+  `::test_every_file_write_declares_a_formatting_stance` (canary);
+  `tests/test_surgical.py` (byte-level behaviour: comments between entries,
+  block scalars, unicode, CRLF, indented sequences, and each fallback still
+  producing correct content); `tests/integration/test_live.py::TestSurgicalWrites`
+  (a real HA loads the spliced file, and the same edit through HA's own
+  `/api/config/automation/config/<id>` is shown re-serializing the whole file —
+  the boundary of what this service can fix)
+
 ---
 
 Client-side counterparts (retry idempotency, CLI confirm gate, vendored-spec

@@ -288,6 +288,17 @@ _RELOAD_ERROR_DESC = (
     "Why the reload failed: HA's HTTP status plus a bounded excerpt of its response body, or the "
     "transport error class. Present only when `reloaded` is false; absent otherwise."
 )
+# Every single-entry write rewrites only that entry's own lines. When the file
+# uses something the splice cannot carry (CRLF endings, a flow-style top level,
+# an anchor defined in the entry being replaced) it is re-serialized whole
+# instead, and dozens of untouched entries can come back reformatted. Same
+# "present only when it matters" shape as `reload_error`: absent on the normal
+# path, so a surgical success is byte-identical to the response sent before the
+# field existed.
+_REFORMATTED_DESC = (
+    "True when the whole file had to be re-serialized instead of only this entry's lines, so formatting "
+    "elsewhere in the file may have changed. Absent otherwise."
+)
 # PUT template/script/automation: dry-run returns a diff; apply returns `reloaded`.
 _WRITE_RESULT_SCHEMA = {
     "type": "object",
@@ -297,6 +308,7 @@ _WRITE_RESULT_SCHEMA = {
         "diff": {"type": "string"},
         "reloaded": {"type": "boolean"},
         "reload_error": {"type": "string", "description": _RELOAD_ERROR_DESC},
+        "reformatted": {"type": "boolean", "description": _REFORMATTED_DESC},
     },
 }
 # DELETE (template/script/automation/helper) and PUT helper: {status, reloaded}.
@@ -307,6 +319,7 @@ _RELOAD_RESULT_SCHEMA = {
         "status": {"type": "string"},
         "reloaded": {"type": "boolean"},
         "reload_error": {"type": "string", "description": _RELOAD_ERROR_DESC},
+        "reformatted": {"type": "boolean", "description": _REFORMATTED_DESC},
     },
 }
 _RELOAD_SCHEMA = {
@@ -329,6 +342,7 @@ _CREATED_SCRIPT_SCHEMA = {
         "id": {"type": "string"},
         "reloaded": {"type": "boolean"},
         "reload_error": {"type": "string", "description": _RELOAD_ERROR_DESC},
+        "reformatted": {"type": "boolean", "description": _REFORMATTED_DESC},
     },
 }
 _CREATED_AUTOMATION_SCHEMA = {
@@ -340,6 +354,7 @@ _CREATED_AUTOMATION_SCHEMA = {
         "entity_id": {"type": "string", "nullable": True},
         "reloaded": {"type": "boolean"},
         "reload_error": {"type": "string", "description": _RELOAD_ERROR_DESC},
+        "reformatted": {"type": "boolean", "description": _REFORMATTED_DESC},
     },
 }
 _CREATED_UID_SCHEMA = {
@@ -350,6 +365,7 @@ _CREATED_UID_SCHEMA = {
         "unique_id": {"type": "string"},
         "reloaded": {"type": "boolean"},
         "reload_error": {"type": "string", "description": _RELOAD_ERROR_DESC},
+        "reformatted": {"type": "boolean", "description": _REFORMATTED_DESC},
     },
 }
 _CREATED_HELPER_SCHEMA = {
@@ -361,6 +377,7 @@ _CREATED_HELPER_SCHEMA = {
         "entity_id": {"type": "string"},
         "reloaded": {"type": "boolean"},
         "reload_error": {"type": "string", "description": _RELOAD_ERROR_DESC},
+        "reformatted": {"type": "boolean", "description": _REFORMATTED_DESC},
         "entity_created": {"type": "boolean"},
     },
 }
