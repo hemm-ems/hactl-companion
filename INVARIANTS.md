@@ -209,6 +209,56 @@ as stale.
   (the canary), `::test_route_response_conformance` (both directions, one case
   per route), and `::test_unobserved_field_exemptions_are_for_known_routes`
 
+## C-13 — A create never writes into a block it did not create
+
+Home Assistant's unit of rejection in `template.yaml` is the **top-level list
+item**. When one entity in a block fails validation HA drops the entire item:
+its valid siblings do not go stale, they leave the state machine and come back
+as `unavailable` with `restored: true`. Entities in a *different* item are
+untouched. Measured against a live HA in both directions — four entities across
+four items all registered (so repeating a domain at the top level costs
+nothing), then one bad `device_class` added to the first item took that item's
+good sensor down while the second item's sensor kept its value; repeated with
+`select` options given as a YAML list, same result.
+
+So `POST /v1/config/template` appends every entry as its own new top-level item
+and never extends an existing one — not even a state-based block already
+declaring the same domain, which is what it used to do. On a real instance that
+block is the user's: the first `sensor:` block held two production sensors, the
+first `binary_sensor:` block the flat's occupancy sensor, and a single bad
+payload filed next to them would have darked all of them. A per-entry block
+bounds the damage of a bad entry to that entry. A tool-owned block per domain
+was rejected for the same reason — smaller blast radius, still not one.
+
+There is no pre-write validity gate instead: `POST /config/core/check_config`
+answered `valid` for both poisoned files above while HA's own setup logged
+`Invalid config for 'template' at template.yaml` for them — entity-level
+template schema errors surface when the platform sets up, not at config check.
+A gate built on it would pass exactly the payloads that cause the harm. The
+integration test asserts that `valid`, so the day HA can answer earlier is the
+day the suite says so.
+
+The create is also append-only *as text*: it concatenates the new item instead
+of re-dumping the parsed file, so a file whose sequence indent differs from the
+dumper's does not come back reformatted around an entry added at its end. Text
+concatenation can only fail by producing a file that no longer reads as
+`old + [item]`; that is checked, with the structural dump as fallback.
+
+Scope: this is a named example, not a sweep. The other creates append their own
+top-level item already (`automations.yaml`) or write a key into a mapping-rooted
+file (`scripts.yaml`, the helper files), so no shared item exists for them to
+widen. `PUT`/`DELETE` still round-trip the whole file.
+
+- Enforced by: `tests/test_templates.py::test_bare_item_gets_its_own_block`,
+  `::test_two_bare_items_of_one_domain_do_not_share_a_block`,
+  `::test_bare_item_create_only_appends_bytes`,
+  `::test_full_block_create_only_appends_bytes`,
+  `::test_bare_item_leaves_a_trigger_block_byte_identical`,
+  `::test_create_falls_back_to_a_structural_write_when_text_append_would_not_parse`,
+  and `tests/integration/test_live.py::TestTemplateBlockIsolation::test_a_created_entry_survives_a_poisoned_neighbouring_block`
+  (HA restarted in place: the created entry comes up, the good neighbour of the
+  bad entry does not)
+
 ---
 
 Client-side counterparts (retry idempotency, CLI confirm gate, vendored-spec

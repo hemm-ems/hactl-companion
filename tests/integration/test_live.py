@@ -660,6 +660,150 @@ class TestTemplatesCRUD:
         assert gone.status_code == 404
 
 
+# --- C-13: a create never joins a block it did not write --------------------
+
+# One user-owned block: a good sensor and, beside it, an entry HA will reject.
+ISOLATION_USER_BLOCK = """\
+- sensor:
+    - name: Hactl Iso Neighbour
+      unique_id: hactl_iso_neighbour
+      state: "{{ 11 }}"
+    - name: Hactl Iso Poison
+      unique_id: hactl_iso_poison
+      state: "{{ 1 }}"
+      device_class: not_a_real_device_class
+"""
+ISOLATION_CREATED_ITEM = 'name: Hactl Iso Created\nunique_id: hactl_iso_created\nstate: "{{ 42 }}"\n'
+ISOLATION_NEIGHBOUR = "sensor.hactl_iso_neighbour"
+ISOLATION_CREATED = "sensor.hactl_iso_created"
+
+
+def _restart_ha_core(ha_url: str, ha_token: str, settle_entity: str, settle_state: str, timeout: int = 300) -> None:
+    """Restart HA Core in place, then wait for ``settle_entity`` to render.
+
+    In place — the service call, not ``docker restart``: recreating the
+    container re-randomises the published host port (measured: 54897 → 54920),
+    and every later test in the session resolves HA through the session-scoped
+    ``ha_url`` that was computed once, at compose time.
+
+    A restart, rather than ``template.reload``, because a freshly onboarded HA
+    has no ``template:`` configured, so the service does not exist yet and
+    cannot be reloaded into existence. That is also what makes the wait
+    self-synchronising: no template entity can exist until HA has come back up
+    having read template.yaml, so the pre-restart process cannot satisfy this
+    poll. Measured at ~6s locally.
+    """
+    hdr = {"Authorization": f"Bearer {ha_token}"}
+    r = requests.post(f"{ha_url}/api/services/homeassistant/restart", headers=hdr, json={}, timeout=90)
+    assert r.status_code == 200, f"homeassistant.restart failed: {r.status_code} {r.text}"
+
+    deadline = time.monotonic() + timeout
+    last: str | None = None
+    while time.monotonic() < deadline:
+        try:
+            s = requests.get(f"{ha_url}/api/states/{settle_entity}", headers=hdr, timeout=5)
+            if s.status_code == 200:
+                last = s.json()["state"]
+                if last == settle_state:
+                    return
+        except requests.RequestException:
+            pass
+        time.sleep(2)
+    raise AssertionError(f"{settle_entity} never reached {settle_state!r} after the restart (last seen: {last!r})")
+
+
+class TestTemplateBlockIsolation:
+    """C-13, with HA supplying both halves: the hazard and the protection."""
+
+    def test_a_created_entry_survives_a_poisoned_neighbouring_block(
+        self, companion_url: str, auth_headers: dict[str, str], ha_url: str, ha_token: str, _ha_ready: None
+    ) -> None:
+        """The create's placement decision, measured where it actually matters.
+
+        HA's unit of rejection is the whole top-level list item: one entity that
+        fails validation takes its valid siblings with it. So this seeds a
+        user-owned ``- sensor:`` block holding a good sensor *and* a bad one,
+        creates an entry through the route, and asks HA what survived.
+
+        Against the old behaviour the created entry was appended into that first
+        existing block and went down with it — which is the live-fire P1: a bad
+        payload could dark production sensors it had merely been filed next to.
+        Against the current behaviour it is in a list item of its own and comes
+        up, which simultaneously proves the premise the fix rests on (HA is
+        perfectly happy with several top-level items declaring the same domain).
+
+        The neighbour is asserted *dead* on purpose. Without it the test would
+        still pass if HA had quietly started tolerating the bad entry, and it
+        would be proving nothing at all.
+        """
+        original = _read_config_file(companion_url, auth_headers, "configuration.yaml")
+        assert original is not None
+        try:
+            # File first, include second: wiring an `!include` at a file that is
+            # not there yet fails HA's check_config, and C-6 then rolls the
+            # configuration.yaml write back — which made this test pass only
+            # when an earlier test happened to have created template.yaml.
+            r = _write_config_file(companion_url, auth_headers, "template.yaml", ISOLATION_USER_BLOCK)
+            assert r.status_code == 200, r.text
+
+            if "template:" not in original:
+                wired = original.rstrip("\n") + "\ntemplate: !include template.yaml\n"
+                assert _write_config_file(companion_url, auth_headers, "configuration.yaml", wired).status_code == 200
+
+            created = requests.post(
+                f"{companion_url}/v1/config/template",
+                params={"domain": "sensor"},
+                data=ISOLATION_CREATED_ITEM,
+                headers={**auth_headers, "Content-Type": "text/plain"},
+                timeout=60,
+            )
+            assert created.status_code == 201, created.text
+
+            # The user's bytes, unchanged and still first — the create appended.
+            after = _read_config_file(companion_url, auth_headers, "template.yaml")
+            assert after is not None
+            assert after.startswith(ISOLATION_USER_BLOCK), (
+                f"the create rewrote the user's block instead of appending after it:\n{after}"
+            )
+            assert "hactl_iso_created" in after
+
+            # Recorded, not incidental: HA's config check does NOT see this.
+            # A pre-write validity gate built on check_config would wave through
+            # exactly the payload that darks a block, which is why there isn't
+            # one. If this ever starts failing, HA has become able to answer the
+            # question early and the gate becomes worth building.
+            chk = requests.post(
+                f"{ha_url}/api/config/core/check_config",
+                headers={"Authorization": f"Bearer {ha_token}"},
+                json={},
+                timeout=120,
+            )
+            assert chk.status_code == 200, chk.text
+            assert chk.json()["result"] == "valid", (
+                "check_config now reports the invalid template entity — a pre-write gate has become "
+                f"feasible and should be reconsidered: {chk.text}"
+            )
+
+            _restart_ha_core(ha_url, ha_token, ISOLATION_CREATED, "42")
+
+            assert _entity_is_live(ha_url, ha_token, ISOLATION_CREATED), (
+                "the created entry did not come up — either it was filed into the poisoned block, or HA "
+                "has stopped accepting several top-level items for one domain (the premise of the fix)"
+            )
+            assert not _entity_is_live(ha_url, ha_token, ISOLATION_NEIGHBOUR), (
+                f"{ISOLATION_NEIGHBOUR} is loaded despite an invalid sibling in its block — HA no longer "
+                "drops the whole top-level item, so this test can no longer show what it claims to show"
+            )
+        finally:
+            _write_config_file(
+                companion_url,
+                auth_headers,
+                "template.yaml",
+                '- sensor:\n    - name: Iso Cleanup\n      unique_id: hactl_iso_cleanup\n      state: "{{ 1 }}"\n',
+            )
+            _write_config_file(companion_url, auth_headers, "configuration.yaml", original)
+
+
 def _container_logs(container_name: str) -> str:
     result = subprocess.run(
         ["docker", "logs", container_name],
@@ -790,19 +934,26 @@ def _strip_domain_keys(config_text: str, domain: str) -> str:
     return "".join(line for line in config_text.splitlines(keepends=True) if not key.match(line))
 
 
-def _automation_is_loaded(ha_url: str, ha_token: str, entity_id: str) -> bool:
-    """Ask HA whether it currently has this automation loaded.
+def _entity_is_live(ha_url: str, ha_token: str, entity_id: str) -> bool:
+    """Ask HA whether it currently has this entity loaded from config.
 
-    Entity *presence* is not the answer. HA keeps a removed automation in the
-    entity registry and serves it back as a restored ghost — `state:
-    unavailable` with a `restored: true` attribute — so a presence check reports
-    "still there" for an automation HA has actually dropped.
+    Entity *presence* is not the answer. HA keeps a dropped entity in the entity
+    registry and serves it back as a restored ghost — `state: unavailable` with
+    a `restored: true` attribute — so a presence check reports "still there" for
+    something HA has actually dropped. Which of the two shapes a dropped entity
+    takes (absent, or ghost) depends only on whether it was ever registered
+    before, so neither may count as loaded.
     """
     r = requests.get(f"{ha_url}/api/states/{entity_id}", headers={"Authorization": f"Bearer {ha_token}"}, timeout=15)
     if r.status_code != 200:
         return False
     state = r.json()
     return state["state"] != "unavailable" and not state.get("attributes", {}).get("restored")
+
+
+def _automation_is_loaded(ha_url: str, ha_token: str, entity_id: str) -> bool:
+    """Whether HA currently has this automation loaded (see :func:`_entity_is_live`)."""
+    return _entity_is_live(ha_url, ha_token, entity_id)
 
 
 def _reload_automations(ha_url: str, ha_token: str) -> None:
