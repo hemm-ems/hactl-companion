@@ -1,11 +1,14 @@
 """Helper entity CRUD endpoints.
 
 Manages HA helpers (input_boolean, input_number, input_select, input_text,
-input_datetime, counter, timer, schedule) via their per-domain YAML files.
+input_datetime, counter, timer, schedule) via their per-domain YAML files, and
+*reads* the storage-backed helpers HA's own UI creates (see
+:func:`storage_matches`).
 """
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from io import StringIO
 from pathlib import Path
@@ -32,6 +35,34 @@ ALLOWED_DOMAINS: set[str] = {
     "schedule",
 }
 
+#: Helper domains that exist only as UI/storage collections — `input_button` has
+#: no YAML schema at all, so it can never appear in `ALLOWED_DOMAINS` (which is
+#: the *writable* set) and would otherwise be unreadable here while `helper ls`
+#: lists it from the live states.
+STORAGE_ONLY_DOMAINS: set[str] = {"input_button"}
+
+#: Every domain whose definitions this service can *read*. Wider than
+#: `ALLOWED_DOMAINS` on purpose: read and write have different reach, and the
+#: read surface must cover everything the listing shows.
+STORAGE_DOMAINS: set[str] = ALLOWED_DOMAINS | STORAGE_ONLY_DOMAINS
+
+#: Where HA keeps a collection's items on disk. Verified against a live 2026.7
+#: instance for all nine helper domains: `.storage/<domain>` holds
+#: `{"data": {"items": [{"id": ..., <config>}]}}`, and the item id is the
+#: entity's object id unless the entity was renamed in the registry.
+STORAGE_DIR = ".storage"
+ENTITY_REGISTRY_KEY = "core.entity_registry"
+
+#: Prepended to a storage helper's rendered YAML. `helper cat` prints this
+#: content verbatim, so for a definition that cannot be edited through this
+#: service the marker has to travel *inside* the document — a comment is valid
+#: YAML and survives a pipe into a file. The machine-readable half is the
+#: `source` field on the response.
+STORAGE_CONTENT_HEADER = (
+    "# source: storage — created in the Home Assistant UI, not in a YAML file.\n"
+    "# Read-only here: helper create/set/delete manage YAML helpers only.\n"
+)
+
 
 @dataclass
 class RouteDef:
@@ -40,7 +71,29 @@ class RouteDef:
     handler: object
 
 
-def _yaml_file_for_domain(domain: str) -> str:
+@dataclass(frozen=True)
+class StorageHelper:
+    """One helper HA stores in `.storage/<domain>` rather than in a YAML file."""
+
+    domain: str
+    item_id: str
+    entity_id: str
+    config: dict[str, Any]
+
+    def content(self) -> str:
+        """The definition rendered the way a YAML helper's would be, plus the marker.
+
+        Same shape as the YAML branch — top-level key is the id, body is the
+        rest — so the two sources read alike and the output can be pasted into
+        `<domain>.yaml` if the user wants to take the helper over.
+        """
+        stream = StringIO()
+        stream.write(STORAGE_CONTENT_HEADER)
+        yaml.dump({self.item_id: {k: v for k, v in self.config.items() if k != "id"}}, stream)
+        return stream.getvalue()
+
+
+def yaml_file_for_domain(domain: str) -> str:
     """Return the YAML config file name for a helper domain."""
     return f"{domain}.yaml"
 
@@ -74,7 +127,7 @@ def _load_helpers(base: str, domain: str) -> tuple[dict[str, Any], Path, str]:
     path uses is what stops a helper created in ``my_booleans.yaml`` from being
     invisible to the ``helper ls`` that follows it.
     """
-    target = wired_target_or_default(base, domain, _yaml_file_for_domain(domain))
+    target = wired_target_or_default(base, domain, yaml_file_for_domain(domain))
     data, source = _load_helpers_from(base, target)
     return data, target, source
 
@@ -95,6 +148,88 @@ def _validate_domain(domain: str) -> None:
     """Raise 400 if domain is not an allowed helper domain."""
     if domain not in ALLOWED_DOMAINS:
         raise web.HTTPBadRequest(text=f"Invalid helper domain: {domain}. Allowed: {', '.join(sorted(ALLOWED_DOMAINS))}")
+
+
+def _storage_json(base: str, key: str) -> dict[str, Any]:
+    """The ``data`` object of ``.storage/<key>``, or ``{}`` if unreadable.
+
+    Best-effort on purpose: `.storage` belongs to Home Assistant, and a file
+    that is mid-write, absent, or from a future schema must degrade this lookup
+    to "no storage helpers", never turn a read route into a 500.
+    """
+    path = Path(base) / STORAGE_DIR / key
+    if not path.is_file():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        return {}
+    data = raw.get("data") if isinstance(raw, dict) else None
+    return data if isinstance(data, dict) else {}
+
+
+def _entity_ids_by_unique_id(base: str) -> dict[tuple[str, str], str]:
+    """``(platform, unique_id) -> entity_id`` from HA's entity registry.
+
+    A UI helper registers under a unique_id equal to its collection item id, so
+    this is what turns an item back into the entity_id the user sees. It is not
+    cosmetic: renaming the entity changes the entity_id and leaves the item id
+    alone, so ``input_boolean.<item id>`` is a *guess* and the registry is the
+    fact (verified live — the rename was performed and observed).
+    """
+    entities = _storage_json(base, ENTITY_REGISTRY_KEY).get("entities")
+    if not isinstance(entities, list):
+        return {}
+    index: dict[tuple[str, str], str] = {}
+    for entry in entities:
+        if not isinstance(entry, dict):
+            continue
+        platform, unique_id, entity_id = entry.get("platform"), entry.get("unique_id"), entry.get("entity_id")
+        if isinstance(platform, str) and isinstance(unique_id, str) and isinstance(entity_id, str):
+            index[(platform, unique_id)] = entity_id
+    return index
+
+
+def storage_helpers(base: str) -> list[StorageHelper]:
+    """Every helper HA keeps in a `.storage` collection, across all read domains."""
+    entity_ids = _entity_ids_by_unique_id(base)
+    found: list[StorageHelper] = []
+    for domain in sorted(STORAGE_DOMAINS):
+        items = _storage_json(base, domain).get("items")
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict) or not isinstance(item.get("id"), str):
+                continue
+            item_id = item["id"]
+            found.append(
+                StorageHelper(
+                    domain=domain,
+                    item_id=item_id,
+                    entity_id=entity_ids.get((domain, item_id), f"{domain}.{item_id}"),
+                    config=item,
+                )
+            )
+    return found
+
+
+def storage_matches(base: str, helper_id: str, domain: str | None = None) -> list[StorageHelper]:
+    """Every storage-backed helper ``helper_id`` can name.
+
+    Three forms are accepted, because all three are identifiers this service or
+    hactl prints for such a helper (H-17): the live ``entity_id`` (what
+    ``helper ls`` shows for a storage row), the bare collection id (what the
+    equivalent YAML helper's top-level key would be), and ``<domain>.<item id>``
+    (the entity_id before anyone renamed it).
+    """
+    matches = [
+        helper
+        for helper in storage_helpers(base)
+        if helper_id in {helper.entity_id, helper.item_id, f"{helper.domain}.{helper.item_id}"}
+    ]
+    if domain:
+        matches = [helper for helper in matches if helper.domain == domain]
+    return matches
 
 
 async def get_helpers(request: web.Request) -> web.Response:
@@ -126,10 +261,42 @@ async def get_helpers(request: web.Request) -> web.Response:
     return web.json_response({"helpers": result})
 
 
+def _storage_ambiguous(helper_id: str, matches: list[StorageHelper]) -> web.HTTPConflict:
+    domains = ", ".join(sorted(helper.domain for helper in matches))
+    return web.HTTPConflict(
+        text=(
+            f"Helper id '{helper_id}' is ambiguous across storage-backed domains: {domains}. "
+            f"Retry with the full entity_id (e.g. '{matches[0].entity_id}')."
+        )
+    )
+
+
+def _not_found(helper_id: str) -> web.HTTPNotFound:
+    """404 that says where we looked — 'not found' alone reads as 'does not exist'.
+
+    On a UI-managed instance every helper is storage-backed, so a bare 'not
+    found' was the answer to *every* lookup while `helper ls` listed the same
+    helpers happily.
+    """
+    return web.HTTPNotFound(
+        text=(
+            f"Helper not found: {helper_id} — searched the YAML helper files "
+            f"({', '.join(sorted(yaml_file_for_domain(d) for d in ALLOWED_DOMAINS))}) and HA's "
+            f"{STORAGE_DIR} collections ({', '.join(sorted(STORAGE_DOMAINS))}). A helper created in the UI "
+            f"seconds ago may not be in {STORAGE_DIR} yet — Home Assistant writes those files on a delay."
+        )
+    )
+
+
 async def get_helper(request: web.Request) -> web.Response:
     """GET /v1/config/helper?id=<id> — get single helper definition.
 
-    The id should be the slug (e.g. 'my_toggle'). We search all domains.
+    Answers for both sources a helper can have. YAML helpers (this service's
+    own files) are addressed by their top-level key; storage helpers — the ones
+    HA's UI creates, which on a normally-configured instance are *all* of them —
+    are addressed by entity_id or by their collection id, and come back with
+    ``source: storage`` and a rendered, read-only definition. Listing a helper
+    and then refusing to show it was a contradiction inside one command family.
     """
     base = request.app["config_base_path"]
     helper_id = request.query.get("id", "")
@@ -141,9 +308,25 @@ async def get_helper(request: web.Request) -> web.Response:
         if helper_id in data:
             stream = StringIO()
             yaml.dump({helper_id: data[helper_id]}, stream)
-            return web.json_response({"id": helper_id, "domain": domain, "content": stream.getvalue()})
+            return web.json_response(
+                {"id": helper_id, "domain": domain, "content": stream.getvalue(), "source": "yaml"}
+            )
 
-    raise web.HTTPNotFound(text=f"Helper not found: {helper_id}")
+    matches = storage_matches(base, helper_id)
+    if len(matches) > 1:
+        raise _storage_ambiguous(helper_id, matches)
+    if matches:
+        helper = matches[0]
+        return web.json_response(
+            {
+                "id": helper.entity_id,
+                "domain": helper.domain,
+                "content": helper.content(),
+                "source": "storage",
+            }
+        )
+
+    raise _not_found(helper_id)
 
 
 async def post_helper(request: web.Request) -> web.Response:
@@ -154,7 +337,7 @@ async def post_helper(request: web.Request) -> web.Response:
         raise web.HTTPBadRequest(text="Missing domain parameter")
     _validate_domain(domain)
     # C-10: prove HA reads this file before writing a new helper into it.
-    target = require_wired_target(base, domain, _yaml_file_for_domain(domain))
+    target = require_wired_target(base, domain, yaml_file_for_domain(domain))
 
     body = await request.text()
     if not body.strip():
@@ -193,6 +376,22 @@ async def post_helper(request: web.Request) -> web.Response:
     )
 
 
+def _refuse_storage_write(base: str, helper_id: str, domain: str | None) -> None:
+    """Raise 409 if ``helper_id`` names a storage-backed helper; return otherwise."""
+    matches = storage_matches(base, helper_id, domain)
+    if not matches:
+        return
+    helper = matches[0]
+    raise web.HTTPConflict(
+        text=(
+            f"Helper '{helper_id}' is storage-backed: {helper.entity_id} was created in the Home Assistant UI "
+            f"and lives in {STORAGE_DIR}/{helper.domain}, so there is no YAML definition to edit or delete. "
+            f"Change it in the UI (or via HA's {helper.domain}/update / {helper.domain}/delete WebSocket "
+            f"command). GET /v1/config/helper reads it."
+        )
+    )
+
+
 def _locate_helper(base: str, helper_id: str, domain: str | None) -> tuple[str, dict[str, Any], Path, str]:
     """Locate the domain file that owns ``helper_id`` for update/delete.
 
@@ -202,6 +401,11 @@ def _locate_helper(base: str, helper_id: str, domain: str | None) -> tuple[str, 
     silently acting on the alphabetically-first match would touch the wrong
     entity — instead the ambiguity is surfaced as a 409 listing the candidates.
 
+    A storage-backed helper reaching here is refused with 409 naming the
+    mechanism, not 404: GET now resolves it, so a bare "not found" from the
+    write half of the same family would be the read/write contradiction the
+    other way round. There is nothing in a YAML file to edit or delete.
+
     Returns ``(domain, data_dict, file_path, source_text)``.
     """
     if domain:
@@ -209,6 +413,7 @@ def _locate_helper(base: str, helper_id: str, domain: str | None) -> tuple[str, 
         data, target, source = _load_helpers(base, domain)
         if helper_id in data:
             return domain, data, target, source
+        _refuse_storage_write(base, helper_id, domain)
         raise web.HTTPNotFound(text=f"Helper not found: {helper_id} (domain {domain})")
 
     matches: list[tuple[str, dict[str, Any], Path, str]] = []
@@ -218,7 +423,8 @@ def _locate_helper(base: str, helper_id: str, domain: str | None) -> tuple[str, 
             matches.append((candidate, data, target, source))
 
     if not matches:
-        raise web.HTTPNotFound(text=f"Helper not found: {helper_id}")
+        _refuse_storage_write(base, helper_id, None)
+        raise _not_found(helper_id)
     if len(matches) > 1:
         domains = ", ".join(candidate for candidate, _, _, _ in matches)
         raise web.HTTPConflict(

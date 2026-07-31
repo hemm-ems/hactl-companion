@@ -132,8 +132,28 @@ layouts this cannot prove (`homeassistant: packages:`, `!include_dir_*`,
 several candidate files) are refused with the reason named; `PUT
 /v1/config/file` remains the escape hatch (C-6 validates the result).
 
+**The same answer is askable before the write.** `GET /v1/config/wiring?domain=`
+runs the identical resolution and returns the verdict: `wired`, plus either the
+`file` a new entry would land in or the `reason` — byte-identical to the 400 the
+create raises. Without it a client cannot keep its own promise that a preview
+fails exactly where the confirmed run does (hactl H-2): the check lived inside
+the create, so `helper create`'s dry run printed "would create" for all eight
+helper domains on an instance whose `input_boolean:` is written inline — eight
+confident previews, eight deterministic 400s. The alternative, re-deriving these
+six rules in the client, is the four-copy contract drift this project has
+already paid for once. Every domain a create route declares must be answerable
+here, and the probe's verdict must **equal** that create's verdict on every
+layout — asserted as equality over the create table, not as two hand-written
+expectations free to drift apart.
+
 - Enforced by: `tests/test_invariants.py::test_create_refuses_when_configuration_does_not_include_the_file`
-  (sweeps every create route in the `FILE_WRITES` probe table) and
+  (sweeps every create route in the `FILE_WRITES` probe table),
+  `::test_wiring_probe_agrees_with_the_create_it_predicts` (the equality, over
+  the same table × wired/inline/absent layouts),
+  `tests/test_wiring_route.py` (probe shape, refusal branches, and that probing
+  writes nothing),
+  `tests/integration/test_live.py::TestWiringProbeAgreesWithTheCreate` (the same
+  equality against real HA, on the inline layout that produced the defect) and
   `tests/test_invariants.py::test_every_file_write_declares_a_wiring_stance`
   (canary: a new file-writing route must declare `wiring` or a
   `no_wiring_reason`), `tests/test_wiring.py` (resolution and refusal rules),

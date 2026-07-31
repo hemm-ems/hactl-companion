@@ -400,7 +400,54 @@ _HELPER_LIST_SCHEMA = {
 }
 _HELPER_SCHEMA = {
     "type": "object",
-    "properties": {"id": {"type": "string"}, "domain": {"type": "string"}, "content": {"type": "string"}},
+    "properties": {
+        "id": {
+            "type": "string",
+            "description": (
+                "The identifier this helper is addressed by: the YAML top-level key when `source` is `yaml`, "
+                "the live entity_id when `source` is `storage`."
+            ),
+        },
+        "domain": {"type": "string"},
+        "content": {
+            "type": "string",
+            "description": (
+                "The definition as YAML. For `source: storage` it is rendered from HA's collection and carries "
+                "a leading `# source: storage` comment, because this content is read-only."
+            ),
+        },
+        "source": {
+            "type": "string",
+            "enum": ["yaml", "storage"],
+            "description": (
+                "`yaml` — defined in a helper YAML file this service manages, editable via PUT/DELETE. "
+                "`storage` — created in the Home Assistant UI, readable here but not editable; PUT/DELETE "
+                "answer 409 for it."
+            ),
+        },
+    },
+}
+_WIRING_SCHEMA = {
+    "type": "object",
+    "required": ["domain", "wired"],
+    "properties": {
+        "domain": {"type": "string"},
+        "wired": {
+            "type": "boolean",
+            "description": "Whether a create for this domain can be written to a file Home Assistant reads.",
+        },
+        "file": {
+            "type": "string",
+            "description": "Config-relative path a new entry would be written to. Present only when `wired`.",
+        },
+        "reason": {
+            "type": "string",
+            "description": (
+                "Why a create would be refused — byte-identical to the 400 message the create route answers "
+                "with. Present only when `wired` is false."
+            ),
+        },
+    },
 }
 _WG_CONFIG_RESPONSE = {
     "type": "object",
@@ -807,6 +854,12 @@ ENDPOINT_META: dict[tuple[str, str], dict[str, object]] = {
     },
     ("GET", "/v1/config/helper"): {
         "summary": "Get single helper definition",
+        "description": (
+            "Resolves both sources: a YAML helper by its top-level key, and a storage-backed helper (created "
+            "in the Home Assistant UI) by its entity_id, its collection id, or `<domain>.<collection id>`. "
+            "`input_button` is readable here although it has no YAML form. 409 if a bare id is ambiguous "
+            "across storage domains."
+        ),
         "tags": ["helpers"],
         "parameters": [{"name": "id", "in": "query", "required": True, "schema": {"type": "string"}}],
         "response_schema": _HELPER_SCHEMA,
@@ -851,6 +904,22 @@ ENDPOINT_META: dict[tuple[str, str], dict[str, object]] = {
             {"name": "domain", "in": "query", "required": False, "schema": {"type": "string"}},
         ],
         "response_schema": _RELOAD_RESULT_SCHEMA,
+    },
+    # Config layout probe
+    ("GET", "/v1/config/wiring"): {
+        "summary": "Would a create for this domain reach a file Home Assistant reads?",
+        "description": (
+            "The C-10 include-wiring check, exposed read-only so a client can preview a create without "
+            "attempting it. Answers 200 either way: `wired: true` with the `file` a new entry would go to, or "
+            "`wired: false` with the `reason` — the exact text the create route refuses with, so a dry run can "
+            "fail with the same explanation as the confirmed run. Accepts the domains that have a create "
+            "route: automation, script, template and the YAML helper domains."
+        ),
+        "tags": ["config"],
+        "parameters": [
+            {"name": "domain", "in": "query", "required": True, "schema": {"type": "string"}},
+        ],
+        "response_schema": _WIRING_SCHEMA,
     },
     # HA core API
     ("POST", "/v1/ha/reload/{domain}"): {
