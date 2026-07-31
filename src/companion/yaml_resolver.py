@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from ruamel.yaml import YAML
+from ruamel.yaml.representer import RoundTripRepresenter
 
 from companion.pathguard import is_denied, is_within
 
@@ -65,6 +66,59 @@ INCLUDE_TAGS: frozenset[str] = frozenset(
 # (`!include_dir_merge_flat`). HA's loader has a closed constructor set; there is
 # no such thing as a working HA config carrying a tag outside these eight.
 PRESERVED_TAGS: frozenset[str] = frozenset({"!secret", "!env_var", "!input"})
+
+
+class PreservedTag(str):
+    """A tag left unresolved, carried through the tree as its directive text.
+
+    A ``str`` subclass because that text IS the truthful rendering, and because
+    everything downstream of the resolver reads a leaf as text — the reference
+    walkers in :mod:`companion.routes.related` test leaves with
+    ``isinstance(value, str)``, and a bare object would have gone unseen there.
+
+    The tag and its argument are kept beside the text for one reason: the
+    **dump**. Preserving the directive as a plain string was only half of the
+    job, because to YAML a string beginning with ``!`` is not a tag — it is a
+    string that must be quoted to stay a string. So the emitter quoted it, and
+    the file came back out saying something else::
+
+        entity_id: !input button_entity      # what the blueprint says
+        entity_id: '!input button_entity'    # what resolved mode rendered
+
+    The second is a working blueprint turned into one that triggers on an
+    entity literally named ``!input button_entity``, and it is still valid YAML
+    so nothing complains (finding #20). The same happened to
+    ``Authorization: !secret tibber_token``. The registered representer below
+    puts the tag back where the resolver said it was.
+
+    The second attribute is deliberately ``argument`` and not ``value``:
+    :meth:`YamlResolver._walk_and_resolve` recognises a ruamel tagged node by
+    ``hasattr(node, "tag") and hasattr(node, "value")``, and a PreservedTag that
+    answered to both would be re-resolved as if it had just been parsed.
+    """
+
+    tag: str
+    argument: str
+
+    def __new__(cls, tag: str, argument: str) -> PreservedTag:
+        arg = argument.strip()
+        obj = super().__new__(cls, f"{tag} {arg}".strip())
+        obj.tag = tag
+        obj.argument = arg
+        return obj
+
+
+def _represent_preserved_tag(representer: RoundTripRepresenter, data: PreservedTag) -> Any:
+    """Emit a :class:`PreservedTag` as the tag it came from, not as a string."""
+    return representer.represent_scalar(data.tag, data.argument)
+
+
+# Registered on the round-trip representer itself, at import, once. Only this
+# module can mint a PreservedTag, so the scope is exactly right: wherever one
+# reaches a dumper — this resolver's, ``routes/config.py``'s, ``surgical.py``'s
+# — it has to come out as a tag. A per-instance registration would have left
+# whichever YAML() nobody thought about still quoting it.
+RoundTripRepresenter.add_representer(PreservedTag, _represent_preserved_tag)
 
 
 def claims_to_include(tag: str) -> bool:
@@ -185,6 +239,11 @@ class YamlResolver:
            Nothing is concealed by rendering it — the directive is printed as
            written, and the missing-content problem that justifies track 2 does
            not arise for a tag that names no file.
+
+           The result is a :class:`PreservedTag`, which reads as its directive
+           text everywhere and re-emits as a tag when the tree is dumped. A
+           plain string here was finding #20: preserved correctly, quoted on
+           the way out, and so changed in meaning by the rendering.
         """
         if tag in INCLUDE_TAGS:
             path = context_dir / value.strip()
@@ -207,7 +266,7 @@ class YamlResolver:
             )
             raise UnknownIncludeTagError(msg)
 
-        return f"{tag} {value}".strip()
+        return PreservedTag(tag, value)
 
     def _include_file(self, path: Path, visited: set[str]) -> Any:
         """Resolve !include <path> — inline file content."""

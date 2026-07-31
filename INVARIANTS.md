@@ -182,7 +182,29 @@ their directive text (`!secret home_lat` renders as `!secret home_lat`, never
 the bare `home_lat`), and `resolve=false` stays available for any file the
 resolver refuses.
 
-- Enforced by: `tests/test_resolver.py::test_unknown_include_tag_is_refused_not_degraded`,
+**Preserving a tag is a property of the rendering, not only of the resolution.**
+The directive was preserved correctly and then quoted on the way out, because a
+Python `str` beginning with `!` is, to a YAML emitter, a string that has to be
+quoted to stay a string. So resolved mode answered
+`entity_id: '!input button_entity'` where the file says
+`entity_id: !input button_entity` — a blueprint rewritten into one that triggers
+on an entity literally named `!input button_entity`, still valid YAML, nothing
+to complain about (live-fire finding #20; the same for
+`Authorization: !secret tibber_token`). The file it was found in contains no
+`!include` at all, so this was never include resolution going wrong: it was
+every unknown tag in every file, and resolved mode's own help promises only to
+resolve `!include`. `PreservedTag` carries the tag and its argument beside the
+text and is registered on `RoundTripRepresenter` at import, so any dumper that
+meets one — this resolver's, `routes/config.py`'s, `surgical.py`'s — emits the
+tag. The half that has to keep being true is the *dump*, and a test that reads
+the answer back with `yaml.safe_load` cannot see it: safe_load has no
+constructor for `!secret`, so it passes only while the corruption is there.
+
+- Enforced by: `tests/test_resolver.py::test_unresolved_tag_keeps_its_directive`
+  (asserts the rendered text, and round-trips it back to a tag),
+  `::test_input_tag_survives_a_file_with_no_include` (the reported shape: a
+  blueprint with `!input` and no `!include`),
+  `tests/test_resolver.py::test_unknown_include_tag_is_refused_not_degraded`,
   `::test_known_include_tags_still_resolve` (a guard that rejects everything is
   not a guard), `::test_unknown_include_tag_still_readable_unresolved`,
   `::test_preserved_tags_are_not_include_family` and
