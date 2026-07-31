@@ -15,6 +15,8 @@ concurrency:
 permissions:
   contents: write
   actions: write
+  # The version bump lands on protected main through a pull request.
+  pull-requests: write
 
 jobs:
   # ---------- Job 0: compute next patch version ----------
@@ -90,9 +92,25 @@ jobs:
           python-version: "3.12"
       - run: uv sync --extra dev
 
-      # Bump the version FIRST and push to main, so the tag cut next points at
+      # Bump the version FIRST and land it on main, so the tag cut next points at
       # the bumped commit. Otherwise the image (built from the tag) is built from
       # pre-bump code and self-reports the previous version.
+      #
+      # The bump goes through a pull request, not `git push origin HEAD:main`.
+      # main requires three status checks and has enforce_admins on, so a commit
+      # created seconds ago cannot be pushed to it by anyone: it has no check
+      # results, and there is no identity left that may skip them. The direct
+      # push failed exactly that way on the first release after the protection
+      # went on (2026-07-31, v2026.7.9):
+      #
+      #     remote: error: GH006: Protected branch update failed for refs/heads/main.
+      #     remote: - 3 of 3 required status checks are expected.
+      #
+      # Auto-merge lets the required checks run and then squashes the bump in.
+      # This step does not return until the bump is actually on main, because
+      # "Create GitHub Release" below cuts its tag from --target main and would
+      # otherwise tag the pre-bump commit — the very failure the ordering above
+      # exists to prevent.
       - name: Bump version on main
         env:
           GH_TOKEN: ${{ secrets.PACKAGES_TOKEN }}
@@ -124,7 +142,33 @@ jobs:
           mv /tmp/changelog_new.md hactl_companion/CHANGELOG.md
           git add pyproject.toml openapi/companion-v1.yaml hactl_companion/config.yaml src/companion/__init__.py hactl_companion/CHANGELOG.md
           git commit -m "release: bump version to ${VER}"
-          git push origin HEAD:main
+
+          # Force-push and tolerate an existing PR: a run that died while the
+          # bump PR was open must be able to resume onto the same branch.
+          branch="release/bump-${VER}"
+          git push --force origin "HEAD:refs/heads/${branch}"
+          gh pr create --base main --head "${branch}" \
+            --title "release: bump version to ${VER}" \
+            --body "Version bump for ${tag}, opened by the patch-release workflow. Auto-merges once the required checks pass; the release job is blocked until it lands." \
+            || echo "::notice::a PR for ${branch} already exists; reusing it"
+          # --auto is refused when the PR is already mergeable (nothing left to
+          # wait for), so fall back to merging it outright.
+          gh pr merge "${branch}" --squash --auto --delete-branch \
+            || gh pr merge "${branch}" --squash --delete-branch
+
+          # Wait for the squash to appear on main. Poll the file rather than the
+          # PR state: what the next step needs is the bumped content reachable
+          # from main, and that is what this asserts.
+          for _ in $(seq 1 60); do
+            sleep 20
+            git fetch --quiet origin main
+            if git show "origin/main:hactl_companion/config.yaml" | grep -qx "version: \"${VER}\""; then
+              echo "::notice::bump for ${VER} landed on main"
+              exit 0
+            fi
+          done
+          echo "::error::bump PR for ${VER} did not land on main within 20 minutes — check its required checks, then re-run this workflow (the bump step is idempotent)"
+          exit 1
 
       - name: Create GitHub Release
         env:
