@@ -238,26 +238,67 @@ A gate built on it would pass exactly the payloads that cause the harm. The
 integration test asserts that `valid`, so the day HA can answer earlier is the
 day the suite says so.
 
-The create is also append-only *as text*: it concatenates the new item instead
-of re-dumping the parsed file, so a file whose sequence indent differs from the
-dumper's does not come back reformatted around an entry added at its end. Text
-concatenation can only fail by producing a file that no longer reads as
-`old + [item]`; that is checked, with the structural dump as fallback.
+Which block an entry lands in is this invariant; how few bytes the write
+disturbs is **C-14**, and the create inherits it — the new item is spliced in
+rather than re-dumped, so a file whose sequence indent differs from the dumper's
+does not come back reformatted around an entry added at its end.
 
 Scope: this is a named example, not a sweep. The other creates append their own
 top-level item already (`automations.yaml`) or write a key into a mapping-rooted
 file (`scripts.yaml`, the helper files), so no shared item exists for them to
-widen. `PUT`/`DELETE` still round-trip the whole file.
+widen.
 
 - Enforced by: `tests/test_templates.py::test_bare_item_gets_its_own_block`,
   `::test_two_bare_items_of_one_domain_do_not_share_a_block`,
   `::test_bare_item_create_only_appends_bytes`,
   `::test_full_block_create_only_appends_bytes`,
   `::test_bare_item_leaves_a_trigger_block_byte_identical`,
-  `::test_create_falls_back_to_a_structural_write_when_text_append_would_not_parse`,
+  `::test_create_falls_back_to_a_whole_file_write_on_a_layout_the_splice_cannot_cover`,
   and `tests/integration/test_live.py::TestTemplateBlockIsolation::test_a_created_entry_survives_a_poisoned_neighbouring_block`
   (HA restarted in place: the created entry comes up, the good neighbour of the
   bad entry does not)
+## C-14 — A single-entry write rewrites only that entry's bytes
+
+`POST`/`PUT`/`DELETE` on `/v1/config/{automation,script,template,helper}` change
+one entry, so they change one entry's lines in the file and leave every other
+byte exactly as it was. Comments, blank lines, line folding, indentation and
+quote style elsewhere in the file survive verbatim; only the touched entry gets
+tool-normalized formatting.
+
+The defect this closes was not a misunderstood feature. All four route families
+wrote their file back with a whole-document `yaml.dump(data, f)`, so one
+confirmed automation write came back having reformatted ~34 unrelated real
+automations (live-fire 2026-07-30, P1 #4) — semantically lossless, which is why
+every value-level test in the suite stayed green, and still a defect: it
+clobbers hand-maintained formatting and makes `git diff` on a config repo
+useless. **The check is therefore on bytes, never on parsed values.**
+
+`companion/surgical.py` performs the write as a line splice and *verifies it*:
+the spliced text is re-parsed and compared against the tree the route meant to
+write, and any disagreement — an unparseable result, an anchor whose definition
+lived in the replaced entry, a layout the span arithmetic does not cover — falls
+back to the whole-file dump. A fallback is never silent: the response carries
+`reformatted: true` (absent otherwise, the same shape `reload_error` uses), so a
+caller keeping its config in git is told the difference between "your entry
+changed" and "the file was rewritten".
+
+A route that rewrites a whole file by nature (`PUT /v1/config/file`, whose
+caller supplies the content; `POST /v1/ref/replace`, which rewrites scalars
+scattered across a whole `!include` graph — leaf-granular splicing is #88)
+declares a `whole_file_reason` instead. The canary enforces the choice.
+
+- Enforced by: `tests/test_invariants.py::test_single_entry_write_leaves_every_other_byte_alone`
+  (sweeps every route declaring `surgical`, and carries an anti-vacuity guard
+  that re-runs the old whole-file writer on the same input and requires it to
+  have damaged lines outside the edited region — so a fixture that is already in
+  ruamel's canonical form cannot make the sweep pass against either writer) and
+  `::test_every_file_write_declares_a_formatting_stance` (canary);
+  `tests/test_surgical.py` (byte-level behaviour: comments between entries,
+  block scalars, unicode, CRLF, indented sequences, and each fallback still
+  producing correct content); `tests/integration/test_live.py::TestSurgicalWrites`
+  (a real HA loads the spliced file, and the same edit through HA's own
+  `/api/config/automation/config/<id>` is shown re-serializing the whole file —
+  the boundary of what this service can fix)
 
 ---
 

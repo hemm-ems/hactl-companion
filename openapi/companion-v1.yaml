@@ -620,6 +620,12 @@ paths:
                     description: "Why the reload failed: HA's HTTP status plus a bounded
                       excerpt of its response body, or the transport error class.
                       Present only when `reloaded` is false; absent otherwise."
+                  reformatted:
+                    type: boolean
+                    description: True when the whole file had to be 
+                      re-serialized instead of only this entry's lines, so 
+                      formatting elsewhere in the file may have changed. Absent 
+                      otherwise.
         4XX:
           $ref: '#/components/responses/Error'
         5XX:
@@ -667,6 +673,12 @@ paths:
                     description: "Why the reload failed: HA's HTTP status plus a bounded
                       excerpt of its response body, or the transport error class.
                       Present only when `reloaded` is false; absent otherwise."
+                  reformatted:
+                    type: boolean
+                    description: True when the whole file had to be 
+                      re-serialized instead of only this entry's lines, so 
+                      formatting elsewhere in the file may have changed. Absent 
+                      otherwise.
         4XX:
           $ref: '#/components/responses/Error'
         5XX:
@@ -724,6 +736,12 @@ paths:
                     description: "Why the reload failed: HA's HTTP status plus a bounded
                       excerpt of its response body, or the transport error class.
                       Present only when `reloaded` is false; absent otherwise."
+                  reformatted:
+                    type: boolean
+                    description: True when the whole file had to be 
+                      re-serialized instead of only this entry's lines, so 
+                      formatting elsewhere in the file may have changed. Absent 
+                      otherwise.
         4XX:
           $ref: '#/components/responses/Error'
         5XX:
@@ -850,6 +868,12 @@ paths:
                     description: "Why the reload failed: HA's HTTP status plus a bounded
                       excerpt of its response body, or the transport error class.
                       Present only when `reloaded` is false; absent otherwise."
+                  reformatted:
+                    type: boolean
+                    description: True when the whole file had to be 
+                      re-serialized instead of only this entry's lines, so 
+                      formatting elsewhere in the file may have changed. Absent 
+                      otherwise.
         4XX:
           $ref: '#/components/responses/Error'
         5XX:
@@ -1002,6 +1026,12 @@ paths:
                     description: "Why the reload failed: HA's HTTP status plus a bounded
                       excerpt of its response body, or the transport error class.
                       Present only when `reloaded` is false; absent otherwise."
+                  reformatted:
+                    type: boolean
+                    description: True when the whole file had to be 
+                      re-serialized instead of only this entry's lines, so 
+                      formatting elsewhere in the file may have changed. Absent 
+                      otherwise.
         4XX:
           $ref: '#/components/responses/Error'
         5XX:
@@ -1129,6 +1159,12 @@ paths:
                     description: "Why the reload failed: HA's HTTP status plus a bounded
                       excerpt of its response body, or the transport error class.
                       Present only when `reloaded` is false; absent otherwise."
+                  reformatted:
+                    type: boolean
+                    description: True when the whole file had to be 
+                      re-serialized instead of only this entry's lines, so 
+                      formatting elsewhere in the file may have changed. Absent 
+                      otherwise.
                   entity_created:
                     type: boolean
         4XX:

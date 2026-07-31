@@ -448,15 +448,21 @@ async def test_full_block_create_only_appends_bytes(
     assert "tpl_wohnzimmer_motion" not in added, "an untouched entity was re-emitted"
 
 
-async def test_create_falls_back_to_a_structural_write_when_text_append_would_not_parse(
+async def test_create_falls_back_to_a_whole_file_write_on_a_layout_the_splice_cannot_cover(
     client: TestClient, auth_headers: dict[str, str], config_dir: Path
 ) -> None:
-    """A flow-style top-level list cannot be appended to as text — it must still create."""
+    """A flow-style top-level list has no entry span to splice — it must still create.
+
+    C-13 (whose block) and C-14 (how few bytes) meet here: the entry still goes
+    into its own item, and the write falls back to the whole-file dump, which
+    C-14 requires to announce itself rather than pass for a surgical write.
+    """
     (config_dir / "template.yaml").write_text(
         '[{sensor: [{unique_id: tpl_flow, name: Flow, state: "{{ 1 }}"}]}]\n', encoding="utf-8"
     )
     resp = await _post(client, auth_headers, PLAIN_SENSOR, "?domain=sensor")
     assert resp.status == 201, await resp.text()
+    assert (await resp.json()).get("reformatted") is True, "the fallback must not pass for a surgical write"
 
     data = _read_template_yaml(config_dir)
     assert [next(iter(b["sensor"]))["unique_id"] for b in data] == ["tpl_flow", "tpl_isolated"]

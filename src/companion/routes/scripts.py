@@ -12,6 +12,7 @@ from ruamel.yaml import YAML
 
 from companion import core_api
 from companion.params import parse_bool_param
+from companion.surgical import Edit, read_source, save_entry, write_fields
 from companion.wiring import require_wired_target, wired_target_or_default
 
 yaml = YAML()
@@ -28,39 +29,30 @@ class RouteDef:
     handler: object
 
 
-def _load_scripts(base: str) -> tuple[dict[str, Any], Any]:
-    """Load the script file, returning (data_dict, file_path).
+def _load_scripts(base: str) -> tuple[dict[str, Any], Path, str]:
+    """Load the script file, returning (data_dict, file_path, source_text).
 
     The file is whichever one ``configuration.yaml`` wires ``script:`` to,
     falling back to the conventional name when that cannot be established.
     """
-    return _load_scripts_from(wired_target_or_default(base, SCRIPT_DOMAIN, SCRIPTS_FILE))
+    return _load_scripts_from(base, wired_target_or_default(base, SCRIPT_DOMAIN, SCRIPTS_FILE))
 
 
-def _load_scripts_from(target: Path) -> tuple[dict[str, Any], Any]:
-    """Load an explicit script file, returning (data_dict, path)."""
+def _load_scripts_from(base: str, target: Path) -> tuple[dict[str, Any], Path, str]:
+    """Load an explicit script file, returning (data_dict, path, source_text).
+
+    The source text travels with the parsed data so a write can rewrite only the
+    entry it was asked to change (see :mod:`companion.surgical`).
+    """
     if not target.is_file():
         raise web.HTTPNotFound(text=f"File not found: {target.name}")
-    with open(target, encoding="utf-8") as f:
-        data = yaml.load(f)
+    source = read_source(base, target)
+    data = yaml.load(StringIO(source))
     if data is None:
         data = {}
     if not isinstance(data, dict):
         raise web.HTTPInternalServerError(text="scripts.yaml must be a top-level mapping")
-    return data, target
-
-
-def _save_scripts(target: Any, data: dict[str, Any]) -> None:
-    """Write script data back to file with backup."""
-    from pathlib import Path
-
-    from companion.backups import make_backup
-
-    path = Path(target)
-    make_backup(path)
-
-    with open(path, "w", encoding="utf-8") as f:
-        yaml.dump(data, f)
+    return data, target, source
 
 
 def _extract_fields(script: dict[str, Any]) -> list[dict[str, Any]]:
@@ -115,7 +107,7 @@ def _normalize_script_body(script_id: str, new_data: dict[str, Any]) -> dict[str
 async def get_scripts(request: web.Request) -> web.Response:
     """GET /v1/config/scripts — list all script definitions."""
     base = request.app["config_base_path"]
-    data, _target = _load_scripts(base)
+    data, _target, _source = _load_scripts(base)
 
     result: list[dict[str, Any]] = []
     for script_id, script in data.items():
@@ -140,7 +132,7 @@ async def get_script(request: web.Request) -> web.Response:
     if not script_id:
         raise web.HTTPBadRequest(text="Missing id parameter")
 
-    data, _target = _load_scripts(base)
+    data, _target, _source = _load_scripts(base)
     if script_id not in data:
         raise web.HTTPNotFound(text=f"Script not found: {script_id}")
 
@@ -171,7 +163,7 @@ async def put_script(request: web.Request) -> web.Response:
         raise web.HTTPBadRequest(text="Script must be a YAML mapping")
     script_body = _normalize_script_body(script_id, new_data)
 
-    data, target = _load_scripts(base)
+    data, target, source = _load_scripts(base)
     if script_id not in data:
         raise web.HTTPNotFound(text=f"Script not found: {script_id}")
 
@@ -193,9 +185,9 @@ async def put_script(request: web.Request) -> web.Response:
         return web.json_response({"status": "dry_run", "diff": diff})
 
     data[script_id] = script_body
-    _save_scripts(target, data)
+    surgical = save_entry(base, target, data, source, Edit("replace", script_id), yaml)
     reload = await core_api.reload_domain("script")
-    return web.json_response({"status": "applied", **core_api.reload_fields(reload)})
+    return web.json_response({"status": "applied", **write_fields(surgical), **core_api.reload_fields(reload)})
 
 
 async def post_script(request: web.Request) -> web.Response:
@@ -217,14 +209,17 @@ async def post_script(request: web.Request) -> web.Response:
     script_body = new_data[script_id]
 
     # C-10: prove HA reads this file before claiming the script was created.
-    data, target = _load_scripts_from(require_wired_target(base, SCRIPT_DOMAIN, SCRIPTS_FILE))
+    data, target, source = _load_scripts_from(base, require_wired_target(base, SCRIPT_DOMAIN, SCRIPTS_FILE))
     if script_id in data:
         raise web.HTTPConflict(text=f"Script already exists: {script_id}")
 
     data[script_id] = script_body
-    _save_scripts(target, data)
+    surgical = save_entry(base, target, data, source, Edit("append", script_id), yaml)
     reload = await core_api.reload_domain("script")
-    return web.json_response({"status": "created", "id": script_id, **core_api.reload_fields(reload)}, status=201)
+    return web.json_response(
+        {"status": "created", "id": script_id, **write_fields(surgical), **core_api.reload_fields(reload)},
+        status=201,
+    )
 
 
 async def delete_script(request: web.Request) -> web.Response:
@@ -234,14 +229,14 @@ async def delete_script(request: web.Request) -> web.Response:
     if not script_id:
         raise web.HTTPBadRequest(text="Missing id parameter")
 
-    data, target = _load_scripts(base)
+    data, target, source = _load_scripts(base)
     if script_id not in data:
         raise web.HTTPNotFound(text=f"Script not found: {script_id}")
 
     del data[script_id]
-    _save_scripts(target, data)
+    surgical = save_entry(base, target, data, source, Edit("delete", script_id), yaml)
     reload = await core_api.reload_domain("script")
-    return web.json_response({"status": "deleted", **core_api.reload_fields(reload)})
+    return web.json_response({"status": "deleted", **write_fields(surgical), **core_api.reload_fields(reload)})
 
 
 routes: list[RouteDef] = [

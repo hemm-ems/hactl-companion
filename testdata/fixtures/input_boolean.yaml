@@ -5,3 +5,10 @@ guest_mode:
 vacation_mode:
   name: Vacation Mode
   icon: mdi:beach
+
+# A long hand-written line, kept unwrapped on purpose: a whole-file re-serialization
+# refolds it at its own width, which is what lets this fixture tell a surgical
+# single-entry write apart from a full re-dump (INVARIANTS.md C-13).
+winterdienst_bereitschaft:
+  name: Winterdienst-Bereitschaft für Einfahrt, Gehweg, Zufahrt zur Tiefgarage und Mülltonnenplatz
+  icon: mdi:snowflake

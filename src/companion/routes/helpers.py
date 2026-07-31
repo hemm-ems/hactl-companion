@@ -15,6 +15,7 @@ from aiohttp import web
 from ruamel.yaml import YAML
 
 from companion import core_api
+from companion.surgical import Edit, read_source, save_entry, write_fields
 from companion.wiring import require_wired_target, wired_target_or_default
 
 yaml = YAML()
@@ -44,24 +45,26 @@ def _yaml_file_for_domain(domain: str) -> str:
     return f"{domain}.yaml"
 
 
-def _load_helpers_from(target: Path) -> dict[str, Any]:
+def _load_helpers_from(base: str, target: Path) -> tuple[dict[str, Any], str]:
     """Load a helper YAML file's dict content from an explicit path.
 
-    If the file doesn't exist, returns an empty dict.
+    Returns ``(data, source_text)``; an absent file is an empty mapping and empty
+    text. The source travels with the parsed data so a write can rewrite only the
+    entry it was asked to change (see :mod:`companion.surgical`).
     """
     if not target.is_file():
-        return {}
-    with open(target, encoding="utf-8") as f:
-        data = yaml.load(f)
+        return {}, ""
+    source = read_source(base, target)
+    data = yaml.load(StringIO(source))
     if data is None:
         data = {}
     if not isinstance(data, dict):
         raise web.HTTPInternalServerError(text=f"{target.name} must be a top-level mapping")
-    return data
+    return data, source
 
 
-def _load_helpers(base: str, domain: str) -> tuple[dict[str, Any], Any]:
-    """Load a helper YAML file, returning (data_dict, file_path).
+def _load_helpers(base: str, domain: str) -> tuple[dict[str, Any], Path, str]:
+    """Load a helper YAML file, returning (data_dict, file_path, source_text).
 
     Helper files are top-level mappings keyed by entity slug. The file is the
     one ``configuration.yaml`` wires the domain to, falling back to the
@@ -72,7 +75,8 @@ def _load_helpers(base: str, domain: str) -> tuple[dict[str, Any], Any]:
     invisible to the ``helper ls`` that follows it.
     """
     target = wired_target_or_default(base, domain, _yaml_file_for_domain(domain))
-    return _load_helpers_from(target), target
+    data, source = _load_helpers_from(base, target)
+    return data, target, source
 
 
 async def _poll_entity_created(entity_id: str, attempts: int = 5, delay: float = 0.4) -> bool:
@@ -85,19 +89,6 @@ async def _poll_entity_created(entity_id: str, attempts: int = 5, delay: float =
         if await core_api.get_state(entity_id) is not None:
             return True
     return False
-
-
-def _save_helpers(target: Any, data: dict[str, Any]) -> None:
-    """Write helper data back to file with backup."""
-    from pathlib import Path
-
-    from companion.backups import make_backup
-
-    path = Path(target)
-    make_backup(path)
-
-    with open(path, "w", encoding="utf-8") as f:
-        yaml.dump(data, f)
 
 
 def _validate_domain(domain: str) -> None:
@@ -119,7 +110,7 @@ async def get_helpers(request: web.Request) -> web.Response:
     result: list[dict[str, Any]] = []
     for domain in domains:
         _validate_domain(domain)
-        data, _target = _load_helpers(base, domain)
+        data, _target, _source = _load_helpers(base, domain)
         for helper_id, helper in data.items():
             if not isinstance(helper, dict):
                 continue
@@ -146,7 +137,7 @@ async def get_helper(request: web.Request) -> web.Response:
         raise web.HTTPBadRequest(text="Missing id parameter")
 
     for domain in sorted(ALLOWED_DOMAINS):
-        data, _target = _load_helpers(base, domain)
+        data, _target, _source = _load_helpers(base, domain)
         if helper_id in data:
             stream = StringIO()
             yaml.dump({helper_id: data[helper_id]}, stream)
@@ -180,12 +171,12 @@ async def post_helper(request: web.Request) -> web.Response:
     helper_id = next(iter(new_data))
     helper_body = new_data[helper_id]
 
-    data = _load_helpers_from(target)
+    data, source = _load_helpers_from(base, target)
     if helper_id in data:
         raise web.HTTPConflict(text=f"Helper already exists: {helper_id}")
 
     data[helper_id] = helper_body
-    _save_helpers(target, data)
+    surgical = save_entry(base, target, data, source, Edit("append", helper_id), yaml)
     reload = await core_api.reload_domain(domain)
     entity_id = f"{domain}.{helper_id}"
     entity_created = await _poll_entity_created(entity_id) if reload.ok else False
@@ -194,6 +185,7 @@ async def post_helper(request: web.Request) -> web.Response:
             "status": "created",
             "id": helper_id,
             "entity_id": entity_id,
+            **write_fields(surgical),
             **core_api.reload_fields(reload),
             "entity_created": entity_created,
         },
@@ -201,7 +193,7 @@ async def post_helper(request: web.Request) -> web.Response:
     )
 
 
-def _locate_helper(base: str, helper_id: str, domain: str | None) -> tuple[str, dict[str, Any], Any]:
+def _locate_helper(base: str, helper_id: str, domain: str | None) -> tuple[str, dict[str, Any], Path, str]:
     """Locate the domain file that owns ``helper_id`` for update/delete.
 
     With an explicit ``domain`` only that domain is considered. Without one, all
@@ -210,25 +202,25 @@ def _locate_helper(base: str, helper_id: str, domain: str | None) -> tuple[str, 
     silently acting on the alphabetically-first match would touch the wrong
     entity — instead the ambiguity is surfaced as a 409 listing the candidates.
 
-    Returns ``(domain, data_dict, file_path)``.
+    Returns ``(domain, data_dict, file_path, source_text)``.
     """
     if domain:
         _validate_domain(domain)
-        data, target = _load_helpers(base, domain)
+        data, target, source = _load_helpers(base, domain)
         if helper_id in data:
-            return domain, data, target
+            return domain, data, target, source
         raise web.HTTPNotFound(text=f"Helper not found: {helper_id} (domain {domain})")
 
-    matches: list[tuple[str, dict[str, Any], Any]] = []
+    matches: list[tuple[str, dict[str, Any], Path, str]] = []
     for candidate in sorted(ALLOWED_DOMAINS):
-        data, target = _load_helpers(base, candidate)
+        data, target, source = _load_helpers(base, candidate)
         if helper_id in data:
-            matches.append((candidate, data, target))
+            matches.append((candidate, data, target, source))
 
     if not matches:
         raise web.HTTPNotFound(text=f"Helper not found: {helper_id}")
     if len(matches) > 1:
-        domains = ", ".join(candidate for candidate, _, _ in matches)
+        domains = ", ".join(candidate for candidate, _, _, _ in matches)
         raise web.HTTPConflict(
             text=(f"Helper id '{helper_id}' is ambiguous across domains: {domains}. Retry with ?domain=<one of these>.")
         )
@@ -255,11 +247,11 @@ async def put_helper(request: web.Request) -> web.Response:
     if not isinstance(new_body, dict):
         raise web.HTTPBadRequest(text="Helper must be a YAML mapping")
 
-    domain, data, target = _locate_helper(base, helper_id, domain_param)
+    domain, data, target, source = _locate_helper(base, helper_id, domain_param)
     data[helper_id] = new_body
-    _save_helpers(target, data)
+    surgical = save_entry(base, target, data, source, Edit("replace", helper_id), yaml)
     reload = await core_api.reload_domain(domain)
-    return web.json_response({"status": "applied", **core_api.reload_fields(reload)})
+    return web.json_response({"status": "applied", **write_fields(surgical), **core_api.reload_fields(reload)})
 
 
 async def delete_helper(request: web.Request) -> web.Response:
@@ -270,11 +262,11 @@ async def delete_helper(request: web.Request) -> web.Response:
         raise web.HTTPBadRequest(text="Missing id parameter")
     domain_param = request.query.get("domain") or None
 
-    domain, data, target = _locate_helper(base, helper_id, domain_param)
+    domain, data, target, source = _locate_helper(base, helper_id, domain_param)
     del data[helper_id]
-    _save_helpers(target, data)
+    surgical = save_entry(base, target, data, source, Edit("delete", helper_id), yaml)
     reload = await core_api.reload_domain(domain)
-    return web.json_response({"status": "deleted", **core_api.reload_fields(reload)})
+    return web.json_response({"status": "deleted", **write_fields(surgical), **core_api.reload_fields(reload)})
 
 
 routes: list[RouteDef] = [
