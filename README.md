@@ -46,10 +46,11 @@ HA OS / Supervised
 | GET | `/v1/config/files` | List YAML config files |
 | GET | `/v1/config/file?path=...` | Read a config file |
 | GET | `/v1/config/block?path=...&id=...` | Read a specific block |
+| GET | `/v1/config/wiring?domain=...` | Would a create for this domain reach a file HA reads? |
 | PUT | `/v1/config/file?path=...&dry_run=true` | Diff preview |
 | PUT | `/v1/config/file?path=...&dry_run=false` | Write with backup + validation |
 | GET | `/v1/config/helpers?domain=...` | List helpers (optional domain filter) |
-| GET | `/v1/config/helper?id=...` | Get a single helper definition |
+| GET | `/v1/config/helper?id=...` | Get a single helper definition (YAML or UI/storage-backed) |
 | POST | `/v1/config/helper` | Create a helper (JSON: domain, id, content) |
 | PUT | `/v1/config/helper` | Update a helper (JSON: domain, id, content) |
 | DELETE | `/v1/config/helper?domain=...&id=...` | Delete a helper |

@@ -132,8 +132,28 @@ layouts this cannot prove (`homeassistant: packages:`, `!include_dir_*`,
 several candidate files) are refused with the reason named; `PUT
 /v1/config/file` remains the escape hatch (C-6 validates the result).
 
+**The same answer is askable before the write.** `GET /v1/config/wiring?domain=`
+runs the identical resolution and returns the verdict: `wired`, plus either the
+`file` a new entry would land in or the `reason` — byte-identical to the 400 the
+create raises. Without it a client cannot keep its own promise that a preview
+fails exactly where the confirmed run does (hactl H-2): the check lived inside
+the create, so `helper create`'s dry run printed "would create" for all eight
+helper domains on an instance whose `input_boolean:` is written inline — eight
+confident previews, eight deterministic 400s. The alternative, re-deriving these
+six rules in the client, is the four-copy contract drift this project has
+already paid for once. Every domain a create route declares must be answerable
+here, and the probe's verdict must **equal** that create's verdict on every
+layout — asserted as equality over the create table, not as two hand-written
+expectations free to drift apart.
+
 - Enforced by: `tests/test_invariants.py::test_create_refuses_when_configuration_does_not_include_the_file`
-  (sweeps every create route in the `FILE_WRITES` probe table) and
+  (sweeps every create route in the `FILE_WRITES` probe table),
+  `::test_wiring_probe_agrees_with_the_create_it_predicts` (the equality, over
+  the same table × wired/inline/absent layouts),
+  `tests/test_wiring_route.py` (probe shape, refusal branches, and that probing
+  writes nothing),
+  `tests/integration/test_live.py::TestWiringProbeAgreesWithTheCreate` (the same
+  equality against real HA, on the inline layout that produced the defect) and
   `tests/test_invariants.py::test_every_file_write_declares_a_wiring_stance`
   (canary: a new file-writing route must declare `wiring` or a
   `no_wiring_reason`), `tests/test_wiring.py` (resolution and refusal rules),
@@ -162,7 +182,29 @@ their directive text (`!secret home_lat` renders as `!secret home_lat`, never
 the bare `home_lat`), and `resolve=false` stays available for any file the
 resolver refuses.
 
-- Enforced by: `tests/test_resolver.py::test_unknown_include_tag_is_refused_not_degraded`,
+**Preserving a tag is a property of the rendering, not only of the resolution.**
+The directive was preserved correctly and then quoted on the way out, because a
+Python `str` beginning with `!` is, to a YAML emitter, a string that has to be
+quoted to stay a string. So resolved mode answered
+`entity_id: '!input button_entity'` where the file says
+`entity_id: !input button_entity` — a blueprint rewritten into one that triggers
+on an entity literally named `!input button_entity`, still valid YAML, nothing
+to complain about (live-fire finding #20; the same for
+`Authorization: !secret tibber_token`). The file it was found in contains no
+`!include` at all, so this was never include resolution going wrong: it was
+every unknown tag in every file, and resolved mode's own help promises only to
+resolve `!include`. `PreservedTag` carries the tag and its argument beside the
+text and is registered on `RoundTripRepresenter` at import, so any dumper that
+meets one — this resolver's, `routes/config.py`'s, `surgical.py`'s — emits the
+tag. The half that has to keep being true is the *dump*, and a test that reads
+the answer back with `yaml.safe_load` cannot see it: safe_load has no
+constructor for `!secret`, so it passes only while the corruption is there.
+
+- Enforced by: `tests/test_resolver.py::test_unresolved_tag_keeps_its_directive`
+  (asserts the rendered text, and round-trips it back to a tag),
+  `::test_input_tag_survives_a_file_with_no_include` (the reported shape: a
+  blueprint with `!input` and no `!include`),
+  `tests/test_resolver.py::test_unknown_include_tag_is_refused_not_degraded`,
   `::test_known_include_tags_still_resolve` (a guard that rejects everything is
   not a guard), `::test_unknown_include_tag_still_readable_unresolved`,
   `::test_preserved_tags_are_not_include_family` and
@@ -208,6 +250,97 @@ as stale.
 - Enforced by: `tests/test_spec_conformance.py::test_every_endpoint_is_conformance_classified`
   (the canary), `::test_route_response_conformance` (both directions, one case
   per route), and `::test_unobserved_field_exemptions_are_for_known_routes`
+
+## C-13 — A create never writes into a block it did not create
+
+Home Assistant's unit of rejection in `template.yaml` is the **top-level list
+item**. When one entity in a block fails validation HA drops the entire item:
+its valid siblings do not go stale, they leave the state machine and come back
+as `unavailable` with `restored: true`. Entities in a *different* item are
+untouched. Measured against a live HA in both directions — four entities across
+four items all registered (so repeating a domain at the top level costs
+nothing), then one bad `device_class` added to the first item took that item's
+good sensor down while the second item's sensor kept its value; repeated with
+`select` options given as a YAML list, same result.
+
+So `POST /v1/config/template` appends every entry as its own new top-level item
+and never extends an existing one — not even a state-based block already
+declaring the same domain, which is what it used to do. On a real instance that
+block is the user's: the first `sensor:` block held two production sensors, the
+first `binary_sensor:` block the flat's occupancy sensor, and a single bad
+payload filed next to them would have darked all of them. A per-entry block
+bounds the damage of a bad entry to that entry. A tool-owned block per domain
+was rejected for the same reason — smaller blast radius, still not one.
+
+There is no pre-write validity gate instead: `POST /config/core/check_config`
+answered `valid` for both poisoned files above while HA's own setup logged
+`Invalid config for 'template' at template.yaml` for them — entity-level
+template schema errors surface when the platform sets up, not at config check.
+A gate built on it would pass exactly the payloads that cause the harm. The
+integration test asserts that `valid`, so the day HA can answer earlier is the
+day the suite says so.
+
+Which block an entry lands in is this invariant; how few bytes the write
+disturbs is **C-14**, and the create inherits it — the new item is spliced in
+rather than re-dumped, so a file whose sequence indent differs from the dumper's
+does not come back reformatted around an entry added at its end.
+
+Scope: this is a named example, not a sweep. The other creates append their own
+top-level item already (`automations.yaml`) or write a key into a mapping-rooted
+file (`scripts.yaml`, the helper files), so no shared item exists for them to
+widen.
+
+- Enforced by: `tests/test_templates.py::test_bare_item_gets_its_own_block`,
+  `::test_two_bare_items_of_one_domain_do_not_share_a_block`,
+  `::test_bare_item_create_only_appends_bytes`,
+  `::test_full_block_create_only_appends_bytes`,
+  `::test_bare_item_leaves_a_trigger_block_byte_identical`,
+  `::test_create_falls_back_to_a_whole_file_write_on_a_layout_the_splice_cannot_cover`,
+  and `tests/integration/test_live.py::TestTemplateBlockIsolation::test_a_created_entry_survives_a_poisoned_neighbouring_block`
+  (HA restarted in place: the created entry comes up, the good neighbour of the
+  bad entry does not)
+## C-14 — A single-entry write rewrites only that entry's bytes
+
+`POST`/`PUT`/`DELETE` on `/v1/config/{automation,script,template,helper}` change
+one entry, so they change one entry's lines in the file and leave every other
+byte exactly as it was. Comments, blank lines, line folding, indentation and
+quote style elsewhere in the file survive verbatim; only the touched entry gets
+tool-normalized formatting.
+
+The defect this closes was not a misunderstood feature. All four route families
+wrote their file back with a whole-document `yaml.dump(data, f)`, so one
+confirmed automation write came back having reformatted ~34 unrelated real
+automations (live-fire 2026-07-30, P1 #4) — semantically lossless, which is why
+every value-level test in the suite stayed green, and still a defect: it
+clobbers hand-maintained formatting and makes `git diff` on a config repo
+useless. **The check is therefore on bytes, never on parsed values.**
+
+`companion/surgical.py` performs the write as a line splice and *verifies it*:
+the spliced text is re-parsed and compared against the tree the route meant to
+write, and any disagreement — an unparseable result, an anchor whose definition
+lived in the replaced entry, a layout the span arithmetic does not cover — falls
+back to the whole-file dump. A fallback is never silent: the response carries
+`reformatted: true` (absent otherwise, the same shape `reload_error` uses), so a
+caller keeping its config in git is told the difference between "your entry
+changed" and "the file was rewritten".
+
+A route that rewrites a whole file by nature (`PUT /v1/config/file`, whose
+caller supplies the content; `POST /v1/ref/replace`, which rewrites scalars
+scattered across a whole `!include` graph — leaf-granular splicing is #88)
+declares a `whole_file_reason` instead. The canary enforces the choice.
+
+- Enforced by: `tests/test_invariants.py::test_single_entry_write_leaves_every_other_byte_alone`
+  (sweeps every route declaring `surgical`, and carries an anti-vacuity guard
+  that re-runs the old whole-file writer on the same input and requires it to
+  have damaged lines outside the edited region — so a fixture that is already in
+  ruamel's canonical form cannot make the sweep pass against either writer) and
+  `::test_every_file_write_declares_a_formatting_stance` (canary);
+  `tests/test_surgical.py` (byte-level behaviour: comments between entries,
+  block scalars, unicode, CRLF, indented sequences, and each fallback still
+  producing correct content); `tests/integration/test_live.py::TestSurgicalWrites`
+  (a real HA loads the spliced file, and the same edit through HA's own
+  `/api/config/automation/config/<id>` is shown re-serializing the whole file —
+  the boundary of what this service can fix)
 
 ---
 

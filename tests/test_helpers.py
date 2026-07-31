@@ -27,7 +27,7 @@ async def test_list_helpers_by_domain(client: TestClient, auth_headers: dict[str
     assert resp.status == 200
     data = await resp.json()
     helpers = data["helpers"]
-    assert len(helpers) == 2
+    assert len(helpers) == 3
     assert all(h["domain"] == "input_boolean" for h in helpers)
 
 

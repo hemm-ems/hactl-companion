@@ -16,12 +16,15 @@ can.
 
 from __future__ import annotations
 
+import difflib
 import re
+from io import StringIO
 from pathlib import Path
 from typing import Any
 
 import pytest
 from aiohttp.test_utils import TestClient
+from ruamel.yaml import YAML
 
 from companion.backups import BACKUP_DIRNAME
 from companion.openapi import ENDPOINT_META
@@ -96,8 +99,12 @@ def _seed_ref_target(config_dir: Path) -> None:
 #   wiring: {"domain": ...} for a route that CREATES a new definition in a file
 #           chosen by convention — C-10 sweeps these (see below). Routes without
 #           it must give a `no_wiring_reason`; the canary enforces the choice.
+#   surgical: the file this route writes — C-14 sweeps it and proves the write
+#           left every byte outside its own entry alone. A route that rewrites a
+#           whole file by nature must give a `whole_file_reason` instead.
 FILE_WRITES: dict[tuple[str, str], dict[str, Any]] = {
     ("PUT", "/v1/config/file"): {
+        "whole_file_reason": "the caller supplies the whole file; there is no single entry to scope a write to",
         "url": "/v1/config/file?path=automations.yaml",
         "data": "probe:\n  value: 1\n",
         "gated": True,
@@ -105,6 +112,7 @@ FILE_WRITES: dict[tuple[str, str], dict[str, Any]] = {
         "no_wiring_reason": "caller names the path explicitly; HA check_config validates the result (C-6)",
     },
     ("PUT", "/v1/config/template"): {
+        "surgical": "template.yaml",
         "url": "/v1/config/template?id=tpl_energie_zaehler",
         "data": 'name: "Updated"\nunique_id: tpl_energie_zaehler\nstate: "{{ 1 }}"\n',
         "gated": True,
@@ -112,17 +120,20 @@ FILE_WRITES: dict[tuple[str, str], dict[str, Any]] = {
         "no_wiring_reason": "edits an entry that already exists; refusing would strand a user mid-cleanup",
     },
     ("POST", "/v1/config/template"): {
+        "surgical": "template.yaml",
         "url": "/v1/config/template?domain=sensor",
         "data": 'name: "New"\nunique_id: tpl_probe\nstate: "{{ 1 }}"\n',
         "gated": False,
         "wiring": {"domain": "template"},
     },
     ("DELETE", "/v1/config/template"): {
+        "surgical": "template.yaml",
         "url": "/v1/config/template?id=tpl_energie_zaehler",
         "gated": False,
         "no_wiring_reason": "removes an entry; a user must be able to clean up a file HA ignores",
     },
     ("PUT", "/v1/config/script"): {
+        "surgical": "scripts.yaml",
         "url": "/v1/config/script?id=welcome_home",
         "data": "alias: Updated\nsequence:\n  - service: light.turn_on\n",
         "gated": True,
@@ -130,17 +141,20 @@ FILE_WRITES: dict[tuple[str, str], dict[str, Any]] = {
         "no_wiring_reason": "edits an entry that already exists; refusing would strand a user mid-cleanup",
     },
     ("POST", "/v1/config/script"): {
+        "surgical": "scripts.yaml",
         "url": "/v1/config/script",
         "data": "probe_script:\n  alias: Probe\n  sequence:\n    - service: light.turn_off\n",
         "gated": False,
         "wiring": {"domain": "script"},
     },
     ("DELETE", "/v1/config/script"): {
+        "surgical": "scripts.yaml",
         "url": "/v1/config/script?id=welcome_home",
         "gated": False,
         "no_wiring_reason": "removes an entry; a user must be able to clean up a file HA ignores",
     },
     ("PUT", "/v1/config/automation"): {
+        "surgical": "automations.yaml",
         "url": "/v1/config/automation?id=automation.door_light",
         "data": "id: automation.door_light\nalias: Updated\ntrigger: []\naction: []\n",
         "gated": True,
@@ -148,34 +162,43 @@ FILE_WRITES: dict[tuple[str, str], dict[str, Any]] = {
         "no_wiring_reason": "edits an entry that already exists; refusing would strand a user mid-cleanup",
     },
     ("POST", "/v1/config/automation"): {
+        "surgical": "automations.yaml",
         "url": "/v1/config/automation",
         "data": "id: automation.probe\nalias: Probe\ntrigger: []\naction: []\n",
         "gated": False,
         "wiring": {"domain": "automation"},
     },
     ("DELETE", "/v1/config/automation"): {
+        "surgical": "automations.yaml",
         "url": "/v1/config/automation?id=automation.door_light",
         "gated": False,
         "no_wiring_reason": "removes an entry; a user must be able to clean up a file HA ignores",
     },
     ("POST", "/v1/config/helper"): {
+        "surgical": "input_boolean.yaml",
         "url": "/v1/config/helper?domain=input_boolean",
         "data": "probe_helper:\n  name: Probe\n",
         "gated": False,
         "wiring": {"domain": "input_boolean"},
     },
     ("PUT", "/v1/config/helper"): {
+        "surgical": "input_boolean.yaml",
         "url": "/v1/config/helper?id=guest_mode",
         "data": "name: Probe 2\n",
         "gated": False,
         "no_wiring_reason": "edits an entry that already exists; refusing would strand a user mid-cleanup",
     },
     ("DELETE", "/v1/config/helper"): {
+        "surgical": "input_boolean.yaml",
         "url": "/v1/config/helper?id=guest_mode",
         "gated": False,
         "no_wiring_reason": "removes an entry; a user must be able to clean up a file HA ignores",
     },
     ("POST", "/v1/ref/replace"): {
+        "whole_file_reason": (
+            "rewrites scalars scattered across a whole !include graph, not one entry — "
+            "leaf-granular splicing is hactl-companion #88"
+        ),
         "url": "/v1/ref/replace",
         "json": {"old": "sensor.gone", "new": "sensor.new"},
         "gated": True,
@@ -344,6 +367,20 @@ def test_every_file_write_declares_a_wiring_stance() -> None:
     assert CREATES, "no create routes carry a 'wiring' declaration — did the probe table lose its C-10 coverage?"
 
 
+def _inline_domain(config_dir: Path, domain: str) -> None:
+    """Replace the domain's include with an inline mapping.
+
+    The layout that produced the defect: the domain *is* configured, HA does
+    read it, and there is still no file this route can append to. It is invisible
+    to a "does configuration.yaml mention the domain?" check, which is exactly
+    why the preview must ask the same function the create asks.
+    """
+    _unwire_domain(config_dir, domain)
+    config_path = config_dir / "configuration.yaml"
+    with config_path.open("a", encoding="utf-8") as f:
+        f.write(f"\n{domain}:\n  probe_inline_entry:\n    name: Inline\n")
+
+
 def _unwire_domain(config_dir: Path, domain: str) -> None:
     """Delete every ``<domain>:``/``<domain> <label>:`` line from configuration.yaml.
 
@@ -386,3 +423,161 @@ async def test_create_refuses_when_configuration_does_not_include_the_file(
     assert domain in body["error"]["message"], f"refusal does not name the missing key: {body}"
 
     assert _snapshot(config_dir) == before, f"{method} {path}: refused the create but still modified files on disk"
+
+
+# ---------------------------------------------------------------------------
+# C-14: a single-entry write rewrites only that entry's bytes
+# ---------------------------------------------------------------------------
+
+SURGICAL = {key: probe for key, probe in FILE_WRITES.items() if "surgical" in probe}
+
+
+def test_every_file_write_declares_a_formatting_stance() -> None:
+    """Canary: each file writer either gets the C-14 sweep or says why not.
+
+    Same shape as the C-10 canary above, and for the same reason. The defect it
+    closes (live-fire P1 #4) was not a misunderstood feature: four route families
+    each wrote their file back with a whole-document ``yaml.dump``, so one
+    confirmed automation write came back having reformatted ~34 unrelated real
+    automations. Nothing had ever asked a write route to state which bytes it is
+    allowed to change.
+    """
+    undeclared = {
+        key for key, probe in FILE_WRITES.items() if "surgical" not in probe and not probe.get("whole_file_reason")
+    }
+    assert not undeclared, (
+        f"file-writing endpoints with no formatting stance: {sorted(undeclared)} — a route that changes one "
+        "entry needs 'surgical' (the file it writes; C-14 sweeps it); a route that rewrites a file by nature "
+        "needs a 'whole_file_reason'"
+    )
+    assert SURGICAL, "no write route claims a surgical write — did the probe table lose its C-14 coverage?"
+
+
+def _read(path: Path) -> str:
+    with open(path, encoding="utf-8", newline="") as stream:
+        return stream.read()
+
+
+def _changed_lines(before: str, after: str) -> set[int]:
+    """The ``before`` line numbers a rewrite changed or removed."""
+    matcher = difflib.SequenceMatcher(
+        None, before.splitlines(keepends=True), after.splitlines(keepends=True), autojunk=False
+    )
+    return {line for tag, start, end, _s, _e in matcher.get_opcodes() if tag != "equal" for line in range(start, end)}
+
+
+def _entry_start_lines(text: str) -> list[int]:
+    """Line numbers where a top-level entry begins — a ``-`` item or a mapping key.
+
+    Derived here by column rather than by asking :mod:`companion.surgical`: a test
+    that computes the boundary with the code under test would agree with it by
+    construction, including when both are wrong.
+    """
+    return [n for n, line in enumerate(text.splitlines()) if line[:1] not in ("", " ", "\t", "#")]
+
+
+def _whole_file_dump_damage(before: str) -> set[int]:
+    """Which lines a whole-document re-serialization would rewrite.
+
+    This is what the write used to do, computed from the same bytes the route was
+    given — so the assertion below compares the two writers on identical input
+    rather than against a hand-written expectation of what ruamel does.
+    """
+    yaml = YAML()
+    yaml.preserve_quotes = True
+    buffer = StringIO()
+    yaml.dump(yaml.load(StringIO(before)), buffer)
+    return _changed_lines(before, buffer.getvalue())
+
+
+@pytest.mark.parametrize(("method", "path"), _params(SURGICAL.keys()))
+async def test_single_entry_write_leaves_every_other_byte_alone(
+    client: TestClient, auth_headers: dict[str, str], config_dir: Path, method: str, path: str
+) -> None:
+    """C-14: one entry changed means one contiguous region of the file changed.
+
+    The check is on **bytes**, not on parsed values, because the defect this
+    closes was semantically lossless — a value-level comparison over all 342
+    automations found zero differences while ~34 of them had been reformatted.
+
+    The last assertion is the anti-vacuity guard: it re-runs the *old* writer on
+    the same input and requires it to have damaged at least one line outside the
+    region this write touched. Without it a fixture that happens to already be in
+    ruamel's canonical form would let this test pass against either writer.
+    """
+    probe = SURGICAL[(method, path)]
+    target = config_dir / probe["surgical"]
+    before = _read(target)
+
+    url = _probe_url(probe, apply=True)
+    resp = await client.request(method, url, **_request_kwargs(probe, auth_headers, apply=True))
+    assert resp.status < 400, await resp.text()
+    body = await resp.json()
+    assert "reformatted" not in body, (
+        f"{method} {path}: fell back to a whole-file re-serialization on a plain fixture: {body}"
+    )
+
+    after = _read(target)
+    assert after != before, f"{method} {path}: apply request did not write {probe['surgical']} — probe is stale"
+
+    touched = _changed_lines(before, after)
+    intruded = [n for n in _entry_start_lines(before) if touched and min(touched) < n <= max(touched)]
+    assert not intruded, (
+        f"{method} {path}: the edit to {probe['surgical']} spans lines {min(touched)}..{max(touched)}, which "
+        f"reaches into the entries starting at lines {intruded} — a single-entry write must stay inside its own entry"
+    )
+    assert _whole_file_dump_damage(before) - touched, (
+        f"{method} {path}: a whole-file dump of {probe['surgical']} would not have touched anything outside the "
+        "edited region either, so this case cannot tell the two writers apart — give the fixture a construct a "
+        "re-serialization changes (an unwrapped long line, non-default indentation)"
+    )
+
+
+@pytest.mark.parametrize(("method", "path"), _params(CREATES.keys()))
+async def test_wiring_probe_agrees_with_the_create_it_predicts(
+    client: TestClient, auth_headers: dict[str, str], config_dir: Path, method: str, path: str
+) -> None:
+    """C-10, asked in advance: the probe's verdict is the create's verdict, on every layout.
+
+    hactl's H-2 says a preview fails exactly where the confirmed run would. It
+    could not: the layout check lived inside the create, so `helper create`'s
+    dry run printed "would create" for all eight domains on an instance where
+    all eight `--confirm` runs were a deterministic 400 (`input_boolean:` inline
+    in configuration.yaml). A client can only keep that promise if it can ask
+    the question, so `GET /v1/config/wiring` answers it — and this asserts the
+    two answers are *equal*, over every create route in the probe table and
+    every layout, rather than pinning two hand-written expectations that could
+    drift apart one release later.
+
+    The reason is compared verbatim: a preview that fails for the same input but
+    explains it differently sends the operator somewhere else than the confirmed
+    run would have.
+    """
+    probe = CREATES[(method, path)]
+    domain = probe["wiring"]["domain"]
+    kwargs = _request_kwargs(probe, auth_headers)
+
+    for layout, apply_layout in (
+        ("wired", lambda: None),
+        ("inline", lambda: _inline_domain(config_dir, domain)),
+        ("absent", lambda: _unwire_domain(config_dir, domain)),
+    ):
+        apply_layout()
+
+        answer = await client.get(f"/v1/config/wiring?domain={domain}", headers=auth_headers)
+        assert answer.status == 200, f"[{layout}] probe failed: {await answer.text()}"
+        verdict = await answer.json()
+
+        create = await client.request(method, probe["url"], **kwargs)
+        created = create.status == 201
+
+        assert verdict["wired"] == created, (
+            f"{method} {path} [{layout}]: probe said wired={verdict['wired']} but the create answered "
+            f"{create.status} — a preview built on this probe would lie in exactly that direction"
+        )
+        if not created:
+            assert verdict["reason"] == (await create.json())["error"]["message"], (
+                f"{method} {path} [{layout}]: probe and create refuse for the same reason but say it differently"
+            )
+        else:
+            assert verdict["file"], f"{method} {path} [{layout}]: wired verdict names no file"

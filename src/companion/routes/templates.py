@@ -10,6 +10,16 @@ share one trigger set.
 This module keeps that block structure intact. In particular ``post_template``
 must not (a) nest a trigger inside an entity item, nor (b) merge a plain
 state-based entity into an existing trigger-based block — both corrupt the file.
+
+**The top-level list item is Home Assistant's blast radius.** Measured against a
+live HA (2026.7, throwaway container, config rewritten and HA restarted between
+rounds — see :func:`_create_bare_item`): when one entity in a block fails
+schema validation, HA drops the *entire* top-level list item. Its valid siblings
+do not merely go stale — they leave the state machine and come back as
+``unavailable`` with ``restored: true``. Entities in a *different* top-level item
+are untouched. So which block an entry is written into decides whose entities a
+later mistake can take down, and this module never writes into a block it did
+not create.
 """
 
 from __future__ import annotations
@@ -24,6 +34,7 @@ from ruamel.yaml import YAML
 
 from companion import core_api
 from companion.params import parse_bool_param
+from companion.surgical import Edit, read_source, save_entry, write_fields
 from companion.wiring import require_wired_target, wired_target_or_default
 
 yaml = YAML()
@@ -75,26 +86,32 @@ class RouteDef:
     handler: object
 
 
-def _load_templates(base: str) -> tuple[list[Any], Any]:
-    """Load and parse the template file, returning (raw_data, target_path).
+def _load_templates(base: str) -> tuple[list[Any], Path, str]:
+    """Load and parse the template file, returning (raw_data, target_path, source_text).
 
     The file is whichever one ``configuration.yaml`` wires ``template:`` to,
     falling back to the conventional name when that cannot be established.
     """
-    return _load_templates_from(wired_target_or_default(base, TEMPLATE_DOMAIN, TEMPLATE_FILE))
+    return _load_templates_from(base, wired_target_or_default(base, TEMPLATE_DOMAIN, TEMPLATE_FILE))
 
 
-def _load_templates_from(target: Path) -> tuple[list[Any], Any]:
-    """Load and parse an explicit template file, returning (raw_data, path)."""
+def _load_templates_from(base: str, target: Path) -> tuple[list[Any], Path, str]:
+    """Load and parse an explicit template file, returning (raw_data, path, source_text).
+
+    The source text travels with the parsed data so a write can rewrite only the
+    block it was asked to change (see :mod:`companion.surgical`). The unit here is
+    the top-level *block*, not the entity inside it: editing one entity in a
+    multi-entity block re-serializes that block and nothing else.
+    """
     if not target.is_file():
         raise web.HTTPNotFound(text=f"File not found: {target.name}")
-    with open(target, encoding="utf-8") as f:
-        data = yaml.load(f)
+    source = read_source(base, target)
+    data = yaml.load(StringIO(source))
     if data is None:
         data = []
     if not isinstance(data, list):
         raise web.HTTPInternalServerError(text="template.yaml must be a top-level list")
-    return data, target
+    return data, target, source
 
 
 def _block_is_trigger_based(block: dict[str, Any]) -> bool:
@@ -166,23 +183,10 @@ def _extract_entities(data: list[Any]) -> list[dict[str, Any]]:
     return entities
 
 
-def _save_templates(target: Any, data: list[Any]) -> None:
-    """Write template data back to file with backup."""
-    from pathlib import Path
-
-    from companion.backups import make_backup
-
-    path = Path(target)
-    make_backup(path)
-
-    with open(path, "w", encoding="utf-8") as f:
-        yaml.dump(data, f)
-
-
 async def get_templates(request: web.Request) -> web.Response:
     """GET /v1/config/templates — list all template sensor definitions."""
     base = request.app["config_base_path"]
-    data, _target = _load_templates(base)
+    data, _target, _source = _load_templates(base)
     entities = _extract_entities(data)
     result = [
         {
@@ -210,7 +214,7 @@ async def get_template(request: web.Request) -> web.Response:
     if not uid:
         raise web.HTTPBadRequest(text="Missing id parameter")
 
-    data, _target = _load_templates(base)
+    data, _target, _source = _load_templates(base)
     entities = _extract_entities(data)
 
     for s in entities:
@@ -253,7 +257,7 @@ async def put_template(request: web.Request) -> web.Response:
     if stray is not None:
         raise web.HTTPBadRequest(text=f"'{stray}' belongs at the block level, not inside an entity item")
 
-    data, target = _load_templates(base)
+    data, target, source = _load_templates(base)
     entities = _extract_entities(data)
 
     for s in entities:
@@ -276,9 +280,9 @@ async def put_template(request: web.Request) -> web.Response:
                 return web.json_response({"status": "dry_run", "diff": diff})
 
             data[s["group_idx"]][s["domain"]][s["item_idx"]] = new_item
-            _save_templates(target, data)
+            surgical = save_entry(base, target, data, source, Edit("replace", s["group_idx"]), yaml)
             reload = await core_api.reload_domain("template")
-            return web.json_response({"status": "applied", **core_api.reload_fields(reload)})
+            return web.json_response({"status": "applied", **write_fields(surgical), **core_api.reload_fields(reload)})
 
     raise web.HTTPNotFound(text=f"Template not found: {uid}")
 
@@ -288,8 +292,9 @@ async def post_template(request: web.Request) -> web.Response:
 
     Accepts two input shapes:
 
-    * a **bare entity item** (``unique_id`` + ``state`` + …), placed into a
-      state-based block for ``?domain=`` (the legacy shape); or
+    * a **bare entity item** (``unique_id`` + ``state`` + …), appended as a new
+      state-based block of its own for ``?domain=`` (the legacy shape) — never
+      merged into a block it did not write, see :func:`_create_bare_item`; or
     * a **full block** (declares any template entity domain — ``sensor:``,
       ``number:``, ``select:``, ``button:``, ``weather:``, … — optionally with
       block-level ``triggers:``/``actions:``/``conditions:``), appended verbatim
@@ -312,24 +317,28 @@ async def post_template(request: web.Request) -> web.Response:
     # C-10: a template.yaml no `template:` key !include's is written happily and
     # never read — the entity simply never appears. Prove HA reads this file
     # before claiming to have created anything in it.
-    data, target = _load_templates_from(require_wired_target(base, TEMPLATE_DOMAIN, TEMPLATE_FILE))
+    data, target, source = _load_templates_from(base, require_wired_target(base, TEMPLATE_DOMAIN, TEMPLATE_FILE))
     existing_ids = _all_unique_ids(data)
 
     if _is_block(new_item):
-        first_uid = _create_block(data, new_item, existing_ids)
+        first_uid, edit = _create_block(data, new_item, existing_ids)
     else:
-        first_uid = _create_bare_item(request, data, new_item, existing_ids)
+        first_uid, edit = _create_bare_item(request, data, new_item, existing_ids)
 
-    _save_templates(target, data)
+    surgical = save_entry(base, target, data, source, edit, yaml)
     reload = await core_api.reload_domain("template")
     return web.json_response(
-        {"status": "created", "unique_id": first_uid, **core_api.reload_fields(reload)},
+        {"status": "created", "unique_id": first_uid, **write_fields(surgical), **core_api.reload_fields(reload)},
         status=201,
     )
 
 
-def _create_block(data: list[Any], block: dict[str, Any], existing_ids: set[str]) -> str:
-    """Append a full block verbatim as its own list item. Returns first unique_id."""
+def _create_block(data: list[Any], block: dict[str, Any], existing_ids: set[str]) -> tuple[str, Edit]:
+    """Append a full block verbatim as its own list item.
+
+    Returns ``(first unique_id, the edit it made)`` — the write path needs to be
+    told which top-level block changed so it can rewrite only that one.
+    """
     new_ids = _block_unique_ids(block)
     if not new_ids:
         raise web.HTTPBadRequest(text="Template block must define at least one entity with a unique_id")
@@ -339,11 +348,49 @@ def _create_block(data: list[Any], block: dict[str, Any], existing_ids: set[str]
         raise web.HTTPConflict(text=f"Template with unique_id already exists: {dup}")
 
     data.append(block)
-    return new_ids[0]
+    return new_ids[0], Edit("append")
 
 
-def _create_bare_item(request: web.Request, data: list[Any], item: dict[str, Any], existing_ids: set[str]) -> str:
-    """Place a bare entity item into a state-based block. Returns its unique_id."""
+def _create_bare_item(
+    request: web.Request, data: list[Any], item: dict[str, Any], existing_ids: set[str]
+) -> tuple[str, Edit]:
+    """Wrap a bare entity item in its own new top-level block.
+
+    Returns ``(unique_id, the edit it made)`` — always an append, because the
+    item always goes into a block this function just made.
+
+    It used to be appended into the first *existing* state-based block declaring
+    the same domain. On a real instance that block belongs to the user: the
+    first ``- sensor:`` block held two production sensors, the first
+    ``- binary_sensor:`` block the flat's occupancy sensor. Sharing a block with
+    them is not a cosmetic choice, because HA's unit of rejection is the whole
+    top-level item — one invalid entry darks every entity beside it.
+
+    Oracle (live HA 2026.7, file rewritten and HA restarted between rounds):
+
+    * two separate ``- sensor:`` items, four entities across four items — all
+      registered. HA has no objection to repeating a domain at the top level, so
+      isolation costs nothing.
+    * one invalid sibling (``device_class: not_a_real_device_class``) added to
+      the first item: that item's *valid* sensor went ``unavailable`` /
+      ``restored: true`` — the exact symptom the live-fire run observed on a
+      real production sensor — while the sensor in the second item kept its
+      value. Repeated with the live-fire ``select`` shape (``options`` as a YAML
+      list instead of a template string): both selects in the shared item
+      disappeared, the select in its own item stayed up.
+
+    So a per-entry block bounds the damage of a bad entry to that entry. There
+    is no pre-write gate to lean on instead: ``POST /config/core/check_config``
+    answered ``{"result": "valid"}`` for *both* poisoned files above, while HA's
+    own setup logged ``Invalid config for 'template' at template.yaml`` for
+    them — entity-level template schema errors are found when the platform sets
+    up, not by the config check. A gate built on it would have passed exactly
+    the payloads that cause this.
+
+    The alternative — one tool-owned block per domain, shared by everything
+    hactl creates — was rejected for the same reason: it keeps a blast radius
+    larger than one entry, just with different victims.
+    """
     if "unique_id" not in item:
         raise web.HTTPBadRequest(text="Template must have a unique_id")
 
@@ -364,15 +411,12 @@ def _create_bare_item(request: web.Request, data: list[Any], item: dict[str, Any
     if uid in existing_ids:
         raise web.HTTPConflict(text=f"Template with unique_id already exists: {uid}")
 
-    # Merge into the first STATE-BASED block that already has this domain; skip
-    # trigger-based blocks so a plain entity never gets bound to a trigger.
-    for group in data:
-        if isinstance(group, dict) and domain in group and not _block_is_trigger_based(group):
-            group[domain].append(item)
-            break
-    else:
-        data.append({domain: [item]})
-    return uid
+    # Its own state-based block. Never an existing one — not even a state-based
+    # one carrying the same domain (the docstring's oracle), and so never a
+    # trigger-based one either, which is how a plain entity used to risk being
+    # bound to somebody else's trigger.
+    data.append({domain: [item]})
+    return uid, Edit("append")
 
 
 async def delete_template(request: web.Request) -> web.Response:
@@ -382,7 +426,7 @@ async def delete_template(request: web.Request) -> web.Response:
     if not uid:
         raise web.HTTPBadRequest(text="Missing id parameter")
 
-    data, target = _load_templates(base)
+    data, target, source = _load_templates(base)
     entities = _extract_entities(data)
 
     for s in entities:
@@ -395,11 +439,13 @@ async def delete_template(request: web.Request) -> web.Response:
             # If no entity domains remain, drop the whole block — including any
             # orphaned trigger/action, which HA would otherwise reject as an
             # incomplete template configuration.
+            edit = Edit("replace", s["group_idx"])
             if isinstance(group, dict) and not any(d in group for d in _ENTITY_DOMAINS):
                 data.pop(s["group_idx"])
-            _save_templates(target, data)
+                edit = Edit("delete", s["group_idx"])
+            surgical = save_entry(base, target, data, source, edit, yaml)
             reload = await core_api.reload_domain("template")
-            return web.json_response({"status": "deleted", **core_api.reload_fields(reload)})
+            return web.json_response({"status": "deleted", **write_fields(surgical), **core_api.reload_fields(reload)})
 
     raise web.HTTPNotFound(text=f"Template not found: {uid}")
 

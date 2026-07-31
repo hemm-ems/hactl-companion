@@ -6,6 +6,7 @@ from pathlib import Path
 
 import yaml
 from aiohttp.test_utils import TestClient
+from ruamel.yaml import YAML
 
 from companion.yaml_resolver import INCLUDE_TAGS, PRESERVED_TAGS, claims_to_include
 
@@ -150,11 +151,23 @@ async def test_include_dir_merge_list(client: TestClient, auth_headers: dict[str
 async def test_unresolved_tag_keeps_its_directive(
     client: TestClient, auth_headers: dict[str, str], config_dir: Path
 ) -> None:
-    """An unresolved tag keeps its directive text rather than degrading to the bare value.
+    """An unresolved tag comes back out as a tag, not as a quoted string.
 
-    `!secret home_lat` used to resolve to the string "home_lat" — the secret's
-    KEY rendered where its VALUE belongs, indistinguishable from a real setting.
-    The secret itself is never read here; only the directive is preserved.
+    Two defects, one line, and the second was hidden by the fix for the first:
+
+    1. `!secret home_lat` once resolved to the string "home_lat" — the secret's
+       KEY rendered where its VALUE belongs, indistinguishable from a real
+       setting. The directive text is preserved instead.
+    2. That preserved text was a plain Python ``str``, and the dumper quoted it
+       (finding #20): the file came back saying ``latitude: '!secret home_lat'``,
+       a literal string, still valid YAML, no longer a tag.
+
+    So the assertion is on the rendered TEXT. It used to run the output through
+    ``yaml.safe_load`` and compare the loaded value with the string
+    ``"!secret home_lat"`` — which passes only while the corruption is present,
+    because a document with a real tag in it is exactly what safe_load refuses
+    to construct. The test that was meant to prove the tag survived was the one
+    that required it not to.
     """
     (config_dir / "withsecret.yaml").write_text("homeassistant:\n  latitude: !secret home_lat\n")
 
@@ -162,8 +175,63 @@ async def test_unresolved_tag_keeps_its_directive(
     assert resp.status == 200
     content = (await resp.json())["content"]
 
-    latitude = yaml.safe_load(content)["homeassistant"]["latitude"]
-    assert latitude == "!secret home_lat", f"expected the directive preserved, got {latitude!r}"
+    assert "latitude: !secret home_lat" in content, f"expected the tag preserved, got:\n{content}"
+    assert "'!secret home_lat'" not in content, f"the tag was quoted into a string literal:\n{content}"
+    assert '"!secret home_lat"' not in content, f"the tag was quoted into a string literal:\n{content}"
+
+    # And the rendering means what the source meant: a loader that knows the
+    # tag reads a tag back, where safe_load — like Home Assistant without its
+    # own constructors — refuses the document outright.
+    reloaded = YAML().load(content)
+    latitude = reloaded["homeassistant"]["latitude"]
+    assert not isinstance(latitude, str), f"still a string after a round trip: {latitude!r}"
+    assert str(latitude.tag) == "!secret"
+
+    # The secret's VALUE is still never read: only its key travels.
+    assert "hunter2" not in content
+
+
+async def test_input_tag_survives_a_file_with_no_include(
+    client: TestClient, auth_headers: dict[str, str], config_dir: Path
+) -> None:
+    """The exact file shape finding #20 was reported against.
+
+    A blueprint carries ``!input`` and no ``!include`` at all, so the
+    corruption had nothing to do with include resolution — the only thing
+    resolved mode's own help text claims to do ("--raw: leave !include
+    directives unresolved"). Every unknown tag in the file was rewritten,
+    quietly, into a string that means something else: an automation triggering
+    on an entity literally named ``!input button_entity``.
+    """
+    blueprint = config_dir / "blueprints" / "automation" / "testhouse"
+    blueprint.mkdir(parents=True, exist_ok=True)
+    (blueprint / "toggle.yaml").write_text(
+        "blueprint:\n"
+        "  name: Toggle On Button\n"
+        "  domain: automation\n"
+        "  input:\n"
+        "    button_entity:\n"
+        "      name: Button\n"
+        "triggers:\n"
+        "  - trigger: state\n"
+        "    entity_id: !input button_entity\n"
+    )
+
+    path = "blueprints/automation/testhouse/toggle.yaml"
+    resolved = await client.get(f"/v1/config/file?path={path}&resolve=true", headers=auth_headers)
+    assert resolved.status == 200
+    resolved_text = (await resolved.json())["content"]
+
+    raw = await client.get(f"/v1/config/file?path={path}&resolve=false", headers=auth_headers)
+    assert raw.status == 200
+    raw_text = (await raw.json())["content"]
+
+    assert "!include" not in raw_text, "the fixture must carry no !include, or it proves the wrong thing"
+    assert "entity_id: !input button_entity" in resolved_text, resolved_text
+    # Resolved mode may reflow the document; what it may not do is disagree
+    # with --raw about what the tags are.
+    assert "!input button_entity" in raw_text
+    assert "'!input button_entity'" not in resolved_text, resolved_text
 
 
 # ---------------------------------------------------------------------------
@@ -276,10 +344,15 @@ async def test_known_include_tags_still_resolve(
 
     resp = await client.get("/v1/config/file?path=alltags.yaml&resolve=true", headers=auth_headers)
     assert resp.status == 200, await resp.text()
-    parsed = yaml.safe_load((await resp.json())["content"])
+    content = (await resp.json())["content"]
+    # A round-trip loader, not safe_load: the preserved `!secret` comes back as
+    # a real tag now (finding #20), and safe_load has no constructor for it —
+    # which is the same reason Home Assistant refuses a tag it does not know.
+    parsed = YAML().load(content)
     assert parsed["a"] == {"value": 1}
     assert parsed["b"] == [[{"id": "item_one"}]]
     assert parsed["c"] == [{"id": "item_one"}]
     assert parsed["d"] == {"one": [{"id": "item_one"}]}
     assert parsed["e"] == {"key_two": 2}
-    assert parsed["f"] == "!secret some_key"
+    assert str(parsed["f"].tag) == "!secret"
+    assert "f: !secret some_key" in content

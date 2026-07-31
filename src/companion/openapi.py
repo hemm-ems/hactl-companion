@@ -288,6 +288,17 @@ _RELOAD_ERROR_DESC = (
     "Why the reload failed: HA's HTTP status plus a bounded excerpt of its response body, or the "
     "transport error class. Present only when `reloaded` is false; absent otherwise."
 )
+# Every single-entry write rewrites only that entry's own lines. When the file
+# uses something the splice cannot carry (CRLF endings, a flow-style top level,
+# an anchor defined in the entry being replaced) it is re-serialized whole
+# instead, and dozens of untouched entries can come back reformatted. Same
+# "present only when it matters" shape as `reload_error`: absent on the normal
+# path, so a surgical success is byte-identical to the response sent before the
+# field existed.
+_REFORMATTED_DESC = (
+    "True when the whole file had to be re-serialized instead of only this entry's lines, so formatting "
+    "elsewhere in the file may have changed. Absent otherwise."
+)
 # PUT template/script/automation: dry-run returns a diff; apply returns `reloaded`.
 _WRITE_RESULT_SCHEMA = {
     "type": "object",
@@ -297,6 +308,7 @@ _WRITE_RESULT_SCHEMA = {
         "diff": {"type": "string"},
         "reloaded": {"type": "boolean"},
         "reload_error": {"type": "string", "description": _RELOAD_ERROR_DESC},
+        "reformatted": {"type": "boolean", "description": _REFORMATTED_DESC},
     },
 }
 # DELETE (template/script/automation/helper) and PUT helper: {status, reloaded}.
@@ -307,6 +319,7 @@ _RELOAD_RESULT_SCHEMA = {
         "status": {"type": "string"},
         "reloaded": {"type": "boolean"},
         "reload_error": {"type": "string", "description": _RELOAD_ERROR_DESC},
+        "reformatted": {"type": "boolean", "description": _REFORMATTED_DESC},
     },
 }
 _RELOAD_SCHEMA = {
@@ -329,6 +342,7 @@ _CREATED_SCRIPT_SCHEMA = {
         "id": {"type": "string"},
         "reloaded": {"type": "boolean"},
         "reload_error": {"type": "string", "description": _RELOAD_ERROR_DESC},
+        "reformatted": {"type": "boolean", "description": _REFORMATTED_DESC},
     },
 }
 _CREATED_AUTOMATION_SCHEMA = {
@@ -340,6 +354,7 @@ _CREATED_AUTOMATION_SCHEMA = {
         "entity_id": {"type": "string", "nullable": True},
         "reloaded": {"type": "boolean"},
         "reload_error": {"type": "string", "description": _RELOAD_ERROR_DESC},
+        "reformatted": {"type": "boolean", "description": _REFORMATTED_DESC},
     },
 }
 _CREATED_UID_SCHEMA = {
@@ -350,6 +365,7 @@ _CREATED_UID_SCHEMA = {
         "unique_id": {"type": "string"},
         "reloaded": {"type": "boolean"},
         "reload_error": {"type": "string", "description": _RELOAD_ERROR_DESC},
+        "reformatted": {"type": "boolean", "description": _REFORMATTED_DESC},
     },
 }
 _CREATED_HELPER_SCHEMA = {
@@ -361,6 +377,7 @@ _CREATED_HELPER_SCHEMA = {
         "entity_id": {"type": "string"},
         "reloaded": {"type": "boolean"},
         "reload_error": {"type": "string", "description": _RELOAD_ERROR_DESC},
+        "reformatted": {"type": "boolean", "description": _REFORMATTED_DESC},
         "entity_created": {"type": "boolean"},
     },
 }
@@ -383,7 +400,54 @@ _HELPER_LIST_SCHEMA = {
 }
 _HELPER_SCHEMA = {
     "type": "object",
-    "properties": {"id": {"type": "string"}, "domain": {"type": "string"}, "content": {"type": "string"}},
+    "properties": {
+        "id": {
+            "type": "string",
+            "description": (
+                "The identifier this helper is addressed by: the YAML top-level key when `source` is `yaml`, "
+                "the live entity_id when `source` is `storage`."
+            ),
+        },
+        "domain": {"type": "string"},
+        "content": {
+            "type": "string",
+            "description": (
+                "The definition as YAML. For `source: storage` it is rendered from HA's collection and carries "
+                "a leading `# source: storage` comment, because this content is read-only."
+            ),
+        },
+        "source": {
+            "type": "string",
+            "enum": ["yaml", "storage"],
+            "description": (
+                "`yaml` — defined in a helper YAML file this service manages, editable via PUT/DELETE. "
+                "`storage` — created in the Home Assistant UI, readable here but not editable; PUT/DELETE "
+                "answer 409 for it."
+            ),
+        },
+    },
+}
+_WIRING_SCHEMA = {
+    "type": "object",
+    "required": ["domain", "wired"],
+    "properties": {
+        "domain": {"type": "string"},
+        "wired": {
+            "type": "boolean",
+            "description": "Whether a create for this domain can be written to a file Home Assistant reads.",
+        },
+        "file": {
+            "type": "string",
+            "description": "Config-relative path a new entry would be written to. Present only when `wired`.",
+        },
+        "reason": {
+            "type": "string",
+            "description": (
+                "Why a create would be refused — byte-identical to the 400 message the create route answers "
+                "with. Present only when `wired` is false."
+            ),
+        },
+    },
 }
 _WG_CONFIG_RESPONSE = {
     "type": "object",
@@ -647,12 +711,15 @@ ENDPOINT_META: dict[tuple[str, str], dict[str, object]] = {
             "Home Assistant never reads `template.yaml` and the new entry would be written and "
             "ignored. The entry is written to the file the include names, not to `template.yaml` "
             "by convention. "
-            "Body is either a bare entity item (placed into a state-based block for `domain`) or a "
-            "full block (declares any template entity domain — `sensor:`, `number:`, `select:`, "
-            "`button:`, `weather:`, … — optionally with block-level `triggers:`/`actions:`/"
-            "`conditions:`), appended as its own list item. The latter is how trigger-based and "
-            "multi-domain entries are created. A bare item carrying a block-level trigger key is "
-            "rejected (400)."
+            "Body is either a bare entity item or a full block (declares any template entity "
+            "domain — `sensor:`, `number:`, `select:`, `button:`, `weather:`, … — optionally with "
+            "block-level `triggers:`/`actions:`/`conditions:`); a full block is how trigger-based "
+            "and multi-domain entries are created. Either way the entry is appended as its own new "
+            "top-level list item — a bare item gets a fresh state-based block for `domain` and is "
+            "never merged into a pre-existing block, because Home Assistant drops a whole "
+            "top-level item when any one entity in it fails validation, which would take the "
+            "user's own entities in that block down with it. A bare item carrying a block-level "
+            "trigger key is rejected (400)."
         ),
         "tags": ["templates"],
         "parameters": [
@@ -787,6 +854,12 @@ ENDPOINT_META: dict[tuple[str, str], dict[str, object]] = {
     },
     ("GET", "/v1/config/helper"): {
         "summary": "Get single helper definition",
+        "description": (
+            "Resolves both sources: a YAML helper by its top-level key, and a storage-backed helper (created "
+            "in the Home Assistant UI) by its entity_id, its collection id, or `<domain>.<collection id>`. "
+            "`input_button` is readable here although it has no YAML form. 409 if a bare id is ambiguous "
+            "across storage domains."
+        ),
         "tags": ["helpers"],
         "parameters": [{"name": "id", "in": "query", "required": True, "schema": {"type": "string"}}],
         "response_schema": _HELPER_SCHEMA,
@@ -831,6 +904,22 @@ ENDPOINT_META: dict[tuple[str, str], dict[str, object]] = {
             {"name": "domain", "in": "query", "required": False, "schema": {"type": "string"}},
         ],
         "response_schema": _RELOAD_RESULT_SCHEMA,
+    },
+    # Config layout probe
+    ("GET", "/v1/config/wiring"): {
+        "summary": "Would a create for this domain reach a file Home Assistant reads?",
+        "description": (
+            "The C-10 include-wiring check, exposed read-only so a client can preview a create without "
+            "attempting it. Answers 200 either way: `wired: true` with the `file` a new entry would go to, or "
+            "`wired: false` with the `reason` — the exact text the create route refuses with, so a dry run can "
+            "fail with the same explanation as the confirmed run. Accepts the domains that have a create "
+            "route: automation, script, template and the YAML helper domains."
+        ),
+        "tags": ["config"],
+        "parameters": [
+            {"name": "domain", "in": "query", "required": True, "schema": {"type": "string"}},
+        ],
+        "response_schema": _WIRING_SCHEMA,
     },
     # HA core API
     ("POST", "/v1/ha/reload/{domain}"): {

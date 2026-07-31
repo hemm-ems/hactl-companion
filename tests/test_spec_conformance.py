@@ -42,7 +42,7 @@ import jsonschema
 import pytest
 from aiohttp.test_utils import TestClient
 
-from companion import core_api, logbuffer, wg, wg_monitor
+from companion import core_api, logbuffer, surgical, wg, wg_monitor
 from companion.openapi import ENDPOINT_META
 from companion.routes import (
     automations,
@@ -55,9 +55,11 @@ from companion.routes import (
     status,
     templates,
     wireguard,
+    wiring,
 )
 from tests.conftest import FIXTURES_DIR
 from tests.related_fixture import SOURCE_ENTITY_ID, seed_related_fixture
+from tests.storage_fixture import seed_storage_helpers
 
 
 def _to_jsonschema(schema: Any) -> Any:
@@ -187,6 +189,20 @@ def _seed_ref_skipped(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None
         "automation: !include packages/renamed.yaml\nsensor:\n  value: sensor.gone\n",
         encoding="utf-8",
     )
+
+
+def _seed_storage_helpers(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A helper created in HA's UI — the only kind a normally-configured instance has."""
+    seed_storage_helpers(config_dir, ["input_boolean"])
+
+
+def _seed_unwired_script(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Drop the `script:` include, so the probe answers with a reason instead of a file."""
+    config = config_dir / "configuration.yaml"
+    kept = [
+        line for line in config.read_text(encoding="utf-8").splitlines(keepends=True) if not line.startswith("script")
+    ]
+    config.write_text("".join(kept), encoding="utf-8")
 
 
 def _seed_related(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -348,6 +364,44 @@ def _with_reload_failure(probes: tuple[Probe, ...]) -> tuple[Probe, ...]:
     return (*probes, derived)
 
 
+def _with_whole_file_rewrite(probes: tuple[Probe, ...], filename: str) -> tuple[Probe, ...]:
+    """``probes``, plus a repeat of the last one with the single-entry splice refused.
+
+    ``reformatted`` exists only on the branch where the splice cannot be used and
+    the file is re-serialized whole. Nothing this suite drives reaches it
+    otherwise — the fixtures all splice cleanly — so without this probe the field
+    would be documented, emitted by nothing, and free to be dropped by route #N
+    (D45's shape exactly).
+
+    The branch is forced by refusing the splice outright, the same way
+    :func:`_reload_fails` forces ``reload_error`` by refusing HA's reload. That
+    keeps this file's job to the *field contract*; whether real inputs can reach
+    the fallback at all is a behavioural question, answered against real files
+    (flow-style top level, an anchor spanning two entries) in
+    ``tests/test_surgical.py``. ``filename`` names the file the route writes, so
+    a route wired to the wrong probe file fails the assertion below rather than
+    passing on someone else's fixture.
+
+    It wraps *outside* :func:`_with_reload_failure` so that helper still sees a
+    setup-free probe to derive from; the two setups compose.
+    """
+    source = probes[-1]
+
+    def setup(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        if source.setup is not None:
+            source.setup(config_dir, monkeypatch)
+        assert (config_dir / filename).is_file(), f"{filename} is not in the fixture set — wrong file for this route?"
+        monkeypatch.setattr(surgical, "_splice", lambda *args, **kwargs: None)
+
+    derived = replace(
+        source,
+        label=f"{source.label or 'apply'}+whole-file",
+        setup=setup,
+        expect={**source.expect, "reformatted": True},
+    )
+    return (*probes, derived)
+
+
 RESPONSE_PROBES: dict[tuple[str, str], tuple[Probe, ...]] = {
     ("GET", "/v1/health"): (Probe("/v1/health"),),
     ("GET", "/v1/status"): (Probe("/v1/status"),),
@@ -423,86 +477,137 @@ RESPONSE_PROBES: dict[tuple[str, str], tuple[Probe, ...]] = {
     ("GET", "/v1/config/template"): (Probe("/v1/config/template?id=tpl_energie_zaehler"),),
     # `reloaded` — the exact field D45 lost — is only emitted on apply, so the
     # dry-run probe alone would leave it unobserved on all three PUT routes.
-    ("PUT", "/v1/config/template"): _with_reload_failure(
-        (
-            Probe(
-                "/v1/config/template?id=tpl_energie_zaehler&dry_run=true",
-                label="dry",
-                data='name: "Updated"\nunique_id: tpl_energie_zaehler\nstate: "{{ 1 }}"\n',
-            ),
-            Probe(
-                "/v1/config/template?id=tpl_energie_zaehler&dry_run=false",
-                label="apply",
-                data='name: "Updated"\nunique_id: tpl_energie_zaehler\nstate: "{{ 1 }}"\n',
-            ),
-        )
+    ("PUT", "/v1/config/template"): _with_whole_file_rewrite(
+        _with_reload_failure(
+            (
+                Probe(
+                    "/v1/config/template?id=tpl_energie_zaehler&dry_run=true",
+                    label="dry",
+                    data='name: "Updated"\nunique_id: tpl_energie_zaehler\nstate: "{{ 1 }}"\n',
+                ),
+                Probe(
+                    "/v1/config/template?id=tpl_energie_zaehler&dry_run=false",
+                    label="apply",
+                    data='name: "Updated"\nunique_id: tpl_energie_zaehler\nstate: "{{ 1 }}"\n',
+                ),
+            )
+        ),
+        "template.yaml",
     ),
-    ("POST", "/v1/config/template"): _with_reload_failure(
-        (
-            Probe(
-                "/v1/config/template?domain=sensor",
-                data='name: "New"\nunique_id: tpl_probe\nstate: "{{ 1 }}"\n',
-            ),
-        )
+    ("POST", "/v1/config/template"): _with_whole_file_rewrite(
+        _with_reload_failure(
+            (
+                Probe(
+                    "/v1/config/template?domain=sensor",
+                    data='name: "New"\nunique_id: tpl_probe\nstate: "{{ 1 }}"\n',
+                ),
+            )
+        ),
+        "template.yaml",
     ),
-    ("DELETE", "/v1/config/template"): _with_reload_failure((Probe("/v1/config/template?id=tpl_energie_zaehler"),)),
+    ("DELETE", "/v1/config/template"): _with_whole_file_rewrite(
+        _with_reload_failure((Probe("/v1/config/template?id=tpl_energie_zaehler"),)),
+        "template.yaml",
+    ),
     ("GET", "/v1/config/scripts"): (Probe("/v1/config/scripts"),),
     ("GET", "/v1/config/script"): (Probe("/v1/config/script?id=welcome_home"),),
-    ("PUT", "/v1/config/script"): _with_reload_failure(
-        (
-            Probe(
-                "/v1/config/script?id=welcome_home&dry_run=true",
-                label="dry",
-                data="alias: Updated\nsequence:\n  - service: light.turn_on\n",
-            ),
-            Probe(
-                "/v1/config/script?id=welcome_home&dry_run=false",
-                label="apply",
-                data="alias: Updated\nsequence:\n  - service: light.turn_on\n",
-            ),
-        )
+    ("PUT", "/v1/config/script"): _with_whole_file_rewrite(
+        _with_reload_failure(
+            (
+                Probe(
+                    "/v1/config/script?id=welcome_home&dry_run=true",
+                    label="dry",
+                    data="alias: Updated\nsequence:\n  - service: light.turn_on\n",
+                ),
+                Probe(
+                    "/v1/config/script?id=welcome_home&dry_run=false",
+                    label="apply",
+                    data="alias: Updated\nsequence:\n  - service: light.turn_on\n",
+                ),
+            )
+        ),
+        "scripts.yaml",
     ),
-    ("POST", "/v1/config/script"): _with_reload_failure(
-        (
-            Probe(
-                "/v1/config/script",
-                data="probe_script:\n  alias: Probe\n  sequence:\n    - service: light.turn_off\n",
-            ),
-        )
+    ("POST", "/v1/config/script"): _with_whole_file_rewrite(
+        _with_reload_failure(
+            (
+                Probe(
+                    "/v1/config/script",
+                    data="probe_script:\n  alias: Probe\n  sequence:\n    - service: light.turn_off\n",
+                ),
+            )
+        ),
+        "scripts.yaml",
     ),
-    ("DELETE", "/v1/config/script"): _with_reload_failure((Probe("/v1/config/script?id=welcome_home"),)),
+    ("DELETE", "/v1/config/script"): _with_whole_file_rewrite(
+        _with_reload_failure((Probe("/v1/config/script?id=welcome_home"),)),
+        "scripts.yaml",
+    ),
     ("GET", "/v1/config/automations"): (Probe("/v1/config/automations"),),
     ("GET", "/v1/config/automation"): (Probe("/v1/config/automation?id=automation.door_light"),),
-    ("PUT", "/v1/config/automation"): _with_reload_failure(
-        (
-            Probe(
-                "/v1/config/automation?id=automation.door_light&dry_run=true",
-                label="dry",
-                data="id: automation.door_light\nalias: Updated\ntrigger: []\naction: []\n",
-            ),
-            Probe(
-                "/v1/config/automation?id=automation.door_light&dry_run=false",
-                label="apply",
-                data="id: automation.door_light\nalias: Updated\ntrigger: []\naction: []\n",
-            ),
-        )
+    ("PUT", "/v1/config/automation"): _with_whole_file_rewrite(
+        _with_reload_failure(
+            (
+                Probe(
+                    "/v1/config/automation?id=automation.door_light&dry_run=true",
+                    label="dry",
+                    data="id: automation.door_light\nalias: Updated\ntrigger: []\naction: []\n",
+                ),
+                Probe(
+                    "/v1/config/automation?id=automation.door_light&dry_run=false",
+                    label="apply",
+                    data="id: automation.door_light\nalias: Updated\ntrigger: []\naction: []\n",
+                ),
+            )
+        ),
+        "automations.yaml",
     ),
-    ("POST", "/v1/config/automation"): _with_reload_failure(
-        (Probe("/v1/config/automation", data="id: automation.probe\nalias: Probe\ntrigger: []\naction: []\n"),)
+    ("POST", "/v1/config/automation"): _with_whole_file_rewrite(
+        _with_reload_failure(
+            (Probe("/v1/config/automation", data="id: automation.probe\nalias: Probe\ntrigger: []\naction: []\n"),)
+        ),
+        "automations.yaml",
     ),
-    ("DELETE", "/v1/config/automation"): _with_reload_failure(
-        (Probe("/v1/config/automation?id=automation.door_light"),)
+    ("DELETE", "/v1/config/automation"): _with_whole_file_rewrite(
+        _with_reload_failure((Probe("/v1/config/automation?id=automation.door_light"),)),
+        "automations.yaml",
     ),
     ("GET", "/v1/config/helpers"): (Probe("/v1/config/helpers"),),
-    ("GET", "/v1/config/helper"): (Probe("/v1/config/helper?id=guest_mode"),),
+    # Both sources, because they are two branches of one route and only the
+    # second one is the shape a UI-managed instance actually has.
+    ("GET", "/v1/config/helper"): (
+        Probe("/v1/config/helper?id=guest_mode", label="yaml", expect={"source": "yaml"}),
+        Probe(
+            "/v1/config/helper?id=input_boolean.probe_bool",
+            label="storage",
+            setup=_seed_storage_helpers,
+            expect={"source": "storage"},
+        ),
+    ),
     # P2-3: entity_id/reloaded/entity_created were produced but undocumented.
-    ("POST", "/v1/config/helper"): _with_reload_failure(
-        (Probe("/v1/config/helper?domain=input_boolean", data="probe_helper:\n  name: Probe\n"),)
+    ("POST", "/v1/config/helper"): _with_whole_file_rewrite(
+        _with_reload_failure((Probe("/v1/config/helper?domain=input_boolean", data="probe_helper:\n  name: Probe\n"),)),
+        "input_boolean.yaml",
     ),
-    ("PUT", "/v1/config/helper"): _with_reload_failure(
-        (Probe("/v1/config/helper?id=guest_mode", data="name: Probe 2\n"),)
+    ("PUT", "/v1/config/helper"): _with_whole_file_rewrite(
+        _with_reload_failure((Probe("/v1/config/helper?id=guest_mode", data="name: Probe 2\n"),)),
+        "input_boolean.yaml",
     ),
-    ("DELETE", "/v1/config/helper"): _with_reload_failure((Probe("/v1/config/helper?id=guest_mode"),)),
+    ("DELETE", "/v1/config/helper"): _with_whole_file_rewrite(
+        _with_reload_failure((Probe("/v1/config/helper?id=guest_mode"),)),
+        "input_boolean.yaml",
+    ),
+    # `file` and `reason` are mutually exclusive branches: one probe alone would
+    # leave the other documented and produced by nothing (the D45 shape).
+    ("GET", "/v1/config/wiring"): (
+        Probe("/v1/config/wiring?domain=script", label="wired", expect={"wired": True, "file": "scripts.yaml"}),
+        Probe(
+            "/v1/config/wiring?domain=script",
+            label="unwired",
+            setup=_seed_unwired_script,
+            expect={"wired": False},
+        ),
+    ),
     ("POST", "/v1/ha/reload/{domain}"): (Probe("/v1/ha/reload/automation"),),
     ("POST", "/v1/ha/check-config"): (Probe("/v1/ha/check-config"),),
     ("GET", "/v1/logs"): (Probe("/v1/logs?component=wireguard", setup=_seed_logbuffer),),
@@ -631,7 +736,7 @@ async def test_route_response_conformance(
 
 _QUERY_READ_RE = re.compile(r"request\.query(?:\.get\(|\[)\s*[\"']([a-zA-Z_]+)[\"']")
 
-_ROUTE_MODULES = [config, related, refscan, templates, scripts, automations, helpers, status, logs, wireguard]
+_ROUTE_MODULES = [config, related, refscan, templates, scripts, automations, helpers, status, logs, wireguard, wiring]
 
 
 @pytest.mark.parametrize("module", _ROUTE_MODULES, ids=lambda m: m.__name__.rsplit(".", 1)[-1])

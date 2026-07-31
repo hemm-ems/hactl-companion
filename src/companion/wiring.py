@@ -69,6 +69,13 @@ def _contained_path(base: str | Path, relative: str) -> Path:
 
     The include target comes from a user-authored ``configuration.yaml``, so it
     is untrusted input on the same footing as a query parameter (C-3).
+
+    Every path this module hands out goes through here, the conventional-name
+    fallbacks included. Those look like constants at the call sites that matter
+    most (``automations.yaml``), but the helper routes build theirs from the
+    ``?domain=`` query parameter — so "it is a literal" was true of some callers
+    and not of the class, which is the shape of every C-3 hole this project has
+    had.
     """
     base_path = Path(base).resolve()
     target = (base_path / relative).resolve()
@@ -160,7 +167,7 @@ def wired_target(base: str | Path, domain: str, conventional_file: str) -> Path:
             )
         raise NotWiredError(msg)
 
-    default_target = (Path(base).resolve() / conventional_file).resolve()
+    default_target = _contained_path(base, conventional_file)
     includes: list[tuple[str, Path]] = []
     rejected: list[str] = []
 
@@ -209,7 +216,7 @@ def wired_target_or_default(base: str | Path, domain: str, conventional_file: st
     try:
         return wired_target(base, domain, conventional_file)
     except NotWiredError:
-        return (Path(base).resolve() / conventional_file).resolve()
+        return _contained_path(base, conventional_file)
 
 
 def require_wired_target(base: str | Path, domain: str, conventional_file: str) -> Path:

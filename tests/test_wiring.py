@@ -185,3 +185,24 @@ async def test_create_refusal_reaches_the_caller_as_a_json_envelope(
     body = await resp.json()
     assert body["error"]["code"] == 400
     assert "template: !include template.yaml" in body["error"]["message"]
+
+
+def test_conventional_fallback_is_contained_too(tmp_path: Path) -> None:
+    """C-3 holds for the fallback name, not only for the `!include` target.
+
+    The include branch was guarded from the start; the conventional-name branch
+    was not, because at the call sites people look at it is a literal
+    (`automations.yaml`). The helper routes build theirs from the `?domain=`
+    query parameter, so "it is a literal" was true of some callers and not of
+    the class — the shape of every C-3 hole this project has had.
+    """
+    (tmp_path / "configuration.yaml").write_text("homeassistant:\n  name: Home\n", encoding="utf-8")
+
+    with pytest.raises(NotWiredError):
+        wired_target_or_default(tmp_path, "automation", "../outside.yaml")
+    with pytest.raises(NotWiredError):
+        wired_target_or_default(tmp_path, "automation", "secrets.yaml")
+
+    # The guard still lets an ordinary name through — a check that refuses
+    # everything is not a check.
+    assert wired_target_or_default(tmp_path, "automation", "automations.yaml") == (tmp_path / "automations.yaml")
