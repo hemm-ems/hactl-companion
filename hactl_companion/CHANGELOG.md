@@ -1,3 +1,11 @@
+## 2026.7.11
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+
+
+**Full Changelog**: https://github.com/hemm-ems/hactl-companion/compare/v2026.7.10...v2026.7.11
+
 ## 2026.7.10
 
 <!-- Release notes generated using configuration in .github/release.yml at main -->
