@@ -56,7 +56,7 @@ from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
 
 from companion.backups import make_backup
-from companion.pathguard import is_denied, is_within
+from companion.pathguard import is_denied_path, is_within
 
 #: What the route did to the container it loaded.
 #:
@@ -90,7 +90,7 @@ def contained(base: str | Path, path: str | Path) -> Path:
     target = Path(path).resolve()
     if not is_within(target, root):
         raise web.HTTPBadRequest(text="Path traversal is not allowed")
-    if is_denied(target.name):
+    if is_denied_path(target, root):
         raise web.HTTPForbidden(text=f"Access to {target.name} is denied")
     return target
 

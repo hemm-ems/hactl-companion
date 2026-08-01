@@ -452,3 +452,11 @@ def test_a_write_outside_the_config_base_is_refused(tmp_path: Path) -> None:
     with pytest.raises(web.HTTPForbidden):
         contained(base, base / "secrets.yaml")
     assert outside.read_text(encoding="utf-8") == "- id: a\n"
+
+
+def test_storage_directory_is_refused(tmp_path: Path) -> None:
+    """`contained()` applies the same `.storage` denial `PUT /v1/config/file` does (C-3)."""
+    base = tmp_path / "config"
+    base.mkdir()
+    with pytest.raises(web.HTTPForbidden):
+        contained(base, base / ".storage" / "core.config_entries")

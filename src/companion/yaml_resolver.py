@@ -8,7 +8,7 @@ from typing import Any
 from ruamel.yaml import YAML
 from ruamel.yaml.representer import RoundTripRepresenter
 
-from companion.pathguard import is_denied, is_within
+from companion.pathguard import is_denied, is_denied_path, is_within
 
 
 class CircularIncludeError(Exception):
@@ -153,7 +153,7 @@ class YamlResolver:
         if not is_within(resolved, self._base):
             msg = f"Path traversal not allowed: {path}"
             raise ValueError(msg)
-        if is_denied(resolved.name):
+        if is_denied_path(resolved, self._base):
             msg = f"Access to {resolved.name} is denied"
             raise PermissionError(msg)
 

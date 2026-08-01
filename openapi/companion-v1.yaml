@@ -324,16 +324,16 @@ paths:
                     type: array
                     description: 'Config files this walk did not read, so the result
                       covers less than the config does: a renamed or deleted `!include`
-                      target, a file the path guard refuses (`secrets.yaml`), an `!include_dir_*`
-                      naming a directory that is not there, an include that leaves
-                      the config directory. Present only when at least one file was
-                      skipped; absent — not empty, not null — otherwise. A client
-                      that certifies something about the whole config (no dangling
-                      references, a completed rename) must treat any entry here as
-                      "cannot certify": what is missing from the result may only be
-                      missing because it was never opened. Note a YAML syntax error
-                      is not in this list — it fails the request outright rather than
-                      being skipped.'
+                      target, a file the path guard refuses (`secrets.yaml`, anything
+                      under `.storage`), an `!include_dir_*` naming a directory that
+                      is not there, an include that leaves the config directory. Present
+                      only when at least one file was skipped; absent — not empty,
+                      not null — otherwise. A client that certifies something about
+                      the whole config (no dangling references, a completed rename)
+                      must treat any entry here as "cannot certify": what is missing
+                      from the result may only be missing because it was never opened.
+                      Note a YAML syntax error is not in this list — it fails the
+                      request outright rather than being skipped.'
                     items:
                       type: object
                       required:
@@ -400,16 +400,16 @@ paths:
                     type: array
                     description: 'Config files this walk did not read, so the result
                       covers less than the config does: a renamed or deleted `!include`
-                      target, a file the path guard refuses (`secrets.yaml`), an `!include_dir_*`
-                      naming a directory that is not there, an include that leaves
-                      the config directory. Present only when at least one file was
-                      skipped; absent — not empty, not null — otherwise. A client
-                      that certifies something about the whole config (no dangling
-                      references, a completed rename) must treat any entry here as
-                      "cannot certify": what is missing from the result may only be
-                      missing because it was never opened. Note a YAML syntax error
-                      is not in this list — it fails the request outright rather than
-                      being skipped.'
+                      target, a file the path guard refuses (`secrets.yaml`, anything
+                      under `.storage`), an `!include_dir_*` naming a directory that
+                      is not there, an include that leaves the config directory. Present
+                      only when at least one file was skipped; absent — not empty,
+                      not null — otherwise. A client that certifies something about
+                      the whole config (no dangling references, a completed rename)
+                      must treat any entry here as "cannot certify": what is missing
+                      from the result may only be missing because it was never opened.
+                      Note a YAML syntax error is not in this list — it fails the
+                      request outright rather than being skipped.'
                     items:
                       type: object
                       required:
@@ -474,16 +474,16 @@ paths:
                     type: array
                     description: 'Config files this walk did not read, so the result
                       covers less than the config does: a renamed or deleted `!include`
-                      target, a file the path guard refuses (`secrets.yaml`), an `!include_dir_*`
-                      naming a directory that is not there, an include that leaves
-                      the config directory. Present only when at least one file was
-                      skipped; absent — not empty, not null — otherwise. A client
-                      that certifies something about the whole config (no dangling
-                      references, a completed rename) must treat any entry here as
-                      "cannot certify": what is missing from the result may only be
-                      missing because it was never opened. Note a YAML syntax error
-                      is not in this list — it fails the request outright rather than
-                      being skipped.'
+                      target, a file the path guard refuses (`secrets.yaml`, anything
+                      under `.storage`), an `!include_dir_*` naming a directory that
+                      is not there, an include that leaves the config directory. Present
+                      only when at least one file was skipped; absent — not empty,
+                      not null — otherwise. A client that certifies something about
+                      the whole config (no dangling references, a completed rename)
+                      must treat any entry here as "cannot certify": what is missing
+                      from the result may only be missing because it was never opened.
+                      Note a YAML syntax error is not in this list — it fails the
+                      request outright rather than being skipped.'
                     items:
                       type: object
                       required:

@@ -16,7 +16,7 @@ from ruamel.yaml import YAML
 from companion import core_api
 from companion.backups import backup_dir, make_backup
 from companion.params import parse_bool_param
-from companion.pathguard import is_denied, is_within
+from companion.pathguard import is_denied, is_denied_path, is_within
 from companion.yaml_resolver import YamlResolver
 
 yaml = YAML()
@@ -41,8 +41,8 @@ def _resolve_config_path(base: str, relative: str) -> Path:
     if not is_within(target, base_path):
         raise web.HTTPBadRequest(text="Path traversal is not allowed")
 
-    if is_denied(target.name):
-        raise web.HTTPForbidden(text=f"Access to {target.name} is denied")
+    if is_denied_path(target, base_path):
+        raise web.HTTPForbidden(text=f"Access to {relative} is denied")
 
     return target
 

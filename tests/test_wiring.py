@@ -104,6 +104,15 @@ def test_include_of_a_denied_file_is_refused(tmp_path: Path) -> None:
         wired_target(tmp_path, "template", "template.yaml")
 
 
+def test_include_of_a_storage_path_is_refused(tmp_path: Path) -> None:
+    """`.storage` is denied by directory, not by filename — a `!include` pointed
+    at it (a user-authored configuration.yaml is untrusted input, same as a
+    query param) gets the same refusal `secrets.yaml` does."""
+    _cfg(tmp_path, "template: !include .storage/core.config_entries\n")
+    with pytest.raises(NotWiredError, match="denied"):
+        wired_target(tmp_path, "template", "template.yaml")
+
+
 def test_packages_mechanism_is_named_in_the_refusal(tmp_path: Path) -> None:
     """The blind spot must be stated, not silently mis-advised.
 

@@ -88,8 +88,9 @@ _RELATED_ENTITY_SCHEMA = {
 # Hence a factory rather than a constant.
 _SKIPPED_DESC = (
     "Config files this walk did not read, so the result covers less than the config does: a renamed "
-    "or deleted `!include` target, a file the path guard refuses (`secrets.yaml`), an `!include_dir_*` "
-    "naming a directory that is not there, an include that leaves the config directory. Present only "
+    "or deleted `!include` target, a file the path guard refuses (`secrets.yaml`, anything under "
+    "`.storage`), an `!include_dir_*` naming a directory that is not there, an include that leaves the "
+    "config directory. Present only "
     "when at least one file was skipped; absent — not empty, not null — otherwise. A client that "
     "certifies something about the whole config (no dangling references, a completed rename) must "
     'treat any entry here as "cannot certify": what is missing from the result may only be missing '
