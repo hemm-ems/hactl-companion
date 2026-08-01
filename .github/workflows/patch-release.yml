@@ -92,26 +92,32 @@ jobs:
           python-version: "3.12"
       - run: uv sync --extra dev
 
-      # Bump the version FIRST and land it on main, so the tag cut next points at
-      # the bumped commit. Otherwise the image (built from the tag) is built from
-      # pre-bump code and self-reports the previous version.
+      # The release is four ordered facts, and the order is the whole point:
       #
-      # The bump goes through a pull request, not `git push origin HEAD:main`.
-      # main requires three status checks and has enforce_admins on, so a commit
-      # created seconds ago cannot be pushed to it by anyone: it has no check
-      # results, and there is no identity left that may skip them. The direct
-      # push failed exactly that way on the first release after the protection
-      # went on (2026-07-31, v2026.7.9):
+      #   1. the bump exists on a BRANCH        (nothing reads it yet)
+      #   2. the image for that version is PUBLISHED and verified
+      #   3. the bump lands on MAIN             (the add-on store now sees it)
+      #   4. the tag and GitHub Release are cut from main
+      #
+      # Step 3 is the advertisement: Home Assistant's add-on store reads
+      # `version` from hactl_companion/config.yaml on the default branch, and the
+      # Supervisor pulls <image>:<that version>. Doing it before step 2 is what
+      # made "Update" fail on every release — see the step that publishes below.
+      #
+      # The bump still reaches main through a pull request rather than
+      # `git push origin HEAD:main`. main requires three status checks and has
+      # enforce_admins on, so a commit created seconds ago cannot be pushed to it
+      # by anyone: it has no check results, and there is no identity left that
+      # may skip them. The direct push failed exactly that way on the first
+      # release after the protection went on (2026-07-31, v2026.7.9):
       #
       #     remote: error: GH006: Protected branch update failed for refs/heads/main.
       #     remote: - 3 of 3 required status checks are expected.
       #
-      # Auto-merge lets the required checks run and then squashes the bump in.
-      # This step does not return until the bump is actually on main, because
-      # "Create GitHub Release" below cuts its tag from --target main and would
-      # otherwise tag the pre-bump commit — the very failure the ordering above
-      # exists to prevent.
-      - name: Bump version on main
+      # The bump commit is also what the image is built from, so the tag cut from
+      # main in step 4 carries the same version the image self-reports.
+      - name: Prepare the version bump on a branch
+        id: bump
         env:
           GH_TOKEN: ${{ secrets.PACKAGES_TOKEN }}
         run: |
@@ -147,9 +153,72 @@ jobs:
           # bump PR was open must be able to resume onto the same branch.
           branch="release/bump-${VER}"
           git push --force origin "HEAD:refs/heads/${branch}"
+          echo "bump-branch=${branch}" >> "$GITHUB_OUTPUT"
+
+      # ---- the image must exist before the bump can reach main ----
+      #
+      # Home Assistant's add-on store reads `version` from
+      # hactl_companion/config.yaml on the DEFAULT BRANCH, and the Supervisor
+      # then pulls <image>:<that version>. So merging the bump is the act of
+      # advertising the release, and until this point it has not happened: the
+      # bump is sitting on a branch nothing reads.
+      #
+      # This ordering is the fix for a failure that recurred every release and
+      # was twice written off as bad luck. The workflow used to bump main, cut
+      # the tag, and only then trigger the Docker build — which runs its own
+      # test job before a two-platform buildx. That left a window, minutes wide,
+      # in which every instance was offered an update whose image did not exist;
+      # pressing Update failed and the add-on stayed on the old version.
+      # "The image had not finished pushing yet" was the symptom. The cause was
+      # that the advertisement preceded the artifact.
+      - name: Publish the image before the store can advertise it
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VER="${{ needs.versions.outputs.next-version }}"
+          branch="${{ steps.bump.outputs.bump-branch }}"
+          # A resumed run whose bump already landed has no branch to build from,
+          # but may still have died before the image was pushed. Build from main,
+          # which by then carries the same bumped tree. Skipping instead would
+          # leave the next step failing with no way to make it pass.
+          ref="${branch:-main}"
+
+          before="$(gh run list --workflow release.yml --json databaseId --jq '.[0].databaseId // 0')"
+          gh workflow run release.yml --ref "${ref}" -f version="${VER}"
+
+          # Find the run this dispatch created, then wait it out. `gh workflow
+          # run` does not return an id, so poll for one newer than the last.
+          run_id=""
+          for _ in $(seq 1 30); do
+            sleep 10
+            candidate="$(gh run list --workflow release.yml --json databaseId --jq '.[0].databaseId // 0')"
+            if [ "${candidate}" != "${before}" ]; then run_id="${candidate}"; break; fi
+          done
+          [ -n "${run_id}" ] || { echo "::error::release.yml did not start for ${ref}"; exit 1; }
+
+          echo "::notice::waiting on release.yml run ${run_id} (building ${VER} from ${ref})"
+          gh run watch "${run_id}" --exit-status --interval 20
+
+      # The gate, not a comment: derives the arch set from config.yaml and
+      # resolves the manifest ANONYMOUSLY, the way the Supervisor does. An
+      # authenticated check would pass while a private package left every
+      # instance unable to update.
+      - name: Verify the image is published for every declared arch
+        run: ./.github/scripts/verify-image-published.sh "${{ needs.versions.outputs.next-version }}"
+
+      - name: Land the bump on main
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_TOKEN }}
+        run: |
+          VER="${{ needs.versions.outputs.next-version }}"
+          branch="${{ steps.bump.outputs.bump-branch }}"
+          if [ -z "${branch}" ]; then
+            echo "::notice::config.yaml already at ${VER} on main; nothing to land"
+            exit 0
+          fi
           gh pr create --base main --head "${branch}" \
             --title "release: bump version to ${VER}" \
-            --body "Version bump for ${tag}, opened by the patch-release workflow. Auto-merges once the required checks pass; the release job is blocked until it lands." \
+            --body "Version bump for v${VER}, opened by the patch-release workflow. The image for ${VER} is already published and verified; merging this is what tells the add-on store the release exists." \
             || echo "::notice::a PR for ${branch} already exists; reusing it"
           # --auto is refused when the PR is already mergeable (nothing left to
           # wait for), so fall back to merging it outright.
@@ -183,10 +252,13 @@ jobs:
             --target main \
             --latest
 
-      - name: Trigger Docker build and push
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          tag="${{ needs.versions.outputs.next-tag }}"
-          gh workflow run release.yml --ref "${tag}"
-          echo "::notice::Docker build triggered for ${tag} via release.yml"
+      # No Docker build is triggered here any more. It ran before the bump
+      # reached main and was verified pullable — which is the point of this
+      # workflow's ordering. Re-triggering it from the tag would rebuild the
+      # same tree under the same tags for no gain, and would restore the
+      # impression that the image is something that happens after the release.
+      #
+      # Note the `release.yml` `push: tags: v*` trigger still fires on the tag
+      # created above. That run rebuilds and re-pushes identical tags, which is
+      # harmless, and it keeps a tag pushed by hand (outside this workflow)
+      # producing an image the way it always has.
