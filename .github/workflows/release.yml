@@ -6,7 +6,23 @@ on:
       - "v*"
   release:
     types: [published]
-  workflow_dispatch: {} # triggered by monthly-release workflow
+  workflow_dispatch:
+    inputs:
+      version:
+        # Tag the image explicitly instead of deriving it from the git ref.
+        #
+        # The release workflows publish the image from the version-bump BRANCH,
+        # before that bump reaches main — because main is what Home Assistant's
+        # add-on store reads, and the moment it says 2026.7.11 every instance is
+        # offered an update whose image must already exist. A branch ref carries
+        # no semver for `docker/metadata-action` to read, so the version comes in
+        # here instead.
+        #
+        # Left empty (a tag push, or a manual run against a tag) the behaviour is
+        # unchanged and the tags are derived from the ref as before.
+        description: "Version to tag the image with, e.g. 2026.7.11. Empty = derive from the git ref."
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -32,6 +48,15 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # The `major.minor` moving tag the semver patterns produce from a git ref,
+      # computed here for the explicit-version path so both paths publish the
+      # same set of tags. An add-on pinned to `2026.7` must not stop moving just
+      # because the image was built before its tag existed.
+      - name: Derive major.minor from the version input
+        id: majorminor
+        if: inputs.version != ''
+        run: echo "value=$(echo '${{ inputs.version }}' | cut -d. -f1,2)" >> "$GITHUB_OUTPUT"
+
       - name: Docker meta
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
@@ -40,6 +65,8 @@ jobs:
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=${{ inputs.version }},enable=${{ inputs.version != '' }}
+            type=raw,value=${{ steps.majorminor.outputs.value }},enable=${{ inputs.version != '' }}
             type=sha
             type=raw,value=latest,enable={{is_default_branch}}
 

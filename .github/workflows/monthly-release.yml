@@ -94,10 +94,25 @@ jobs:
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # Bump the version on main FIRST, so the tag cut below points at the bumped
-      # commit. Otherwise the image (built from the tag) is built from pre-bump
-      # code and self-reports the previous version. Mirrors patch-release.yml.
-      - name: Bump version on main
+      # Same four ordered facts as patch-release.yml, and for the same reason:
+      #
+      #   1. the bump exists on a BRANCH        (nothing reads it yet)
+      #   2. the image for that version is PUBLISHED and verified
+      #   3. the bump lands on MAIN             (the add-on store now sees it)
+      #   4. the tag and GitHub Release are cut from main
+      #
+      # Home Assistant's add-on store reads `version` from
+      # hactl_companion/config.yaml on the default branch, so landing the bump IS
+      # the advertisement. This workflow used to do it first and trigger the
+      # Docker build last, which offered every instance an update whose image did
+      # not exist yet.
+      #
+      # It also used to `git push origin HEAD:main`, which branch protection has
+      # refused since 2026-07-28 (enforce_admins, three required checks). That
+      # made this workflow unable to release at all; the PR flow below is the one
+      # patch-release.yml already proved.
+      - name: Prepare the version bump on a branch
+        id: bump
         if: steps.check.outputs.exists == 'false'
         env:
           GH_TOKEN: ${{ secrets.PACKAGES_TOKEN }}
@@ -128,7 +143,67 @@ jobs:
           mv /tmp/changelog_new.md hactl_companion/CHANGELOG.md
           git add pyproject.toml openapi/companion-v1.yaml hactl_companion/config.yaml src/companion/__init__.py hactl_companion/CHANGELOG.md
           git commit -m "release: bump version to ${VER}"
-          git push origin HEAD:main
+          branch="release/bump-${VER}"
+          git push --force origin "HEAD:refs/heads/${branch}"
+          echo "bump-branch=${branch}" >> "$GITHUB_OUTPUT"
+
+      - name: Publish the image before the store can advertise it
+        if: steps.check.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VER="${{ steps.version.outputs.ver }}"
+          branch="${{ steps.bump.outputs.bump-branch }}"
+          # A resumed run whose bump already landed has no branch; main carries
+          # the same bumped tree by then.
+          ref="${branch:-main}"
+
+          before="$(gh run list --workflow release.yml --json databaseId --jq '.[0].databaseId // 0')"
+          gh workflow run release.yml --ref "${ref}" -f version="${VER}"
+
+          run_id=""
+          for _ in $(seq 1 30); do
+            sleep 10
+            candidate="$(gh run list --workflow release.yml --json databaseId --jq '.[0].databaseId // 0')"
+            if [ "${candidate}" != "${before}" ]; then run_id="${candidate}"; break; fi
+          done
+          [ -n "${run_id}" ] || { echo "::error::release.yml did not start for ${ref}"; exit 1; }
+
+          echo "::notice::waiting on release.yml run ${run_id} (building ${VER} from ${ref})"
+          gh run watch "${run_id}" --exit-status --interval 20
+
+      - name: Verify the image is published for every declared arch
+        if: steps.check.outputs.exists == 'false'
+        run: ./.github/scripts/verify-image-published.sh "${{ steps.version.outputs.ver }}"
+
+      - name: Land the bump on main
+        if: steps.check.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.PACKAGES_TOKEN }}
+        run: |
+          VER="${{ steps.version.outputs.ver }}"
+          branch="${{ steps.bump.outputs.bump-branch }}"
+          if [ -z "${branch}" ]; then
+            echo "::notice::config.yaml already at ${VER} on main; nothing to land"
+            exit 0
+          fi
+          gh pr create --base main --head "${branch}" \
+            --title "release: bump version to ${VER}" \
+            --body "Version bump for v${VER}, opened by the monthly-release workflow. The image for ${VER} is already published and verified; merging this is what tells the add-on store the release exists." \
+            || echo "::notice::a PR for ${branch} already exists; reusing it"
+          gh pr merge "${branch}" --squash --auto --delete-branch \
+            || gh pr merge "${branch}" --squash --delete-branch
+
+          for _ in $(seq 1 60); do
+            sleep 20
+            git fetch --quiet origin main
+            if git show "origin/main:hactl_companion/config.yaml" | grep -qx "version: \"${VER}\""; then
+              echo "::notice::bump for ${VER} landed on main"
+              exit 0
+            fi
+          done
+          echo "::error::bump PR for ${VER} did not land on main within 20 minutes — check its required checks, then re-run this workflow (the bump step is idempotent)"
+          exit 1
 
       - name: Create GitHub Release
         if: steps.check.outputs.exists == 'false'
@@ -144,13 +219,7 @@ jobs:
             --target main \
             --latest
 
-      - name: Trigger release workflow (Docker build & push)
-        if: steps.check.outputs.exists == 'false'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          # Wait briefly for the tag to propagate
-          sleep 5
-          gh workflow run release.yml \
-            --repo "${{ github.repository }}" \
-            --ref "${{ steps.version.outputs.tag }}"
+      # No Docker build is triggered here any more — it ran before the bump
+      # reached main and was verified pullable, which is the point of the
+      # ordering above. `release.yml` still fires on the tag push, rebuilding
+      # identical tags harmlessly and keeping a hand-pushed tag working.
