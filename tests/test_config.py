@@ -158,3 +158,55 @@ async def test_secrets_yaml_denied(client: TestClient, auth_headers: dict[str, s
     (config_dir / "secrets.yaml").write_text("wifi_password: hunter2\n")
     resp = await client.get("/v1/config/file?path=secrets.yaml", headers=auth_headers)
     assert resp.status == 403
+
+
+async def test_storage_directory_denied_unresolved(
+    client: TestClient, auth_headers: dict[str, str], config_dir: Path
+) -> None:
+    """`.storage` holds cleartext credentials (`core.config_entries`), the full
+    auth store, and a full state snapshot — none of it reachable through this
+    route, exactly like `secrets.yaml`. Verified live 2026-08-01: before this
+    fix, `GET .../v1/config/file?path=.storage/core.config_entries&resolve=false`
+    returned 213 config entries with cleartext credentials for 38 integrations.
+    """
+    storage = config_dir / ".storage"
+    storage.mkdir()
+    (storage / "core.config_entries").write_text(
+        '{"data": {"entries": [{"domain": "mqtt", "data": {"password": "hunter2"}}]}}', encoding="utf-8"
+    )
+    resp = await client.get("/v1/config/file?path=.storage/core.config_entries&resolve=false", headers=auth_headers)
+    assert resp.status == 403
+
+
+async def test_storage_directory_denied_resolved(
+    client: TestClient, auth_headers: dict[str, str], config_dir: Path
+) -> None:
+    """The same refusal holds with `resolve=true` (the default)."""
+    storage = config_dir / ".storage"
+    storage.mkdir()
+    (storage / "core.config_entries").write_text('{"data": {"entries": []}}', encoding="utf-8")
+    resp = await client.get("/v1/config/file?path=.storage/core.config_entries", headers=auth_headers)
+    assert resp.status == 403
+
+
+async def test_storage_directory_denied_via_block_route(
+    client: TestClient, auth_headers: dict[str, str], config_dir: Path
+) -> None:
+    """`config/block` is a sibling read route and must refuse `.storage` identically."""
+    storage = config_dir / ".storage"
+    storage.mkdir()
+    (storage / "core.config_entries").write_text('{"data": {"entries": []}}', encoding="utf-8")
+    resp = await client.get("/v1/config/block?path=.storage/core.config_entries&id=0", headers=auth_headers)
+    assert resp.status == 403
+
+
+async def test_storage_directory_never_listed(
+    client: TestClient, auth_headers: dict[str, str], config_dir: Path
+) -> None:
+    """The listing route already hides `.storage` (hidden-dir skip) — guard the regression."""
+    storage = config_dir / ".storage"
+    storage.mkdir()
+    (storage / "core.config_entries").write_text('{"data": {}}', encoding="utf-8")
+    resp = await client.get("/v1/config/files", headers=auth_headers)
+    data = await resp.json()
+    assert not any(".storage" in f for f in data["files"])

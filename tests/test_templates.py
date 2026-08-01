@@ -3,8 +3,28 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
+import pytest
 from aiohttp.test_utils import TestClient
+
+from companion import core_api
+
+
+def _fake_states(monkeypatch: pytest.MonkeyPatch, states: list[dict[str, Any]]) -> None:
+    """Make `core_api.get_states()` answer with `states` — the shape
+    `post_template`'s entity verification polls (matched by
+    ``(domain, attributes.friendly_name)``; see `_poll_template_entity`).
+    """
+
+    async def _fake_get_states() -> list[dict[str, Any]]:
+        return states
+
+    monkeypatch.setattr(core_api, "get_states", _fake_get_states)
+
+
+def _live_state(entity_id: str, name: str) -> dict[str, Any]:
+    return {"entity_id": entity_id, "state": "steady", "attributes": {"friendly_name": name}}
 
 
 async def test_list_templates(client: TestClient, auth_headers: dict[str, str]) -> None:
@@ -108,6 +128,175 @@ state: "{{ 123 }}"
     data = await resp.json()
     assert data["status"] == "created"
     assert data["unique_id"] == "tpl_new_sensor"
+    # Unlike helper/script, a template entity_id is derived from `name`, not
+    # from `unique_id` (this file's own fixture proves it: unique_id
+    # tpl_energie_zaehler names a sensor called "Energie Zählerstand Flur") —
+    # so it cannot be predicted, only found among live states after the fact
+    # (see `_poll_template_entity`). Without a matching live state (none faked
+    # here — the default fixture answers `get_states()` with `[]`) the entity
+    # cannot be confirmed, and the response has to say so honestly rather than
+    # assume success because the write and the reload both answered 2xx.
+    assert data["entities"] == [
+        {"unique_id": "tpl_new_sensor", "domain": "sensor", "entity_id": None, "created": False}
+    ]
+
+
+async def test_create_template_entity_confirmed_via_live_state(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Once a live state matches `(domain, name)`, the create reports the entity
+    as actually created — this is the positive case `test_create_template`
+    deliberately leaves unresolved."""
+    _fake_states(monkeypatch, [_live_state("sensor.tpl_state_confirmed", "Confirm Me")])
+    new_body = 'name: "Confirm Me"\nunique_id: tpl_confirm\nstate: "{{ 1 }}"\n'
+    resp = await client.post(
+        "/v1/config/template?domain=sensor",
+        data=new_body,
+        headers={**auth_headers, "Content-Type": "text/plain"},
+    )
+    assert resp.status == 201
+    data = await resp.json()
+    assert data["entities"] == [
+        {
+            "unique_id": "tpl_confirm",
+            "domain": "sensor",
+            "entity_id": "sensor.tpl_state_confirmed",
+            "created": True,
+        }
+    ]
+
+
+async def test_create_template_entity_ambiguous_name_is_not_confirmed(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """HA does not enforce `friendly_name` uniqueness — two live states matching
+    `(domain, name)` must not be guessed between, only refused as unresolvable."""
+    _fake_states(
+        monkeypatch,
+        [
+            _live_state("sensor.tpl_ambiguous_one", "Ambiguous"),
+            _live_state("sensor.tpl_ambiguous_two", "Ambiguous"),
+        ],
+    )
+    new_body = 'name: "Ambiguous"\nunique_id: tpl_ambiguous\nstate: "{{ 1 }}"\n'
+    resp = await client.post(
+        "/v1/config/template?domain=sensor",
+        data=new_body,
+        headers={**auth_headers, "Content-Type": "text/plain"},
+    )
+    assert resp.status == 201
+    data = await resp.json()
+    assert data["entities"] == [{"unique_id": "tpl_ambiguous", "domain": "sensor", "entity_id": None, "created": False}]
+
+
+async def test_create_template_block_reports_every_declared_entity(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A full block may declare several unique_ids across several domains sharing
+    one trigger — every one of them gets its own entry, not a single collapsed
+    boolean."""
+    _fake_states(
+        monkeypatch,
+        [
+            _live_state("sensor.block_a", "Block A"),
+            _live_state("binary_sensor.block_b", "Block B"),
+        ],
+    )
+    block_body = """triggers:
+  - trigger: state
+    entity_id: sensor.gone
+sensor:
+  - name: "Block A"
+    unique_id: tpl_block_a
+    state: "{{ 1 }}"
+binary_sensor:
+  - name: "Block B"
+    unique_id: tpl_block_b
+    state: "{{ true }}"
+"""
+    resp = await client.post(
+        "/v1/config/template",
+        data=block_body,
+        headers={**auth_headers, "Content-Type": "text/plain"},
+    )
+    assert resp.status == 201
+    data = await resp.json()
+    entities = {e["unique_id"]: e for e in data["entities"]}
+    assert entities.keys() == {"tpl_block_a", "tpl_block_b"}
+    assert entities["tpl_block_a"] == {
+        "unique_id": "tpl_block_a",
+        "domain": "sensor",
+        "entity_id": "sensor.block_a",
+        "created": True,
+    }
+    assert entities["tpl_block_b"] == {
+        "unique_id": "tpl_block_b",
+        "domain": "binary_sensor",
+        "entity_id": "binary_sensor.block_b",
+        "created": True,
+    }
+
+
+async def test_create_template_block_partial_confirmation_is_reported_per_entity(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The per-entity shape does not assume every declared entity rises or falls
+    together — if live states (or a future HA) disagree between two entities
+    from the same create, that disagreement must survive to the response."""
+    _fake_states(
+        monkeypatch,
+        [_live_state("sensor.partial_up", "Partial Up")],
+        # "Partial Down" deliberately gets no matching live state.
+    )
+    block_body = """sensor:
+  - name: "Partial Up"
+    unique_id: tpl_partial_up
+    state: "{{ 1 }}"
+  - name: "Partial Down"
+    unique_id: tpl_partial_down
+    state: "{{ 2 }}"
+"""
+    resp = await client.post(
+        "/v1/config/template",
+        data=block_body,
+        headers={**auth_headers, "Content-Type": "text/plain"},
+    )
+    assert resp.status == 201
+    data = await resp.json()
+    entities = {e["unique_id"]: e for e in data["entities"]}
+    assert entities["tpl_partial_up"]["created"] is True
+    assert entities["tpl_partial_down"] == {
+        "unique_id": "tpl_partial_down",
+        "domain": "sensor",
+        "entity_id": None,
+        "created": False,
+    }
+
+
+async def test_create_template_entities_false_when_reload_fails(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """HA refusing the reload must not be papered over by a live state left
+    behind from a previous, unrelated create sharing the same name."""
+    _fake_states(monkeypatch, [_live_state("sensor.tpl_reload_fails", "Reload Fails")])
+
+    async def _refused(domain: str, service: str, data: object = None) -> core_api.ServiceResult:
+        return core_api.ServiceResult(False, "HTTP 400: Service not found")
+
+    monkeypatch.setattr(core_api, "call_service", _refused)
+
+    new_body = 'name: "Reload Fails"\nunique_id: tpl_reload_fails\nstate: "{{ 1 }}"\n'
+    resp = await client.post(
+        "/v1/config/template?domain=sensor",
+        data=new_body,
+        headers={**auth_headers, "Content-Type": "text/plain"},
+    )
+    assert resp.status == 201
+    data = await resp.json()
+    assert data["reloaded"] is False
+    assert data["entities"] == [
+        {"unique_id": "tpl_reload_fails", "domain": "sensor", "entity_id": None, "created": False}
+    ]
 
 
 async def test_create_template_duplicate(client: TestClient, auth_headers: dict[str, str]) -> None:

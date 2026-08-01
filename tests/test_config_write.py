@@ -207,6 +207,22 @@ async def test_write_secrets_denied(client: TestClient, auth_headers: dict[str, 
     assert resp.status == 403
 
 
+async def test_write_storage_denied(client: TestClient, auth_headers: dict[str, str], config_dir: Path) -> None:
+    """The write route refuses `.storage` exactly like the two read routes.
+
+    A guard applied to one route and not its siblings is the "two of four
+    sites" defect class this project keeps hitting (see INVARIANTS.md C-3).
+    """
+    resp = await client.put(
+        "/v1/config/file?path=.storage/core.config_entries&dry_run=false",
+        data="hacked: true\n",
+        headers={**auth_headers, "Content-Type": "text/plain"},
+    )
+    assert resp.status == 403
+    # Nothing must have been written under .storage by a refused request.
+    assert not (config_dir / ".storage" / "core.config_entries").exists()
+
+
 async def test_concurrent_writes_no_corruption(client: TestClient, auth_headers: dict[str, str]) -> None:
     """Two simultaneous writes to the same file must not corrupt it — last write wins cleanly."""
     import asyncio

@@ -216,8 +216,26 @@ async def post_script(request: web.Request) -> web.Response:
     data[script_id] = script_body
     surgical = save_entry(base, target, data, source, Edit("append", script_id), yaml)
     reload = await core_api.reload_domain("script")
+    # `scripts.yaml` is a mapping keyed by the script's own id, so — unlike
+    # template — the entity_id HA assigns is knowable in advance: HA never
+    # derives it from `alias`. A reload answering success only means HA
+    # accepted the YAML; HA validates each entry independently and silently
+    # drops one that fails schema validation without failing the reload, so
+    # this is the check that can see that failure (`core_api.poll_for_entity`
+    # — `helper create` and `automation create` already have the equivalent
+    # check; `script create` and `template create` did not, the gap this
+    # class fix closes).
+    entity_id = f"{SCRIPT_DOMAIN}.{script_id}"
+    entity_created = await core_api.poll_for_entity(entity_id) if reload.ok else False
     return web.json_response(
-        {"status": "created", "id": script_id, **write_fields(surgical), **core_api.reload_fields(reload)},
+        {
+            "status": "created",
+            "id": script_id,
+            "entity_id": entity_id,
+            **write_fields(surgical),
+            **core_api.reload_fields(reload),
+            "entity_created": entity_created,
+        },
         status=201,
     )
 

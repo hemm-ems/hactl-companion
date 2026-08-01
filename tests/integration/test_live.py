@@ -133,6 +133,25 @@ class TestConfigRead:
         # 403 if the file exists, 403 either way (deny-list checked before existence)
         assert r.status_code == 403
 
+    def test_storage_config_entries_denied(
+        self, companion_url: str, auth_headers: dict[str, str], _ha_ready: None
+    ) -> None:
+        """`.storage/core.config_entries` is real on this instance (onboarding
+        writes it) and, before the pathguard fix, was readable — cleartext
+        integration credentials — through this exact route."""
+        r = requests.get(
+            f"{companion_url}/v1/config/file",
+            params={"path": ".storage/core.config_entries", "resolve": "false"},
+            headers=auth_headers,
+            timeout=10,
+        )
+        assert r.status_code == 403
+
+    def test_storage_never_listed(self, companion_url: str, auth_headers: dict[str, str], _ha_ready: None) -> None:
+        r = requests.get(f"{companion_url}/v1/config/files", headers=auth_headers, timeout=10)
+        files = r.json()["files"]
+        assert not any(".storage" in f for f in files)
+
 
 class TestConfigWrite:
     """Tests that write to /config via the companion."""
@@ -208,6 +227,21 @@ class TestConfigWrite:
             timeout=10,
         )
         assert r.status_code == 400
+
+    def test_write_storage_denied(self, companion_url: str, auth_headers: dict[str, str], _ha_ready: None) -> None:
+        """The write route refuses `.storage` too — a guard on the read routes
+        alone would leave the write side able to plant a file HA's own state
+        machinery would then read back as its own. A harmless, never-before-seen
+        key, deliberately not `core.config_entries` — this must never touch the
+        real HA state the rest of the suite depends on, guard or no guard."""
+        r = requests.put(
+            f"{companion_url}/v1/config/file",
+            params={"path": ".storage/hactl_integration_probe", "dry_run": "false"},
+            data="evil: true\n",
+            headers=auth_headers,
+            timeout=10,
+        )
+        assert r.status_code == 403
 
     def test_write_invalid_yaml_rejected(
         self, companion_url: str, auth_headers: dict[str, str], _ha_ready: None
@@ -492,6 +526,28 @@ class TestHelpersCRUD:
 class TestScriptsCRUD:
     """Integration tests for script CRUD endpoints."""
 
+    def test_create_script_materializes_live_entity(
+        self, companion_url: str, auth_headers: dict[str, str], _ha_ready: None
+    ) -> None:
+        """HA's default onboarding config already wires `script:`, so — unlike
+        helper/template — this needs no `!include` setup. entity_id is
+        predictable (`script.<id>`, the mapping key the write filed under),
+        proven live rather than merely returned: HA is asked directly whether
+        the entity actually exists."""
+        body = "integ_test_script_verify:\n  alias: Integration Verify Script\n  sequence: []\n"
+        r = requests.post(
+            f"{companion_url}/v1/config/script",
+            data=body,
+            headers={**auth_headers, "Content-Type": "text/plain"},
+            timeout=15,
+        )
+        assert r.status_code == 201, r.text
+        data = r.json()
+        assert data["id"] == "integ_test_script_verify"
+        assert data["entity_id"] == "script.integ_test_script_verify"
+        assert data["reloaded"] is True
+        assert data["entity_created"] is True
+
     def test_create_and_list_scripts(self, companion_url: str, auth_headers: dict[str, str], _ha_ready: None) -> None:
         scripts_yaml = """integ_test_script:
   alias: Integration Test Script
@@ -560,6 +616,79 @@ class TestTemplatesCRUD:
         assert r.status_code == 200
         data = r.json()
         assert data["unique_id"] == "integ_test_tpl_1"
+
+    def test_create_template_reports_the_live_state_resolved_entity(
+        self, companion_url: str, auth_headers: dict[str, str], _ha_ready: None, ha_url: str, ha_token: str
+    ) -> None:
+        """Unlike helper/script, a template entity_id cannot be predicted from
+        unique_id (HA derives it from `name`) — proven here by NOT predicting
+        it: the `entity_id` this create reports is read back from the
+        response and independently confirmed live against HA, the same
+        match `_poll_template_entity` performs (live states, NOT the entity
+        registry — see decisions.md D-3, which this test reproduced live: the
+        registry-reading first version of this poll failed here, red, because
+        `.storage/core.entity_registry`'s on-disk write lagged the entity's
+        own live state by roughly ten seconds).
+        """
+        # `template:` is not wired by HA's default onboarding config —
+        # ensure it is, the same way test_create_non_sensor_block_full_crud
+        # does, independently of whichever sibling test ran first. Wiring a
+        # brand-new top-level domain into configuration.yaml is not enough on
+        # its own: HA only registers `template.reload` as a callable service
+        # when it boots having already read the key, so a restart is required
+        # before the create below can see `reloaded: true` for real (measured
+        # live: the reload otherwise 400s "Service not found", every time).
+        base_config = requests.get(
+            f"{companion_url}/v1/config/file",
+            params={"path": "configuration.yaml", "resolve": "false"},
+            headers=auth_headers,
+            timeout=10,
+        ).json()["content"]
+        if "template:" not in base_config:
+            seed = (
+                '- sensor:\n    - name: "Integ Tpl Restart Seed"\n      '
+                'unique_id: integ_tpl_restart_seed\n      state: "{{ 1 }}"\n'
+            )
+            r = requests.put(
+                f"{companion_url}/v1/config/file",
+                params={"path": "template.yaml", "dry_run": "false"},
+                data=seed,
+                headers=auth_headers,
+                timeout=10,
+            )
+            assert r.status_code == 200
+
+            new_config = base_config.rstrip("\n") + "\ntemplate: !include template.yaml\n"
+            r = requests.put(
+                f"{companion_url}/v1/config/file",
+                params={"path": "configuration.yaml", "dry_run": "false"},
+                data=new_config,
+                headers=auth_headers,
+                timeout=10,
+            )
+            assert r.status_code == 200
+
+            _restart_ha_core(ha_url, ha_token, "sensor.integ_tpl_restart_seed", "1")
+
+        body = 'name: "Integ Entity Verify"\nunique_id: integ_entity_verify\nstate: "{{ 7 }}"\n'
+        r = requests.post(
+            f"{companion_url}/v1/config/template?domain=sensor",
+            data=body,
+            headers={**auth_headers, "Content-Type": "text/plain"},
+            timeout=15,
+        )
+        assert r.status_code == 201, r.text
+        data = r.json()
+        assert data["reloaded"] is True
+        assert data["unique_id"] == "integ_entity_verify"
+        assert len(data["entities"]) == 1
+        entity = data["entities"][0]
+        assert entity["unique_id"] == "integ_entity_verify"
+        assert entity["domain"] == "sensor"
+        assert entity["created"] is True
+        entity_id = entity["entity_id"]
+        assert entity_id is not None
+        assert _entity_is_live(ha_url, ha_token, entity_id)
 
     def test_create_non_sensor_block_full_crud(
         self, companion_url: str, auth_headers: dict[str, str], _ha_ready: None, ha_url: str, ha_token: str

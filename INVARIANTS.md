@@ -36,11 +36,45 @@ every credential — including an empty bearer — gets 503, never a pass.
 
 Every config file path resolves inside the configured base directory
 (`Path.is_relative_to`, not prefix matching); `secrets.yaml` is never
-readable or writable regardless of location.
+readable or writable regardless of location; nothing under `.storage` is
+readable or writable through any config-path route, regardless of the
+individual filename.
 
-- Enforced by: `tests/test_pathguard.py`,
+The `.storage` half was added 2026-08-01: `pathguard.is_denied` checked only
+the bare filename, so `secrets.yaml` — the file holding *references* to
+secrets — was refused while `.storage/core.config_entries` — the file holding
+the secrets themselves, in cleartext, for every configured integration — was
+not, and `GET /v1/config/file?path=.storage/core.config_entries&resolve=false`
+returned 213 credential-bearing entries on a live instance. `.storage/auth`
+and `auth_provider.homeassistant` (the login/session store) and
+`core.restore_state` (a full state snapshot) were reachable the same way. The
+listing route (`GET /v1/config/files`) already skipped hidden directories, so
+`.storage` never appeared in the index while remaining readable by direct
+path — the index and the guard disagreeing is what let this pass unnoticed.
+
+Checked before fixing: neither this service's own code nor hactl's Go client
+(the only caller of the file/files/block routes) ever requests a `.storage`
+path through these routes — the two in-service readers of `.storage`
+(`routes/related.py`, `routes/helpers.py`) reach it directly on disk with a
+fixed, internally-enumerated key, never a caller-supplied path. So the fix is
+a **positive rule on the resolved path** (`pathguard.DENIED_DIRS`,
+`is_denied_path`) rather than one more name on the file denylist — the
+one-name denylist (`DENIED_FILES = {"secrets.yaml"}`) is precisely the shape
+that produced this defect, and every one of the four sites that resolve a
+caller-supplied config path (`routes/config.py`, `wiring.py`, `surgical.py`,
+`yaml_resolver.py`) now calls `is_denied_path`, not the old filename-only
+`is_denied`.
+
+- Enforced by: `tests/test_pathguard.py` (the guard functions directly),
+  `tests/test_config.py::test_storage_directory_denied_unresolved`,
+  `::test_storage_directory_denied_resolved`,
+  `::test_storage_directory_denied_via_block_route`,
+  `::test_storage_directory_never_listed`,
   `tests/test_config_write.py::test_write_path_traversal_rejected`,
-  `tests/test_config_write.py::test_write_secrets_denied`
+  `::test_write_secrets_denied`, `::test_write_storage_denied`,
+  `tests/test_wiring.py::test_include_of_a_storage_path_is_refused`,
+  `tests/test_surgical.py::test_storage_directory_is_refused`,
+  `tests/test_resolver.py::test_resolve_include_of_storage_is_denied`
 
 ## C-4 — Dry-run is the default wherever it is offered
 

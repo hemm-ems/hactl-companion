@@ -58,6 +58,17 @@ async def test_resolve_nonexistent_include(client: TestClient, auth_headers: dic
     assert resp.status == 404
 
 
+async def test_resolve_include_of_storage_is_denied(
+    client: TestClient, auth_headers: dict[str, str], config_dir: Path
+) -> None:
+    """`!include`-ing into `.storage` must not be a back door around the file-route guard."""
+    (config_dir / ".storage").mkdir()
+    (config_dir / ".storage" / "core.config_entries").write_text('{"data": {}}', encoding="utf-8")
+    (config_dir / "leaky.yaml").write_text("data: !include .storage/core.config_entries\n")
+    resp = await client.get("/v1/config/file?path=leaky.yaml&resolve=true", headers=auth_headers)
+    assert resp.status == 403
+
+
 async def test_resolve_secrets_include_denied(
     client: TestClient, auth_headers: dict[str, str], config_dir: Path
 ) -> None:

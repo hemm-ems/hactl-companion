@@ -8,6 +8,7 @@ Supervisor is present.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from typing import Any, NamedTuple
@@ -145,6 +146,51 @@ async def get_state(entity_id: str) -> dict[str, Any] | None:
     except (aiohttp.ClientError, TimeoutError, OSError) as exc:
         logger.error("get_state(%s) failed: %s", entity_id, exc)
         return None
+
+
+def is_live_state(state: dict[str, Any] | None) -> bool:
+    """True if ``state`` (a ``GET /states/<id>`` payload) is a genuinely live entity.
+
+    Presence alone is not the answer: HA keeps a dropped entity in the entity
+    registry and can serve it back as a *restored ghost* — ``state:
+    unavailable`` with a ``restored: true`` attribute — until its platform sets
+    it up for real, so a bare "the state exists" check reports "still there"
+    for something HA has actually dropped. That is precisely the dishonesty
+    this poll exists to catch (the same shape as ``reload_error`` answering
+    "reloaded" while the entity never came up), so the same ghost is excluded
+    here. Mirrors ``tests/integration/test_live.py::_entity_is_live``, which
+    established this exact rule (and its two-sided reasoning: neither "absent"
+    nor "ghost" counts as loaded) against real HA restarts.
+    """
+    if state is None:
+        return False
+    return not (state.get("state") == "unavailable" and state.get("attributes", {}).get("restored"))
+
+
+async def poll_for_entity(entity_id: str, attempts: int = 5, delay: float = 0.4) -> bool:
+    """Poll ``GET /states/<entity_id>`` until it appears live, or give up after ``attempts`` tries.
+
+    A reload service call answering success only means HA accepted the YAML —
+    HA validates each entry independently and silently drops one that fails
+    schema validation (logs it, raises a persistent notification, moves on)
+    without failing the reload, so ``reload_error`` cannot see this failure
+    mode by construction. This is the check that can: it asks whether the
+    entity the write just declared actually came up.
+
+    Shared by every create route whose target's entity_id is knowable in
+    advance (``helper``, ``script`` — both `<domain>.<id>`, the id being the
+    exact key the write filed under). A route that cannot predict the id first
+    (``template``, whose entity_id is derived from `name`, not `unique_id`)
+    resolves it via the entity registry before polling — see
+    :mod:`companion.registry` — but polls with this same loop shape and the
+    same :func:`is_live_state` check.
+    """
+    for attempt in range(attempts):
+        if attempt:
+            await asyncio.sleep(delay)
+        if is_live_state(await get_state(entity_id)):
+            return True
+    return False
 
 
 async def get_states() -> list[dict[str, Any]] | None:
