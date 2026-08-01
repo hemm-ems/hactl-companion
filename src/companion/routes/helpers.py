@@ -18,7 +18,7 @@ from ruamel.yaml import YAML
 
 from companion import core_api, registry
 from companion.surgical import Edit, read_source, save_entry, write_fields
-from companion.wiring import require_wired_target, wired_target_or_default
+from companion.wiring import DomainFile, readable_domain_files, require_wired_target, wired_target_or_default
 
 yaml = YAML()
 yaml.preserve_quotes = True
@@ -96,12 +96,16 @@ def yaml_file_for_domain(domain: str) -> str:
     return f"{domain}.yaml"
 
 
-def _load_helpers_from(base: str, target: Path) -> tuple[dict[str, Any], str]:
+def _load_helpers_from(base: str, target: Path, key_path: tuple[str, ...] = ()) -> tuple[dict[str, Any], str]:
     """Load a helper YAML file's dict content from an explicit path.
 
     Returns ``(data, source_text)``; an absent file is an empty mapping and empty
     text. The source travels with the parsed data so a write can rewrite only the
     entry it was asked to change (see :mod:`companion.surgical`).
+
+    ``key_path`` names where inside the document the helper mapping sits — empty
+    for a file whose root is the domain's config, one key deep for an inline
+    domain or a package.
     """
     if not target.is_file():
         return {}, ""
@@ -109,6 +113,8 @@ def _load_helpers_from(base: str, target: Path) -> tuple[dict[str, Any], str]:
     data = yaml.load(StringIO(source))
     if data is None:
         data = {}
+    if key_path:
+        return _in_file(data if isinstance(data, dict) else None, key_path), source
     if not isinstance(data, dict):
         raise web.HTTPInternalServerError(text=f"{target.name} must be a top-level mapping")
     return data, source
@@ -117,17 +123,54 @@ def _load_helpers_from(base: str, target: Path) -> tuple[dict[str, Any], str]:
 def _load_helpers(base: str, domain: str) -> tuple[dict[str, Any], Path, str]:
     """Load a helper YAML file, returning (data_dict, file_path, source_text).
 
-    Helper files are top-level mappings keyed by entity slug. The file is the
-    one ``configuration.yaml`` wires the domain to, falling back to the
-    conventional ``<domain>.yaml`` when the wiring cannot be established — used
-    by the read/update/delete paths, which operate on helpers that (by
-    definition) already exist. Resolving through the same function the create
-    path uses is what stops a helper created in ``my_booleans.yaml`` from being
-    invisible to the ``helper ls`` that follows it.
+    The single-file view, kept for the create path and for callers that need the
+    source text to splice. Reads go through :func:`_load_helpers_everywhere`,
+    which sees all four wirings; this one sees the file a new entry may be
+    appended to.
     """
     target = wired_target_or_default(base, domain, yaml_file_for_domain(domain))
     data, source = _load_helpers_from(base, target)
     return data, target, source
+
+
+def _in_file(data: dict[str, Any] | None, key_path: tuple[str, ...]) -> dict[str, Any]:
+    """Descend ``key_path`` into a parsed document, or return an empty mapping.
+
+    An inline domain and a package put the helper mapping one key down; an
+    include target has it at the root. Anything that is not a mapping where a
+    mapping was expected reads as absent rather than raising: this runs over
+    files the caller did not name, and one odd document must not turn a listing
+    into a 500.
+    """
+    node: Any = data
+    for key in key_path:
+        if not isinstance(node, dict):
+            return {}
+        node = node.get(key)
+    return node if isinstance(node, dict) else {}
+
+
+def _load_helpers_everywhere(base: str, domain: str) -> list[tuple[dict[str, Any], DomainFile, str]]:
+    """Every file holding helpers for ``domain``, with its entries and source text.
+
+    Live-fire #105: this used to be one file, resolved through the create path's
+    question, so a domain written out in ``configuration.yaml`` — which is how
+    the reference instance configures three of them — listed as empty and every
+    lookup in it 404'd. Three of the four wirings HA supports were invisible.
+    """
+    loaded: list[tuple[dict[str, Any], DomainFile, str]] = []
+    for entry in readable_domain_files(base, domain, yaml_file_for_domain(domain)):
+        data, source = _load_helpers_from(base, entry.path, key_path=entry.key_path)
+        loaded.append((data, entry, source))
+    return loaded
+
+
+def _helper_owner(base: str, domain: str, helper_id: str) -> tuple[dict[str, Any], DomainFile, str] | None:
+    """The file that defines ``helper_id`` in ``domain``, or None."""
+    for data, entry, source in _load_helpers_everywhere(base, domain):
+        if helper_id in data:
+            return data, entry, source
+    return None
 
 
 def _validate_domain(domain: str) -> None:
@@ -189,20 +232,22 @@ async def get_helpers(request: web.Request) -> web.Response:
     domains = [domain_filter] if domain_filter else sorted(ALLOWED_DOMAINS)
 
     result: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
     for domain in domains:
         _validate_domain(domain)
-        data, _target, _source = _load_helpers(base, domain)
-        for helper_id, helper in data.items():
-            if not isinstance(helper, dict):
-                continue
-            result.append(
-                {
-                    "id": helper_id,
-                    "name": helper.get("name", helper_id),
-                    "domain": domain,
-                    "icon": helper.get("icon", ""),
-                }
-            )
+        for data, _entry, _source in _load_helpers_everywhere(base, domain):
+            for helper_id, helper in data.items():
+                if not isinstance(helper, dict) or (domain, helper_id) in seen:
+                    continue
+                seen.add((domain, helper_id))
+                result.append(
+                    {
+                        "id": helper_id,
+                        "name": helper.get("name", helper_id),
+                        "domain": domain,
+                        "icon": helper.get("icon", ""),
+                    }
+                )
 
     return web.json_response({"helpers": result})
 
@@ -250,8 +295,9 @@ async def get_helper(request: web.Request) -> web.Response:
         raise web.HTTPBadRequest(text="Missing id parameter")
 
     for domain in sorted(ALLOWED_DOMAINS):
-        data, _target, _source = _load_helpers(base, domain)
-        if helper_id in data:
+        owner = _helper_owner(base, domain, helper_id)
+        if owner is not None:
+            data, _entry, _source = owner
             stream = StringIO()
             yaml.dump({helper_id: data[helper_id]}, stream)
             return web.json_response(
@@ -338,6 +384,34 @@ def _refuse_storage_write(base: str, helper_id: str, domain: str | None) -> None
     )
 
 
+def _require_writable(entry: DomainFile, helper_id: str, domain: str) -> None:
+    """Refuse a write to a file whose root is not the domain's own mapping.
+
+    The read path deliberately reaches further than the write path can follow
+    (live-fire #105): an inline domain and a package file both hold real helpers
+    and both keep them UNDER a key. :mod:`companion.surgical` splices an entry
+    into a document whose root IS the mapping, so pointing it at one of these
+    would rewrite the wrong level of ``configuration.yaml``.
+
+    409 rather than 404, and naming the file: the helper exists, this route
+    cannot be the one to change it, and the caller needs to know which file to
+    open. A bare "not found" from the write half of a family whose read half
+    just returned the entry is the read/write contradiction #104 was.
+    """
+    if entry.writable:
+        return
+    where = ".".join(entry.key_path)
+    raise web.HTTPConflict(
+        text=(
+            f"Helper '{helper_id}' is defined in {entry.path.name} under '{where}:', not in a file "
+            f"whose top level is the {domain} mapping — this route edits a single entry by splicing "
+            f"it, which is only safe at the document's root. Edit {entry.path.name} directly with "
+            f"PUT /v1/config/file, or move the domain to '{domain}: !include "
+            f"{yaml_file_for_domain(domain)}'."
+        )
+    )
+
+
 def _locate_helper(base: str, helper_id: str, domain: str | None) -> tuple[str, dict[str, Any], Path, str]:
     """Locate the domain file that owns ``helper_id`` for update/delete.
 
@@ -356,17 +430,21 @@ def _locate_helper(base: str, helper_id: str, domain: str | None) -> tuple[str, 
     """
     if domain:
         _validate_domain(domain)
-        data, target, source = _load_helpers(base, domain)
-        if helper_id in data:
-            return domain, data, target, source
+        owner = _helper_owner(base, domain, helper_id)
+        if owner is not None:
+            data, entry, source = owner
+            _require_writable(entry, helper_id, domain)
+            return domain, data, entry.path, source
         _refuse_storage_write(base, helper_id, domain)
         raise web.HTTPNotFound(text=f"Helper not found: {helper_id} (domain {domain})")
 
     matches: list[tuple[str, dict[str, Any], Path, str]] = []
     for candidate in sorted(ALLOWED_DOMAINS):
-        data, target, source = _load_helpers(base, candidate)
-        if helper_id in data:
-            matches.append((candidate, data, target, source))
+        owner = _helper_owner(base, candidate, helper_id)
+        if owner is not None:
+            data, entry, source = owner
+            _require_writable(entry, helper_id, candidate)
+            matches.append((candidate, data, entry.path, source))
 
     if not matches:
         _refuse_storage_write(base, helper_id, None)

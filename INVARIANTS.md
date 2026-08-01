@@ -160,11 +160,19 @@ The domain key is matched the way HA matches it — `^<domain>(| .+)$`, so
 `automation ui:` counts (`homeassistant.config.extract_domain_configs`).
 Read/update/delete are deliberately **not** guarded: they act on entries that
 already exist, and refusing them would strand a user cleaning up a file HA
-ignores. They resolve the target through the same function, so a create and the
-list that follows it can never disagree about which file is real. Config
-layouts this cannot prove (`homeassistant: packages:`, `!include_dir_*`,
-several candidate files) are refused with the reason named; `PUT
-/v1/config/file` remains the escape hatch (C-6 validates the result).
+ignores. Config layouts this cannot prove (`homeassistant: packages:`,
+`!include_dir_*`, several candidate files) are refused with the reason named;
+`PUT /v1/config/file` remains the escape hatch (C-6 validates the result).
+
+**Amended after live-fire #105.** This paragraph used to end "they resolve the
+target through the same function, so a create and the list that follows it can
+never disagree about which file is real". Sharing one function did stop that
+disagreement and caused a worse one: the read inherited the create's
+*refusals*. For an inline domain, a directory include or a package the create's
+question has no answer, so the read fell back to a conventional `<domain>.yaml`
+that does not exist, and a domain holding three helpers listed as empty. Three
+of HA's four wirings were invisible. What must agree is the ANSWER about a file
+both paths touch — not the question each asks. See C-15.
 
 **The same answer is askable before the write.** `GET /v1/config/wiring?domain=`
 runs the identical resolution and returns the verdict: `wired`, plus either the
@@ -375,6 +383,46 @@ declares a `whole_file_reason` instead. The canary enforces the choice.
   (a real HA loads the spliced file, and the same edit through HA's own
   `/api/config/automation/config/<id>` is shown re-serializing the whole file —
   the boundary of what this service can fix)
+
+## C-15 — A read resolves where entries ARE; a write resolves where one may go
+
+These are different questions and they have different answers. "Which files
+hold entries for this domain?" has four answers on a real instance — the
+`!include` target, the domain written out inline in `configuration.yaml`, the
+members of a merging directory include, and the package files reached through
+`homeassistant: packages:`. "Which single file may I append an entry to?" has
+at most one, and for three of those layouts it has none.
+
+A read route must answer the first question. It may not be narrowed by the
+second: an entry the caller can see in their own config and cannot list is a
+service reporting a configured instance as empty. `wiring.readable_domain_files`
+is that resolution, and it is faithful to `annotatedyaml.loader` rather than to
+an assumption — every `!include_dir_*` walks its directory recursively, skipping
+dot-prefixed names and `secrets.yaml`.
+
+A write route must answer the second, and where the two disagree it **refuses**
+rather than following the read. The refusal is 409 and names the file, because
+the entry does exist and the caller's next move is to open it. Narrowing the
+read instead would be the cheaper fix and the wrong one — it is what live-fire
+#105 was.
+
+The line between them is the SHAPE of the file, not the wiring that reached it:
+C-14 splices an entry into a document whose root IS the domain's mapping, so a
+member of `!include_dir_merge_named` is as writable as an `!include` target,
+while `configuration.yaml` and a package file — which keep the mapping under a
+key — are readable and not writable. Two wirings are deliberately left
+unresolved (`!include_dir_named`, `!include_dir_list`): there an entry's
+identity comes from the file's name or position rather than from anything in
+the document, and inventing an id from a filename is what H-28 exists to stop.
+They are recorded in `wiring.UNRESOLVED_DIR_TAGS` with the reason, and the
+domain reads as unwired rather than as wrong.
+
+- Enforced by: `tests/test_helpers_wiring.py` (all four wirings listed and
+  readable, once per wiring; the write refused and naming the file for the two
+  that keep entries under a key; a merge-dir member still writable; the
+  refusal leaving the file byte-identical; the unresolved tags carrying a
+  stated reason; a domain wired twice not counted twice; and the recursive
+  directory walk with its dotfile and `secrets.yaml` exclusions)
 
 ---
 

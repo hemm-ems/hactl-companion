@@ -1611,3 +1611,77 @@ class TestWiringProbeAgreesWithTheCreate:
                 timeout=30,
             )
             _write_config_file(companion_url, auth_headers, "configuration.yaml", original)
+
+
+class TestInlineDomainIsReadable:
+    """C-15 / live-fire #105: the helpers this service lists are the ones HA loaded.
+
+    The unit tier proves the resolver opens the right files. It cannot prove the
+    thing that actually matters, which is that those files are config Home
+    Assistant honours — and that is the whole defect: the read path was refusing
+    a layout HA loads perfectly well, on the grounds that a *create* into it
+    would be unsafe. So HA is asked. The entity has to be live (not a restored
+    ghost, `_entity_is_live`) and the listing has to contain it.
+    """
+
+    def test_a_helper_written_inline_is_loaded_by_ha_and_listed_here(
+        self, companion_url: str, auth_headers: dict[str, str], ha_url: str, ha_token: str, _ha_ready: None
+    ) -> None:
+        original = _read_config_file(companion_url, auth_headers, "configuration.yaml")
+        assert original is not None
+        stripped = _strip_domain_keys(original, "input_boolean")
+
+        try:
+            inline = stripped.rstrip("\n") + "\ninput_boolean:\n  inline_read_probe:\n    name: Inline Read Probe\n"
+            assert _write_config_file(companion_url, auth_headers, "configuration.yaml", inline).status_code == 200
+
+            # The probe entity itself is the settle condition: no `input_boolean`
+            # can exist until HA has come back up having read the inline mapping,
+            # so the pre-restart process cannot satisfy this poll. A fresh
+            # input_boolean with no `initial:` comes up `off`.
+            _restart_ha_core(ha_url, ha_token, "input_boolean.inline_read_probe", "off")
+            assert _entity_is_live(ha_url, ha_token, "input_boolean.inline_read_probe"), (
+                "HA did not load a helper written inline — then this is not the layout the reference "
+                "instance has and the premise of #105 is wrong"
+            )
+
+            listed = requests.get(
+                f"{companion_url}/v1/config/helpers",
+                params={"domain": "input_boolean"},
+                headers=auth_headers,
+                timeout=15,
+            )
+            assert listed.status_code == 200, listed.text
+            ids = [helper["id"] for helper in listed.json()["helpers"]]
+            assert "inline_read_probe" in ids, (
+                f"HA has the helper and this service lists {ids} — a configured instance reported as empty"
+            )
+
+            shown = requests.get(
+                f"{companion_url}/v1/config/helper",
+                params={"id": "inline_read_probe"},
+                headers=auth_headers,
+                timeout=15,
+            )
+            assert shown.status_code == 200, shown.text
+            assert "Inline Read Probe" in shown.json()["content"]
+
+            # And the write half refuses rather than splicing configuration.yaml,
+            # with the file named. C-15's other direction, against real HA.
+            refused = requests.delete(
+                f"{companion_url}/v1/config/helper",
+                params={"id": "inline_read_probe", "domain": "input_boolean"},
+                headers=auth_headers,
+                timeout=30,
+            )
+            assert refused.status_code == 409, f"{refused.status_code}: {refused.text}"
+            assert "configuration.yaml" in refused.text
+            assert _entity_is_live(ha_url, ha_token, "input_boolean.inline_read_probe"), (
+                "the refused delete removed the helper anyway"
+            )
+        finally:
+            # Restored WITHOUT a restart: the next test's `_ha_ready` does not
+            # depend on this helper being gone, and a restart here would need a
+            # settle entity from the original config that this class does not
+            # own. The file on disk is what the following tests read.
+            _write_config_file(companion_url, auth_headers, "configuration.yaml", original)
