@@ -907,6 +907,14 @@ ENDPOINT_META: dict[tuple[str, str], dict[str, object]] = {
         "parameters": [
             {"name": "domain", "in": "query", "required": False, "schema": {"type": "string"}},
         ],
+        "description": (
+            "Reads every file Home Assistant reads for the domain, in its order: the `!include` target, the "
+            "domain written out inline in `configuration.yaml`, each `*.yaml` under an "
+            "`!include_dir_merge_named`/`!include_dir_merge_list` directory (walked recursively), and any "
+            "package file reached through `homeassistant: packages:`. `!include_dir_named` and "
+            "`!include_dir_list` are not resolved — there an entry's identity comes from the file rather "
+            "than from the document — and the domain reads as unwired."
+        ),
         "response_schema": _HELPER_LIST_SCHEMA,
     },
     ("GET", "/v1/config/helper"): {
@@ -915,7 +923,8 @@ ENDPOINT_META: dict[tuple[str, str], dict[str, object]] = {
             "Resolves both sources: a YAML helper by its top-level key, and a storage-backed helper (created "
             "in the Home Assistant UI) by its entity_id, its collection id, or `<domain>.<collection id>`. "
             "`input_button` is readable here although it has no YAML form. 409 if a bare id is ambiguous "
-            "across storage domains."
+            "across storage domains. The YAML search covers every wiring the listing covers, including a "
+            "domain written out inline in `configuration.yaml` and one arriving through a package."
         ),
         "tags": ["helpers"],
         "parameters": [{"name": "id", "in": "query", "required": True, "schema": {"type": "string"}}],
@@ -942,6 +951,13 @@ ENDPOINT_META: dict[tuple[str, str], dict[str, object]] = {
     },
     ("PUT", "/v1/config/helper"): {
         "summary": "Update helper definition",
+        "description": (
+            "Edits the entry in place, wherever the read path found it. 409 if that file keeps the helper "
+            "under a key rather than at its root — a domain written out inline in `configuration.yaml`, or "
+            "one arriving through a package: the entry is real and readable, and splicing a single entry is "
+            "only safe at a document's root. The refusal names the file; `PUT /v1/config/file` writes it. "
+            "409 also for a storage-backed helper, which has no YAML definition to change."
+        ),
         "tags": ["helpers"],
         "parameters": [
             {"name": "id", "in": "query", "required": True, "schema": {"type": "string"}},
@@ -955,6 +971,13 @@ ENDPOINT_META: dict[tuple[str, str], dict[str, object]] = {
     },
     ("DELETE", "/v1/config/helper"): {
         "summary": "Delete helper",
+        "description": (
+            "Edits the entry in place, wherever the read path found it. 409 if that file keeps the helper "
+            "under a key rather than at its root — a domain written out inline in `configuration.yaml`, or "
+            "one arriving through a package: the entry is real and readable, and splicing a single entry is "
+            "only safe at a document's root. The refusal names the file; `PUT /v1/config/file` writes it. "
+            "409 also for a storage-backed helper, which has no YAML definition to change."
+        ),
         "tags": ["helpers"],
         "parameters": [
             {"name": "id", "in": "query", "required": True, "schema": {"type": "string"}},

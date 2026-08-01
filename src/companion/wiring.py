@@ -212,11 +212,230 @@ def wired_target_or_default(base: str | Path, domain: str, conventional_file: st
     the create path — a create that follows the ``!include`` while the list that
     follows it reads the conventional name would report the entry missing right
     after reporting it created.
+
+    .. deprecated::
+        Returns ONE file, which is why live-fire #105 exists: three of the four
+        ways a domain reaches HA are not one file, and for each of them this
+        falls back to a conventional name that does not exist. Reads resolve
+        through :func:`readable_domain_files` now. This remains only for the
+        create path's "which single file may I append to" question, where one
+        answer is the right shape.
     """
     try:
         return wired_target(base, domain, conventional_file)
     except NotWiredError:
         return _contained_path(base, conventional_file)
+
+
+# ---------------------------------------------------------------------------
+# Reading: where a domain's entries actually ARE
+# ---------------------------------------------------------------------------
+#
+# Live-fire #105. The read routes resolved through the CREATE path's question —
+# "which single file may I safely append to?" — and inherited its refusals. For
+# an inline domain, a directory include, or a package, that question has no
+# answer, so the read fell back to the conventional `<domain>.yaml`, which on
+# such an instance does not exist. `GET /v1/config/helpers` returned nothing for
+# a domain holding three helpers and `GET /v1/config/helper` 404'd under a
+# message listing files the helper is not in.
+#
+# The read question is a different one and has a different shape: not "which
+# file may I write" but "which files hold entries". Answering it needs HA's own
+# rules, read from `annotatedyaml.loader` rather than assumed:
+#
+#   * every `!include_dir_*` walks its directory RECURSIVELY (`os.walk`),
+#     matching `*.yaml`, skipping dot-prefixed names and `secrets.yaml`;
+#   * `!include_dir_merge_named` and `!include_dir_merge_list` merge each file's
+#     own top-level structure — so a member file's root IS the domain's config;
+#   * `!include_dir_named` and `!include_dir_list` do NOT. There the entry's
+#     identity comes from the FILE (its name, or its position), not from
+#     anything written in the document. That is a third entry model and it is
+#     declared debt below rather than guessed at.
+
+#: The directory includes whose member files carry the domain's own structure.
+MERGE_DIR_TAGS = frozenset({"!include_dir_merge_named", "!include_dir_merge_list"})
+
+#: The directory includes this module does not resolve, and why. A domain wired
+#: through one of these reads as unwired rather than as wrong — the entry ids
+#: would have to be invented from filenames, and an invented id is what #104 was.
+UNRESOLVED_DIR_TAGS = {
+    "!include_dir_named": "entry ids would come from the file NAMES, not from the documents",
+    "!include_dir_list": "each file is one entry with no id of its own",
+}
+
+
+class DomainFile:
+    """One file holding config for a domain, and how to reach it inside that file.
+
+    ``key_path`` is empty when the file's root IS the domain's config — an
+    ``!include`` target, or a member of a merging directory include. It is
+    non-empty when the config sits under keys, which is what an inline domain
+    (``configuration.yaml``) and a package file look like.
+
+    That distinction is the whole reason this type exists rather than a bare
+    ``Path``. Reading is the same either way; WRITING is not. ``surgical`` splices
+    an entry into a document whose root is the domain's mapping, so a file with a
+    ``key_path`` can be read and must not be spliced — and the write routes share
+    their loader with the read routes, so without this a widened read would have
+    quietly pointed ``DELETE`` at ``configuration.yaml``.
+    """
+
+    __slots__ = ("key_path", "path")
+
+    def __init__(self, path: Path, key_path: tuple[str, ...] = ()) -> None:
+        self.path = path
+        self.key_path = key_path
+
+    @property
+    def writable(self) -> bool:
+        """Whether a single entry can be spliced into this file."""
+        return not self.key_path
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, DomainFile):
+            return NotImplemented
+        return self.path == other.path and self.key_path == other.key_path
+
+    def __hash__(self) -> int:
+        return hash((self.path, self.key_path))
+
+    def __repr__(self) -> str:
+        return f"DomainFile({self.path.name!r}, {self.key_path!r})"
+
+
+def _dir_members(base: str | Path, relative: str) -> list[Path]:
+    """Every file a directory include reads, by HA's rules.
+
+    ``annotatedyaml.loader._find_files``: ``os.walk`` (so recursive), ``*.yaml``,
+    skipping anything whose name starts with a dot, and skipping ``secrets.yaml``.
+    Sorted, so a listing is a function of the directory rather than of the
+    filesystem's order.
+    """
+    try:
+        root = _contained_path(base, relative)
+    except NotWiredError:
+        return []
+    if not root.is_dir():
+        return []
+    found = [
+        path
+        for path in sorted(root.rglob("*.yaml"))
+        if path.is_file()
+        and path.name != "secrets.yaml"
+        and not any(part.startswith(".") for part in path.relative_to(root).parts)
+    ]
+    return [path for path in found if _is_readable(base, path)]
+
+
+def _is_readable(base: str | Path, path: Path) -> bool:
+    """Whether the path guard permits reading this file at all."""
+    base_path = Path(base).resolve()
+    return is_within(path, base_path) and not is_denied_path(path, base_path)
+
+
+def _package_files(base: str | Path, config: dict[str, Any], domain: str) -> list[DomainFile]:
+    """Files reached through ``homeassistant: packages:`` that configure ``domain``.
+
+    The fourth way a domain gets into Home Assistant, and the one with no
+    top-level key in ``configuration.yaml`` at all — so nothing that reads only
+    that file can find it. A package file's root is a mapping of DOMAINS, so the
+    domain's config sits one key down, which is exactly what ``key_path``
+    expresses.
+    """
+    ha_section = config.get("homeassistant")
+    if not isinstance(ha_section, dict) or PACKAGES_KEY not in ha_section:
+        return []
+
+    value = ha_section[PACKAGES_KEY]
+    tag = _tag_of(value)
+    if tag is None or not tag.startswith("!include"):
+        # Packages written out inline sit under
+        # `homeassistant: packages: <name>: <domain>:`. Reading them is possible
+        # and writing them is not; deferred with the rest of the write question
+        # rather than half-modelled here.
+        return []
+
+    if tag == "!include":
+        candidates = [_contained_path(base, str(value.value).strip())]
+    else:
+        candidates = _dir_members(base, str(value.value).strip())
+
+    found: list[DomainFile] = []
+    for path in candidates:
+        package = _read_mapping(path)
+        if package is None:
+            continue
+        found.extend(DomainFile(path, (key,)) for key in domain_keys(package, domain))
+    return found
+
+
+def _read_mapping(path: Path) -> dict[str, Any] | None:
+    """Parse a YAML file that should be a mapping, or None if it is not readable.
+
+    Unreadable is not an error here. This runs under GET routes over files the
+    caller did not name, and one malformed package must not turn a listing into
+    a 500 — the same argument :func:`_load_configuration` makes for
+    ``configuration.yaml`` itself.
+    """
+    if not path.is_file():
+        return None
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = yaml.load(handle)
+    except (YAMLError, OSError, UnicodeDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def readable_domain_files(base: str | Path, domain: str, conventional_file: str) -> list[DomainFile]:
+    """Every file that can hold an entry for ``domain``, in the order HA reads them.
+
+    All four wirings, because a read that knows one of them is a read that
+    reports an empty instance as empty (live-fire #105):
+
+    ===========================  ==========================================
+    ``domain: !include f.yaml``  the file's root is the domain's config
+    ``domain:`` written inline   ``configuration.yaml``, under that key
+    ``!include_dir_merge_*``     every ``*.yaml`` under it, roots as above
+    ``homeassistant: packages:`` each package file, under its domain key
+    ===========================  ==========================================
+
+    The conventional file is the answer only when nothing else is — an unwired
+    instance, or a ``configuration.yaml`` that cannot be parsed. That keeps the
+    previous behaviour for the case it was right for, which is the one where a
+    file with the conventional name may well exist and be what the caller means.
+    """
+    try:
+        config = _load_configuration(base)
+    except NotWiredError:
+        return [DomainFile(_contained_path(base, conventional_file))]
+
+    found: list[DomainFile] = []
+    for key in domain_keys(config, domain):
+        value = config[key]
+        tag = _tag_of(value)
+        if tag == "!include":
+            found.append(DomainFile(_contained_path(base, str(value.value).strip())))
+        elif tag in MERGE_DIR_TAGS:
+            found.extend(DomainFile(path) for path in _dir_members(base, str(value.value).strip()))
+        elif tag in UNRESOLVED_DIR_TAGS:
+            continue
+        elif tag is None:
+            found.append(DomainFile(_contained_path(base, CONFIGURATION_FILE), (key,)))
+
+    found.extend(_package_files(base, config, domain))
+
+    if not found:
+        found.append(DomainFile(_contained_path(base, conventional_file)))
+    # A file wired twice (a labelled key and the bare one naming the same
+    # include) must not have its entries counted twice.
+    seen: set[DomainFile] = set()
+    unique: list[DomainFile] = []
+    for entry in found:
+        if entry not in seen:
+            seen.add(entry)
+            unique.append(entry)
+    return unique
 
 
 def require_wired_target(base: str | Path, domain: str, conventional_file: str) -> Path:
