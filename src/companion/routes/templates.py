@@ -24,6 +24,7 @@ not create.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from io import StringIO
 from pathlib import Path
@@ -124,17 +125,27 @@ def _is_block(item: dict[str, Any]) -> bool:
     return any(d in item for d in _ENTITY_DOMAINS)
 
 
-def _block_unique_ids(block: dict[str, Any]) -> list[str]:
-    """All ``unique_id``s declared by the entities in a block."""
-    ids: list[str] = []
+def _block_entities(block: dict[str, Any]) -> list[tuple[str, str, str | None]]:
+    """``(domain, unique_id, name)`` for every entity declared in a block.
+
+    A block may declare several entity domains sharing one trigger, so a
+    caller that only needs the ids (:func:`_all_unique_ids`) is one projection
+    of this, not a separate walk. ``name`` travels too — a post-create
+    verification needs it to find the entity among live states (entity_id is
+    not predictable from ``unique_id`` for a template entity; see
+    :func:`_poll_template_entity`) — and is ``None`` when the item omits it,
+    which the verification treats as unresolvable rather than guessing.
+    """
+    entities: list[tuple[str, str, str | None]] = []
     for domain in _ENTITY_DOMAINS:
         items = block.get(domain)
         if not isinstance(items, list):
             continue
         for item in items:
             if isinstance(item, dict) and "unique_id" in item:
-                ids.append(str(item["unique_id"]))
-    return ids
+                name = item.get("name")
+                entities.append((domain, str(item["unique_id"]), name if isinstance(name, str) else None))
+    return entities
 
 
 def _all_unique_ids(data: list[Any]) -> set[str]:
@@ -142,7 +153,7 @@ def _all_unique_ids(data: list[Any]) -> set[str]:
     ids: set[str] = set()
     for block in data:
         if isinstance(block, dict):
-            ids.update(_block_unique_ids(block))
+            ids.update(uid for _domain, uid, _name in _block_entities(block))
     return ids
 
 
@@ -321,39 +332,125 @@ async def post_template(request: web.Request) -> web.Response:
     existing_ids = _all_unique_ids(data)
 
     if _is_block(new_item):
-        first_uid, edit = _create_block(data, new_item, existing_ids)
+        entities, edit = _create_block(data, new_item, existing_ids)
     else:
-        first_uid, edit = _create_bare_item(request, data, new_item, existing_ids)
+        entities, edit = _create_bare_item(request, data, new_item, existing_ids)
 
     surgical = save_entry(base, target, data, source, edit, yaml)
     reload = await core_api.reload_domain("template")
+    entities_created = (
+        await _verify_created_entities(entities)
+        if reload.ok
+        else [
+            {"unique_id": uid, "domain": domain, "entity_id": None, "created": False} for domain, uid, _name in entities
+        ]
+    )
     return web.json_response(
-        {"status": "created", "unique_id": first_uid, **write_fields(surgical), **core_api.reload_fields(reload)},
+        {
+            "status": "created",
+            "unique_id": entities[0][1],
+            "entities": entities_created,
+            **write_fields(surgical),
+            **core_api.reload_fields(reload),
+        },
         status=201,
     )
 
 
-def _create_block(data: list[Any], block: dict[str, Any], existing_ids: set[str]) -> tuple[str, Edit]:
+async def _verify_created_entities(entities: list[tuple[str, str, str | None]]) -> list[dict[str, Any]]:
+    """Poll live states for every ``(domain, unique_id, name)`` this create declared.
+
+    A template entity's entity_id cannot be predicted the way `helper`/`script`
+    predict theirs (see :func:`_poll_template_entity`), so it is found among
+    live states instead — the same mechanism `automations.py`'s
+    `_poll_automation_entity_id` already uses (poll `get_states()`, match a
+    criterion, take the entity_id), with `name` as the match key since a
+    template entity's state carries no analogue of an automation's
+    `attributes.id`.
+
+    A full block may declare several entities across several domains; each gets
+    its own entry rather than one collapsed boolean (see
+    ``_CREATED_TEMPLATE_SCHEMA`` / ``_TEMPLATE_ENTITIES_DESC`` in ``openapi.py``
+    for why: C-13 found HA drops a whole block together when one entry in it
+    fails validation, so today every entity from one create is expected to
+    agree, but this does not assume that stays true).
+    """
+    result: list[dict[str, Any]] = []
+    for domain, uid, name in entities:
+        entity_id, created = await _poll_template_entity(domain, name)
+        result.append({"unique_id": uid, "domain": domain, "entity_id": entity_id, "created": created})
+    return result
+
+
+async def _poll_template_entity(
+    domain: str, name: str | None, attempts: int = 5, delay: float = 0.4
+) -> tuple[str | None, bool]:
+    """Find the entity this create declared among live states, and poll for it.
+
+    Matched by ``(domain, attributes.friendly_name)`` — verified live against
+    two independent HA instances that a template entity's `friendly_name`
+    equals its config `name:` verbatim until something renames it, which a
+    just-created entity never has been. Deliberately NOT the entity registry
+    (`.storage/core.entity_registry`): measured live, that file's on-disk write
+    lagged the entity's own live state by roughly ten seconds in a real
+    container — HA debounces the save, so reading it inside a request-scoped
+    poll (a few seconds, matching every other create route's poll budget) read
+    stale-absent for an entity that had been live and answering `/api/states`
+    for the entire wait. `get_states()` has no such lag.
+
+    Two matches for one ``(domain, name)`` is treated as unresolvable rather
+    than guessing which is the new one — HA does not enforce `friendly_name`
+    uniqueness. `name` is ``None`` when the item omitted it (also
+    unresolvable) or when it is itself a Jinja template rather than a literal
+    string, since the literal directive text will not equal the name HA
+    renders — a known limitation, not a guess.
+    """
+    if name is None:
+        return None, False
+    prefix = f"{domain}."
+    for attempt in range(attempts):
+        if attempt:
+            await asyncio.sleep(delay)
+        states = await core_api.get_states()
+        if states is None:
+            continue
+        matches = [
+            s
+            for s in states
+            if isinstance(s, dict)
+            and str(s.get("entity_id", "")).startswith(prefix)
+            and s.get("attributes", {}).get("friendly_name") == name
+        ]
+        if len(matches) == 1 and core_api.is_live_state(matches[0]):
+            return str(matches[0]["entity_id"]), True
+    return None, False
+
+
+def _create_block(
+    data: list[Any], block: dict[str, Any], existing_ids: set[str]
+) -> tuple[list[tuple[str, str, str | None]], Edit]:
     """Append a full block verbatim as its own list item.
 
-    Returns ``(first unique_id, the edit it made)`` — the write path needs to be
-    told which top-level block changed so it can rewrite only that one.
+    Returns ``(every (domain, unique_id, name) the block declares, the edit it
+    made)`` — the write path needs to know which top-level block changed so it
+    can rewrite only that one, and the post-reload verification needs every
+    entity the block declared, not just the first.
     """
-    new_ids = _block_unique_ids(block)
-    if not new_ids:
+    entities = _block_entities(block)
+    if not entities:
         raise web.HTTPBadRequest(text="Template block must define at least one entity with a unique_id")
 
-    dup = next((u for u in new_ids if u in existing_ids), None)
+    dup = next((uid for _domain, uid, _name in entities if uid in existing_ids), None)
     if dup is not None:
         raise web.HTTPConflict(text=f"Template with unique_id already exists: {dup}")
 
     data.append(block)
-    return new_ids[0], Edit("append")
+    return entities, Edit("append")
 
 
 def _create_bare_item(
     request: web.Request, data: list[Any], item: dict[str, Any], existing_ids: set[str]
-) -> tuple[str, Edit]:
+) -> tuple[list[tuple[str, str, str | None]], Edit]:
     """Wrap a bare entity item in its own new top-level block.
 
     Returns ``(unique_id, the edit it made)`` — always an append, because the
@@ -416,7 +513,8 @@ def _create_bare_item(
     # trigger-based one either, which is how a plain entity used to risk being
     # bound to somebody else's trigger.
     data.append({domain: [item]})
-    return uid, Edit("append")
+    name = item.get("name")
+    return [(domain, uid, name if isinstance(name, str) else None)], Edit("append")
 
 
 async def delete_template(request: web.Request) -> web.Response:

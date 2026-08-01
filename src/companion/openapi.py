@@ -335,15 +335,28 @@ _CHECK_CONFIG_SCHEMA = {
         "errors": {"type": "string"},
     },
 }
+#: `script:` is a mapping keyed by the script's own id, so — unlike template —
+#: the entity_id HA will assign is knowable in advance: `script.<id>`, always,
+#: never derived from `name`/`alias` (verified live 2026-08-01 against a real
+#: instance's entity registry: `platform` is `script`, `unique_id` equals the
+#: script id, for all 42 script entities checked).
+_ENTITY_CREATED_DESC = (
+    "Whether the entity was observed live (`GET /api/states`) after the reload — polled for up to ~2s. "
+    "`false` covers both a reload HA refused and a reload HA accepted but the entity never appeared "
+    "(HA validates each YAML entry and silently drops one that fails schema validation without failing "
+    "the reload; the write and the reload both then report success while the entity never exists)."
+)
 _CREATED_SCRIPT_SCHEMA = {
     "type": "object",
     "required": ["status"],
     "properties": {
         "status": {"type": "string"},
         "id": {"type": "string"},
+        "entity_id": {"type": "string"},
         "reloaded": {"type": "boolean"},
         "reload_error": {"type": "string", "description": _RELOAD_ERROR_DESC},
         "reformatted": {"type": "boolean", "description": _REFORMATTED_DESC},
+        "entity_created": {"type": "boolean", "description": _ENTITY_CREATED_DESC},
     },
 }
 _CREATED_AUTOMATION_SCHEMA = {
@@ -358,12 +371,55 @@ _CREATED_AUTOMATION_SCHEMA = {
         "reformatted": {"type": "boolean", "description": _REFORMATTED_DESC},
     },
 }
-_CREATED_UID_SCHEMA = {
+#: Unlike `script`/`helper`, a template entity's entity_id is derived from
+#: `name` (slugified), not from `unique_id` — confirmed by this file's own test
+#: fixture (`unique_id: tpl_energie_zaehler` on a sensor named "Energie
+#: Zählerstand Flur") and by a live instance (`sensor.posclock_jan`'s registry
+#: entry: `platform: template`, `unique_id: posclock_jan` — matching only
+#: because whoever authored it chose a unique_id equal to the name's slug, not
+#: because HA derives one from the other). So entity_id cannot be predicted the
+#: way `helper`/`script` predict it; it is found among live states instead,
+#: matched by `(domain, attributes.friendly_name)` — NOT read from the entity
+#: registry (`.storage/core.entity_registry`), whose on-disk write measured
+#: live roughly ten seconds behind the entity's own live state, far outside a
+#: request-scoped poll. See `companion.routes.templates._poll_template_entity`.
+#:
+#: A single POST can declare more than one entity — a full block may list
+#: several `unique_id`s across several entity domains sharing one trigger — so
+#: this reports per entity rather than collapsing to one boolean. C-13 found
+#: Home Assistant drops a whole top-level block together when any one entry in
+#: it fails validation, so today every entity from one POST is expected to
+#: agree; the per-entity shape does not assume that stays true and would still
+#: report the truth if it stopped being true. `unique_id` (the first entity's)
+#: is kept for backward compatibility; `entities` is the complete answer.
+_TEMPLATE_ENTITIES_DESC = (
+    "Every entity this create declared (one for a bare item, one or more for a full block), each "
+    "resolved and polled independently: `entity_id` is found among live states by matching "
+    "`(domain, name)`, null if no single live state matched (not yet live, a name HA renders from a "
+    "Jinja template rather than a literal string, or an ambiguous match — two live states sharing that "
+    "name); `created` is whether that match was then found live via `GET /api/states`. Both are "
+    "false/null together when HA refused the reload outright."
+)
+_CREATED_TEMPLATE_SCHEMA = {
     "type": "object",
     "required": ["status"],
     "properties": {
         "status": {"type": "string"},
         "unique_id": {"type": "string"},
+        "entities": {
+            "type": "array",
+            "description": _TEMPLATE_ENTITIES_DESC,
+            "items": {
+                "type": "object",
+                "required": ["unique_id", "domain", "entity_id", "created"],
+                "properties": {
+                    "unique_id": {"type": "string"},
+                    "domain": {"type": "string"},
+                    "entity_id": {"type": "string", "nullable": True},
+                    "created": {"type": "boolean"},
+                },
+            },
+        },
         "reloaded": {"type": "boolean"},
         "reload_error": {"type": "string", "description": _RELOAD_ERROR_DESC},
         "reformatted": {"type": "boolean", "description": _REFORMATTED_DESC},
@@ -739,7 +795,7 @@ ENDPOINT_META: dict[tuple[str, str], dict[str, object]] = {
             "content": {"text/plain": {"schema": {"type": "string"}}},
             "required": True,
         },
-        "response_schema": _CREATED_UID_SCHEMA,
+        "response_schema": _CREATED_TEMPLATE_SCHEMA,
         "response_status": 201,
     },
     ("DELETE", "/v1/config/template"): {

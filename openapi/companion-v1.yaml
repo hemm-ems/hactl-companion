@@ -666,6 +666,34 @@ paths:
                     type: string
                   unique_id:
                     type: string
+                  entities:
+                    type: array
+                    description: 'Every entity this create declared (one for a bare
+                      item, one or more for a full block), each resolved and polled
+                      independently: `entity_id` is found among live states by matching
+                      `(domain, name)`, null if no single live state matched (not
+                      yet live, a name HA renders from a Jinja template rather than
+                      a literal string, or an ambiguous match — two live states sharing
+                      that name); `created` is whether that match was then found live
+                      via `GET /api/states`. Both are false/null together when HA
+                      refused the reload outright.'
+                    items:
+                      type: object
+                      required:
+                      - unique_id
+                      - domain
+                      - entity_id
+                      - created
+                      properties:
+                        unique_id:
+                          type: string
+                        domain:
+                          type: string
+                        entity_id:
+                          type: string
+                          nullable: true
+                        created:
+                          type: boolean
                   reloaded:
                     type: boolean
                   reload_error:
@@ -861,6 +889,8 @@ paths:
                     type: string
                   id:
                     type: string
+                  entity_id:
+                    type: string
                   reloaded:
                     type: boolean
                   reload_error:
@@ -874,6 +904,16 @@ paths:
                       re-serialized instead of only this entry's lines, so 
                       formatting elsewhere in the file may have changed. Absent 
                       otherwise.
+                  entity_created:
+                    type: boolean
+                    description: Whether the entity was observed live (`GET 
+                      /api/states`) after the reload — polled for up to ~2s. 
+                      `false` covers both a reload HA refused and a reload HA 
+                      accepted but the entity never appeared (HA validates each 
+                      YAML entry and silently drops one that fails schema 
+                      validation without failing the reload; the write and the 
+                      reload both then report success while the entity never 
+                      exists).
         4XX:
           $ref: '#/components/responses/Error'
         5XX:

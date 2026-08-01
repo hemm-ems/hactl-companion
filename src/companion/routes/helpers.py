@@ -8,7 +8,6 @@ input_datetime, counter, timer, schedule) via their per-domain YAML files, and
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from io import StringIO
 from pathlib import Path
@@ -17,7 +16,7 @@ from typing import Any
 from aiohttp import web
 from ruamel.yaml import YAML
 
-from companion import core_api
+from companion import core_api, registry
 from companion.surgical import Edit, read_source, save_entry, write_fields
 from companion.wiring import require_wired_target, wired_target_or_default
 
@@ -50,8 +49,7 @@ STORAGE_DOMAINS: set[str] = ALLOWED_DOMAINS | STORAGE_ONLY_DOMAINS
 #: instance for all nine helper domains: `.storage/<domain>` holds
 #: `{"data": {"items": [{"id": ..., <config>}]}}`, and the item id is the
 #: entity's object id unless the entity was renamed in the registry.
-STORAGE_DIR = ".storage"
-ENTITY_REGISTRY_KEY = "core.entity_registry"
+STORAGE_DIR = registry.STORAGE_DIR
 
 #: Prepended to a storage helper's rendered YAML. `helper cat` prints this
 #: content verbatim, so for a definition that cannot be edited through this
@@ -132,70 +130,18 @@ def _load_helpers(base: str, domain: str) -> tuple[dict[str, Any], Path, str]:
     return data, target, source
 
 
-async def _poll_entity_created(entity_id: str, attempts: int = 5, delay: float = 0.4) -> bool:
-    """Poll /api/states until entity_id appears, or give up after `attempts` tries."""
-    import asyncio
-
-    for attempt in range(attempts):
-        if attempt:
-            await asyncio.sleep(delay)
-        if await core_api.get_state(entity_id) is not None:
-            return True
-    return False
-
-
 def _validate_domain(domain: str) -> None:
     """Raise 400 if domain is not an allowed helper domain."""
     if domain not in ALLOWED_DOMAINS:
         raise web.HTTPBadRequest(text=f"Invalid helper domain: {domain}. Allowed: {', '.join(sorted(ALLOWED_DOMAINS))}")
 
 
-def _storage_json(base: str, key: str) -> dict[str, Any]:
-    """The ``data`` object of ``.storage/<key>``, or ``{}`` if unreadable.
-
-    Best-effort on purpose: `.storage` belongs to Home Assistant, and a file
-    that is mid-write, absent, or from a future schema must degrade this lookup
-    to "no storage helpers", never turn a read route into a 500.
-    """
-    path = Path(base) / STORAGE_DIR / key
-    if not path.is_file():
-        return {}
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
-        return {}
-    data = raw.get("data") if isinstance(raw, dict) else None
-    return data if isinstance(data, dict) else {}
-
-
-def _entity_ids_by_unique_id(base: str) -> dict[tuple[str, str], str]:
-    """``(platform, unique_id) -> entity_id`` from HA's entity registry.
-
-    A UI helper registers under a unique_id equal to its collection item id, so
-    this is what turns an item back into the entity_id the user sees. It is not
-    cosmetic: renaming the entity changes the entity_id and leaves the item id
-    alone, so ``input_boolean.<item id>`` is a *guess* and the registry is the
-    fact (verified live — the rename was performed and observed).
-    """
-    entities = _storage_json(base, ENTITY_REGISTRY_KEY).get("entities")
-    if not isinstance(entities, list):
-        return {}
-    index: dict[tuple[str, str], str] = {}
-    for entry in entities:
-        if not isinstance(entry, dict):
-            continue
-        platform, unique_id, entity_id = entry.get("platform"), entry.get("unique_id"), entry.get("entity_id")
-        if isinstance(platform, str) and isinstance(unique_id, str) and isinstance(entity_id, str):
-            index[(platform, unique_id)] = entity_id
-    return index
-
-
 def storage_helpers(base: str) -> list[StorageHelper]:
     """Every helper HA keeps in a `.storage` collection, across all read domains."""
-    entity_ids = _entity_ids_by_unique_id(base)
+    entity_ids = registry.entity_ids_by_unique_id(base)
     found: list[StorageHelper] = []
     for domain in sorted(STORAGE_DOMAINS):
-        items = _storage_json(base, domain).get("items")
+        items = registry.storage_json(base, domain).get("items")
         if not isinstance(items, list):
             continue
         for item in items:
@@ -362,7 +308,7 @@ async def post_helper(request: web.Request) -> web.Response:
     surgical = save_entry(base, target, data, source, Edit("append", helper_id), yaml)
     reload = await core_api.reload_domain(domain)
     entity_id = f"{domain}.{helper_id}"
-    entity_created = await _poll_entity_created(entity_id) if reload.ok else False
+    entity_created = await core_api.poll_for_entity(entity_id) if reload.ok else False
     return web.json_response(
         {
             "status": "created",

@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from aiohttp.test_utils import TestClient
+
+from companion import core_api
 
 
 async def test_list_scripts(client: TestClient, auth_headers: dict[str, str]) -> None:
@@ -145,6 +148,37 @@ async def test_create_script(client: TestClient, auth_headers: dict[str, str]) -
     assert resp.status == 201
     data = await resp.json()
     assert data["id"] == "new_script"
+    # A script's entity_id is predictable (`script.<id>`, the mapping key HA
+    # reads it under — no name-derived slug involved), so this can be reported
+    # the same way `helper create` already reports its predictable id: whether
+    # the entity was actually observed live after the reload, not merely that
+    # the write and the reload both answered success (D-? / hactl-companion
+    # class fix — templates.py and scripts.py never had the poll helpers.py
+    # and automations.py already have).
+    assert data["entity_id"] == "script.new_script"
+    assert data["entity_created"] is True
+
+
+async def test_create_script_entity_created_false_when_reload_fails(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If HA refuses the reload, the entity can't have appeared — don't poll and claim otherwise."""
+
+    async def _refused(domain: str, service: str, data: object = None) -> core_api.ServiceResult:
+        return core_api.ServiceResult(False, "HTTP 400: Service not found")
+
+    monkeypatch.setattr(core_api, "call_service", _refused)
+
+    body = "refused_script:\n  alias: Refused\n  sequence: []\n"
+    resp = await client.post(
+        "/v1/config/script",
+        data=body,
+        headers={**auth_headers, "Content-Type": "text/plain"},
+    )
+    assert resp.status == 201
+    data = await resp.json()
+    assert data["reloaded"] is False
+    assert data["entity_created"] is False
 
 
 async def test_create_script_duplicate(client: TestClient, auth_headers: dict[str, str]) -> None:

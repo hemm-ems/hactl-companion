@@ -10,7 +10,15 @@ from aiohttp import web
 
 # Bind the real implementations at import time: the autouse core_api_calls
 # fixture replaces the module attributes, but these references stay intact.
-from companion.core_api import _EXCERPT_CHARS, CoreAPIUnavailableError, call_service, check_config, get_state
+from companion.core_api import (
+    _EXCERPT_CHARS,
+    CoreAPIUnavailableError,
+    call_service,
+    check_config,
+    get_state,
+    is_live_state,
+    poll_for_entity,
+)
 
 TOKEN = "core-api-test-token"
 
@@ -157,3 +165,68 @@ async def test_get_state_url_encodes_entity_id(aiohttp_server: Any, core_env: py
     result = await get_state("sensor.x?evil=1")
     assert result is not None
     assert seen["entity_id"] == "sensor.x?evil=1"
+
+
+def test_is_live_state_absent() -> None:
+    assert is_live_state(None) is False
+
+
+def test_is_live_state_ordinary_state() -> None:
+    assert is_live_state({"state": "on", "attributes": {}}) is True
+    assert is_live_state({"state": "unknown", "attributes": {}}) is True
+
+
+def test_is_live_state_excludes_restored_ghost() -> None:
+    """A dropped entity can come back as `state: unavailable` + `restored: true`
+    — HA's own record of something that used to exist, not proof this create
+    worked. Presence alone would read this as "still there"."""
+    assert is_live_state({"state": "unavailable", "attributes": {"restored": True}}) is False
+
+
+def test_is_live_state_bare_unavailable_without_restored_flag_still_counts_as_created() -> None:
+    """`unavailable` alone, with no `restored` flag, is a freshly-set-up entity
+    whose own value has not resolved yet (e.g. a template sensor referencing
+    another entity that is itself not ready) — a real, HA-registered entity,
+    not a leftover from a previous delete. Deliberately narrower than
+    `tests/integration/test_live.py::_entity_is_live`, which treats *any*
+    `unavailable` as not-loaded: that check answers "is this automation
+    currently active" (where `unavailable` only ever means not-loaded-yet),
+    this one answers "did the create register a real entity" (where a
+    template/script/helper can legitimately be unavailable while genuinely
+    existing) — same wire shape, different question, recorded as a decision
+    because no test can derive it from HA's behaviour alone."""
+    assert is_live_state({"state": "unavailable", "attributes": {}}) is True
+
+
+async def test_poll_for_entity_succeeds_immediately(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = 0
+
+    async def _fake_get_state(entity_id: str) -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        return {"state": "on", "attributes": {}}
+
+    monkeypatch.setattr("companion.core_api.get_state", _fake_get_state)
+    assert await poll_for_entity("sensor.x", attempts=5, delay=0) is True
+    assert calls == 1
+
+
+async def test_poll_for_entity_ignores_a_restored_ghost(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _fake_get_state(entity_id: str) -> dict[str, object]:
+        return {"state": "unavailable", "attributes": {"restored": True}}
+
+    monkeypatch.setattr("companion.core_api.get_state", _fake_get_state)
+    assert await poll_for_entity("sensor.ghost", attempts=2, delay=0) is False
+
+
+async def test_poll_for_entity_gives_up_after_attempts(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = 0
+
+    async def _fake_get_state(entity_id: str) -> dict[str, object] | None:
+        nonlocal calls
+        calls += 1
+        return None
+
+    monkeypatch.setattr("companion.core_api.get_state", _fake_get_state)
+    assert await poll_for_entity("sensor.never", attempts=3, delay=0) is False
+    assert calls == 3
