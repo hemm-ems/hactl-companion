@@ -2,13 +2,21 @@ name: Monthly Release
 
 on:
   schedule:
-    # 10th of each month at 12:17 UTC — a few days after HA's first-Wednesday release.
+    # 8th of each month at 12:17 UTC. HA's monthly release is the first
+    # Wednesday, so the 8th is the first day it has certainly happened.
+    #
+    # It runs BEFORE hactl's auto-release on the 9th, and that order is the
+    # point: the CLI hard-depends on routes this sidecar serves, so the
+    # companion ships first. This used to fire on the 10th, five days AFTER
+    # hactl's — the release order this project follows by hand, inverted in
+    # the automation.
+    #
     # Off the top of the hour: GitHub delays/drops schedules at :00 under load.
-    - cron: "17 12 10 * *"
+    - cron: "17 12 8 * *"
   workflow_dispatch:
     inputs:
       version:
-        description: "Override version (e.g. 2026.6). Leave empty for auto YYYY.M"
+        description: "Override series (e.g. 2026.6). Empty = the series of HA's current stable."
         required: false
 
 concurrency:
@@ -21,9 +29,49 @@ permissions:
   actions: write
 
 jobs:
-  # ---------- Job 0: merge approved dependabot PRs ----------
+  # ---------- Job 0: is there anything to release? ----------
+  #
+  # A gate, nothing more: the release job below still computes its own version
+  # and makes its own decision. This exists so that job 1 cannot merge other
+  # people's pull requests on behalf of a run that will then release nothing —
+  # which is what happened every month the series had already been opened by
+  # hand. Deciding costs one read-only API call; merging someone's dependency
+  # bump and walking away costs main.
+  gate:
+    name: Anything to release?
+    runs-on: ubuntu-latest
+    outputs:
+      skip: ${{ steps.check.outputs.skip }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Resolve HA versions
+        id: ha
+        uses: ./.github/actions/ha-versions
+
+      - name: Check whether the series is already released
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -n "${{ inputs.version }}" ]; then
+            VER="${{ inputs.version }}"
+          else
+            VER="${{ steps.ha.outputs.stable_month }}"
+          fi
+          if gh release view "v${VER}.0" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::v${VER}.0 already exists — nothing to release, ending green"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "v${VER}.0 is available"
+          fi
+
+  # ---------- Job 1: merge approved dependabot PRs ----------
   merge-deps:
     name: Merge Dependabot PRs
+    needs: gate
+    if: needs.gate.outputs.skip != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -56,7 +104,8 @@ jobs:
   # ---------- Job 1: create release ----------
   release:
     name: Create monthly release
-    needs: merge-deps
+    needs: [gate, merge-deps]
+    if: needs.gate.outputs.skip != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -69,13 +118,21 @@ jobs:
           python-version: "3.12"
       - run: uv sync --extra dev
 
+      - name: Resolve HA versions
+        id: ha
+        uses: ./.github/actions/ha-versions
+
       - name: Compute version
         id: version
         run: |
+          # The series names the Home Assistant release this was built against,
+          # so HA decides when it turns over — not today's date. Cutting
+          # vYYYY.M.0 on the calendar opened a series days before HA published
+          # the one it names.
           if [ -n "${{ inputs.version }}" ]; then
             VER="${{ inputs.version }}"
           else
-            VER="$(date -u +'%Y.%-m')"
+            VER="${{ steps.ha.outputs.stable_month }}"
           fi
           TAG="v${VER}.0"
           echo "ver=${VER}.0" >> "$GITHUB_OUTPUT"
@@ -209,14 +266,38 @@ jobs:
         if: steps.check.outputs.exists == 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HA_STABLE: ${{ steps.ha.outputs.stable }}
         run: |
-          # --target main now resolves to the bump commit pushed above, so the
-          # tag (and the image built from it) carry the correct version.
-          gh release create "${{ steps.version.outputs.tag }}" \
+          # Tag first, annotated, then hang the release off it — see the same
+          # step in patch-release.yml. `gh release create --target main` mints a
+          # lightweight tag with no tagger, date or message; created through the
+          # API instead, a ref made with GITHUB_TOKEN starts no further workflow,
+          # so the build behaviour above is unchanged.
+          tag="${{ steps.version.outputs.tag }}"
+          sha=$(gh api "repos/${GITHUB_REPOSITORY}/commits/main" --jq .sha)
+          msg="Monthly release ${tag} (HA stable at release: ${HA_STABLE:-unknown})"
+
+          tag_sha=$(gh api --method POST "repos/${GITHUB_REPOSITORY}/git/tags" --input - --jq .sha <<JSON
+          {
+            "tag": "${tag}",
+            "message": "${msg}",
+            "object": "${sha}",
+            "type": "commit",
+            "tagger": {
+              "name": "github-actions[bot]",
+              "email": "41898282+github-actions[bot]@users.noreply.github.com"
+            }
+          }
+          JSON
+          )
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+            -f "ref=refs/tags/${tag}" -f "sha=${tag_sha}"
+          echo "::notice::annotated tag ${tag} -> ${sha} (${msg})"
+
+          gh release create "${tag}" \
             --repo "${{ github.repository }}" \
             --title "${{ steps.version.outputs.title }}" \
             --generate-notes \
-            --target main \
             --latest
 
       # No Docker build is triggered here any more — it ran before the bump
