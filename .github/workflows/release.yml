@@ -57,6 +57,17 @@ jobs:
         if: inputs.version != ''
         run: echo "value=$(echo '${{ inputs.version }}' | cut -d. -f1,2)" >> "$GITHUB_OUTPUT"
 
+      # `latest` follows the release, because a release is the only thing this
+      # workflow builds. It used to be gated on `is_default_branch`, which no
+      # trigger here can satisfy — this runs on tags, on published releases, and
+      # on dispatches against a version-bump branch, never on a push to main. So
+      # `latest` simply stopped moving: it still pointed at 2026.7.10 while
+      # 2026.7.11 was current. Nothing consumes it (the add-on pins
+      # ghcr.io/…:{version}), but a tag that calls itself latest and is not is
+      # worse than one that is absent.
+      #
+      # Caveat worth knowing: a manual re-run against an OLDER version moves
+      # `latest` backwards. Re-run the newest release afterwards to restore it.
       - name: Docker meta
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
@@ -68,7 +79,7 @@ jobs:
             type=raw,value=${{ inputs.version }},enable=${{ inputs.version != '' }}
             type=raw,value=${{ steps.majorminor.outputs.value }},enable=${{ inputs.version != '' }}
             type=sha
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=latest,enable=${{ inputs.version != '' || startsWith(github.ref, 'refs/tags/v') }}
 
       - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
