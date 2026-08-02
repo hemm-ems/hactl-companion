@@ -43,7 +43,11 @@ jobs:
     outputs:
       skip: ${{ steps.check.outputs.skip }}
     steps:
+      # fetch-depth: 0 — next-version.sh reads every tag, and a shallow
+      # checkout fetches none of them.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
 
       - name: Resolve HA versions
         id: ha
@@ -53,18 +57,21 @@ jobs:
         id: check
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        env:
+          HA_SERIES: ${{ steps.ha.outputs.stable_month }}
+          OVERRIDE: ${{ inputs.version }}
         run: |
-          if [ -n "${{ inputs.version }}" ]; then
-            VER="${{ inputs.version }}"
-          else
-            VER="${{ steps.ha.outputs.stable_month }}"
-          fi
-          if gh release view "v${VER}.0" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+          # Same rule as the release job below, for the same reason: a gate that
+          # answers "is there anything to release" from a different computation
+          # than the one that releases is not a gate.
+          series="${OVERRIDE:-$HA_SERIES}"
+          TAG=$(git tag | ./.github/scripts/next-version.sh "${series}")
+          if gh release view "${TAG}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "::notice::v${VER}.0 already exists — nothing to release, ending green"
+            echo "::notice::${TAG} already exists — nothing to release, ending green"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
-            echo "v${VER}.0 is available"
+            echo "${TAG} is available"
           fi
 
   # ---------- Job 1: merge approved dependabot PRs ----------
@@ -124,20 +131,23 @@ jobs:
 
       - name: Compute version
         id: version
+        env:
+          HA_SERIES: ${{ steps.ha.outputs.stable_month }}
+          OVERRIDE: ${{ inputs.version }}
         run: |
-          # The series names the Home Assistant release this was built against,
-          # so HA decides when it turns over — not today's date. Cutting
-          # vYYYY.M.0 on the calendar opened a series days before HA published
-          # the one it names.
-          if [ -n "${{ inputs.version }}" ]; then
-            VER="${{ inputs.version }}"
-          else
-            VER="${{ steps.ha.outputs.stable_month }}"
-          fi
-          TAG="v${VER}.0"
-          echo "ver=${VER}.0" >> "$GITHUB_OUTPUT"
+          # One rule, shared with patch-release and with hactl:
+          # .github/scripts/next-version.sh. This step used to build v{series}.0
+          # from the series alone without reading a single tag, so when the
+          # newest tag was ahead of HA's series it proposed a version BELOW the
+          # current release. Ordering is the only thing a version scheme really
+          # owes anyone, and it cannot be owed by two rules at once.
+          series="${OVERRIDE:-$HA_SERIES}"
+          TAG=$(git tag | ./.github/scripts/next-version.sh "${series}")
+          VER="${TAG#v}"
+          echo "ver=${VER}" >> "$GITHUB_OUTPUT"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "title=${VER}" >> "$GITHUB_OUTPUT"
+          echo "Next tag: ${TAG} (HA stable ${{ steps.ha.outputs.stable }})"
 
       - name: Check if already released
         id: check
