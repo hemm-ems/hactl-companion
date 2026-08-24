@@ -13,7 +13,7 @@ dev = [
     "pytest-aiohttp>=1.1.1",
     "pytest-asyncio>=1.4.0",
     "ruff>=0.16.4",
-    "mypy>=2.3.0",
+    "mypy>=2.3.1",
     "openapi-spec-validator>=0.9.0",
 ]
 integration = [
