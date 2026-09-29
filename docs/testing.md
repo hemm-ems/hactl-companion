@@ -17,8 +17,8 @@ Three tiers, each with its own `make` target and its own CI job.
 
 | Tier | Tests | Docker | Command | Time |
 |---|---|---|---|---|
-| Unit | **596** | no | `make test` | ~10s |
-| Integration | **50** | yes (HA Core + companion) | `make test-int` | ~40s warm |
+| Unit | **736** | no | `make test` | ~10s |
+| Integration | **62** | yes (HA Core + companion) | `make test-int` | ~40s warm |
 | WireGuard | **17** | yes (real WG server) | `make test-wg` | ~85s |
 
 Counts are what the suite collects today, not a target.
@@ -38,9 +38,9 @@ registered routes. Add a route, and it is covered by construction.
 
 | Module | Tests | What it enforces |
 |---|---|---|
-| `test_invariants.py` | 133 | `INVARIANTS.md` C-1..C-12, every rule swept across the whole route table |
-| `test_spec_conformance.py` | 49 | Field-level request/response contract, both directions (C-12) |
-| `test_wiring.py` | 19 | C-10 — a create proves HA actually reads the file first |
+| `test_invariants.py` | 153 | `INVARIANTS.md` C-1..C-15, every rule swept across the whole route table |
+| `test_spec_conformance.py` | 51 | Field-level request/response contract, both directions (C-12) |
+| `test_wiring.py` | 21 | C-10 — a create proves HA actually reads the file first |
 | `test_openapi.py` | 17 | Spec is generated from code, complete, and validates |
 | `test_versions.py` | 4 | One version across all four version-bearing files and the CHANGELOG |
 
@@ -66,11 +66,13 @@ Beyond the derived modules above, by concern:
 
 | Concern | Modules | Tests |
 |---|---|---|
-| Routes & CRUD | `test_automations` `test_scripts` `test_templates` `test_helpers` `test_config` `test_config_write` `test_ha` `test_health` `test_status` `test_root` `test_logs` | 124 |
+| Routes & CRUD | `test_automations` `test_scripts` `test_templates` `test_helpers` `test_config` `test_config_write` `test_ha` `test_health` `test_status` `test_root` `test_logs` | 146 |
+| Helper storage & wiring | `test_helpers_storage` `test_helpers_wiring` `test_wiring_route` | 55 |
+| Surgical writes | `test_surgical` | 26 |
 | WireGuard | `test_wireguard` `test_wg_dns` `test_wg_monitor` `test_wg_supervisor` | 110 |
 | Reference scanning | `test_refscan` `test_refscan_routes` `test_refscan_skipped` `test_related` | 80 |
-| Plumbing | `test_resolver` `test_core_api` `test_cli` `test_reload_error` `test_backups` `test_main` | 42 |
-| Security | `test_auth` `test_pathguard` `test_paths` | 18 |
+| Plumbing | `test_resolver` `test_core_api` `test_cli` `test_reload_error` `test_backups` `test_main` | 51 |
+| Security | `test_auth` `test_pathguard` `test_paths` | 22 |
 
 ### Fixtures
 
@@ -112,7 +114,7 @@ long-lived token over WebSocket. Getting a token is itself the proof that HA is 
 
 | Module | Tests | Covers |
 |---|---|---|
-| `test_live.py` | 43 | status, root, health, config read/write, `ref replace`, HA reload, automation/helper/script/template CRUD, startup + access logs, include wiring |
+| `test_live.py` | 55 | status, root, health, config read/write, `ref replace`, HA reload, automation/helper/script/template CRUD, startup + access logs, include wiring |
 | `test_auth.py` | 5 | auth on a real container: no/wrong token → 401, health exempt, and a **client-supplied `X-Ingress-Path` does not bypass auth** — the 2026-07 spoof, pinned |
 | `test_related.py` | 2 | the related-entity graph, reconciled against HA's own `search/related` (C-9) |
 
@@ -143,8 +145,9 @@ CI (`.github/workflows/ci.yml`) runs on every push to `main` and every PR into i
 
 | Job | What it does |
 |---|---|
+| Version Ordering | the next version cannot go backwards |
 | Lint | markers + ruff + format check + mypy |
-| Unit Tests | the 596 |
+| Unit Tests | the 736 |
 | OpenAPI Contract | regenerates the spec from code and diffs it against the committed file |
 | Docker Build | the image still builds |
 | Integration Tests | the Docker tier, matrixed over HA **stable** and **prev** |
@@ -203,6 +206,9 @@ Stated so this page is not read as exhaustive-by-omission.
 - **Backups are not atomic.** Concurrent writes are now tested for *corruption*
   (`test_concurrent_writes_no_corruption`, last-write-wins cleanly), but the
   backup-then-write sequence is still not a transaction.
+- **`!include_dir_*` reads one level only.** The resolver lists a directory with
+  `iterdir()`; HA's loader also descends into subdirectories. A split config that nests
+  files one folder deeper is resolved incompletely, and no test pins either behaviour.
 
 Closed since this page was last honest (2026-05-18), recorded so nobody re-opens them:
 concurrent writes are covered; every `!include_dir_*` variant is implemented and an
@@ -215,12 +221,12 @@ the core API.
 ## Quick reference
 
 ```bash
-make test        # 596 unit tests, no Docker
+make test        # 736 unit tests, no Docker
 make lint        # markers + ruff + format + mypy
 make fmt         # auto-format
 make spec        # regenerate the OpenAPI spec from code
 
-make test-int    # 50 integration tests, HA Core + companion
+make test-int    # 62 integration tests, HA Core + companion
 make test-wg     # 17 WireGuard tests, real tunnel
 make clean       # tear down both compose stacks
 ```
