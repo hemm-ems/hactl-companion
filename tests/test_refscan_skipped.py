@@ -423,3 +423,25 @@ def test_two_includers_of_one_missing_file_yield_one_record(config_dir: Path) ->
     scan_yaml_for_entities(config_dir, skipped=skipped)
 
     assert [(f.location, f.reason) for f in skipped.files()] == [("shared_renamed.yaml", SKIP_MISSING)]
+
+
+async def test_include_dir_outside_the_config_dir_is_named_not_walked(
+    client: TestClient, auth_headers: dict[str, str], config_dir: Path
+) -> None:
+    """`!include_dir_* ../elsewhere` is refused by containment (C-3) — and said so, not walked.
+
+    Before, the directory outside was listed and each of its files recorded as
+    unreadable; now the directory itself is the one skipped entry, and nothing
+    outside the config dir is even enumerated.
+    """
+    outside = config_dir.parent / "elsewhere"
+    outside.mkdir()
+    (outside / "leak.yaml").write_text("- value: sensor.gone\n", encoding="utf-8")
+    _only_config(config_dir, "automation: !include_dir_merge_list ../elsewhere\nsensor:\n  value: sensor.gone\n")
+
+    resp = await client.get("/v1/ref/scan?target=sensor.gone", headers=auth_headers)
+
+    assert resp.status == 200
+    data = await resp.json()
+    assert [h["location"] for h in data["hits"]] == ["configuration.yaml"]
+    assert [s["reason"] for s in data["skipped"]] == [SKIP_UNREADABLE]

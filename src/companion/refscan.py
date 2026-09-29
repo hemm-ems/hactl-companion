@@ -655,9 +655,14 @@ def _include_targets(node: Any, context_dir: Path, base_path: Path, skipped: Ski
         if tag == "!include":
             targets.append(dest)
         elif tag in _INCLUDE_DIR_TAGS:
+            if _rel_within(dest, base_path) is None:
+                # Outside the config dir (C-3): not walked, and recorded exactly
+                # like any other include target the walk cannot follow.
+                _record_skip(skipped, _rel_to(dest, base_path), SKIP_UNREADABLE)
+                return
             if not dest.is_dir():
                 _record_skip(skipped, _rel_to(dest, base_path), SKIP_MISSING)
-            targets.extend(include_dir_files(dest))
+            targets.extend(include_dir_files(dest, base_path))
 
     walk(node)
     return targets

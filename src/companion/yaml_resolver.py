@@ -123,7 +123,7 @@ def _represent_preserved_tag(representer: RoundTripRepresenter, data: PreservedT
 RoundTripRepresenter.add_representer(PreservedTag, _represent_preserved_tag)
 
 
-def include_dir_files(directory: Path) -> list[Path]:
+def include_dir_files(directory: Path, base: Path) -> list[Path]:
     """The files an ``!include_dir_*`` tag expands to — the files HA reads, in HA's order.
 
     Home Assistant's loader walks the directory *recursively*, skips every entry
@@ -147,14 +147,27 @@ def include_dir_files(directory: Path) -> list[Path]:
 
     Only *which files* — deny-list filtering (``secrets.yaml``) stays with each
     caller, which handles it in its own way.
+
+    Confined to ``base`` here, not only by the callers: a directory outside it is
+    refused (``ValueError``, as :meth:`YamlResolver._check_path` refuses a file)
+    rather than walked. ``realpath`` + ``startswith(base + os.sep)`` is the shape
+    CodeQL recognises as a path sanitizer; ``Path.resolve`` + ``is_relative_to``
+    is not, so the walk read as unchecked user input. A *file* that is a symlink
+    out of ``base`` is still listed — each caller refuses it loudly on read, and
+    dropping it here would make it look like it was never there.
     """
-    if not directory.is_dir():
+    root_base = os.path.realpath(base)
+    top = os.path.realpath(directory)
+    if top != root_base and not top.startswith(root_base + os.sep):
+        msg = f"Path traversal not allowed: {directory}"
+        raise ValueError(msg)
+    if not os.path.isdir(top):
         return []
     found: list[Path] = []
-    for root, dirs, files in os.walk(directory):
+    for root, dirs, files in os.walk(top):
         dirs[:] = sorted(d for d in dirs if not d.startswith("."))
         found.extend(
-            Path(root, name).resolve()
+            Path(os.path.realpath(os.path.join(root, name)))
             for name in sorted(files)
             if not name.startswith(".") and fnmatch.fnmatchcase(name, "*.yaml")
         )
@@ -324,7 +337,7 @@ class YamlResolver:
         if not resolved.is_dir():
             return {}
         result: dict[str, Any] = {}
-        for f in include_dir_files(resolved):
+        for f in include_dir_files(resolved, self._base):
             if not is_denied(f.name):
                 name = f.stem
                 content = self._resolve_file(f, visited)
@@ -338,7 +351,7 @@ class YamlResolver:
         if not resolved.is_dir():
             return []
         result: list[Any] = []
-        for f in include_dir_files(resolved):
+        for f in include_dir_files(resolved, self._base):
             if not is_denied(f.name):
                 content = self._resolve_file(f, visited)
                 result.append(content)
@@ -358,7 +371,7 @@ class YamlResolver:
         if not resolved.is_dir():
             return []
         result: list[Any] = []
-        for f in include_dir_files(resolved):
+        for f in include_dir_files(resolved, self._base):
             if not is_denied(f.name):
                 content = self._resolve_file(f, visited)
                 # A file holding anything but a list contributes nothing: HA's
@@ -382,7 +395,7 @@ class YamlResolver:
         if not resolved.is_dir():
             return {}
         result: dict[str, Any] = {}
-        for f in include_dir_files(resolved):
+        for f in include_dir_files(resolved, self._base):
             if not is_denied(f.name):
                 content = self._resolve_file(f, visited)
                 if isinstance(content, dict):

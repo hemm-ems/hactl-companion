@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 import yaml
 from aiohttp.test_utils import TestClient
 from ruamel.yaml import YAML
@@ -387,14 +388,24 @@ def test_include_dir_files_selects_what_home_assistant_reads(tmp_path: Path) -> 
     root = tmp_path / "dir"
     _probe_tree(root)
 
-    files = [p.relative_to(root.resolve()).as_posix() for p in include_dir_files(root)]
+    files = [p.relative_to(root.resolve()).as_posix() for p in include_dir_files(root, tmp_path)]
 
     # A directory's own files before its subdirectories, as os.walk top-down gives.
     assert files == ["a_top.yaml", "sub/b_nested.yaml", "sub/deeper/c_deep.yaml"]
 
 
 def test_include_dir_files_of_a_missing_directory_is_empty(tmp_path: Path) -> None:
-    assert include_dir_files(tmp_path / "nope") == []
+    assert include_dir_files(tmp_path / "nope", tmp_path) == []
+
+
+def test_include_dir_files_refuses_a_directory_outside_base(tmp_path: Path) -> None:
+    """Confinement is the function's own job, not only its callers' (C-3)."""
+    base, outside = tmp_path / "config", tmp_path / "elsewhere"
+    base.mkdir()
+    _probe_tree(outside)
+
+    with pytest.raises(ValueError, match="Path traversal"):
+        include_dir_files(base / ".." / "elsewhere", base)
 
 
 async def test_include_dir_merge_list_reads_nested_files_and_only_lists(

@@ -337,10 +337,12 @@ def _automation_include_kinds(tree: Any, context_dir: Path, base: Path) -> list[
         dest = (context_dir / raw).resolve()
         if tag == "!include":
             targets, kind = [dest], "list"
-        elif tag == "!include_dir_merge_list":
-            targets, kind = include_dir_files(dest), "list"
-        elif tag == "!include_dir_list":
-            targets, kind = include_dir_files(dest), "single"
+        elif tag in ("!include_dir_merge_list", "!include_dir_list"):
+            try:
+                targets = include_dir_files(dest, base)
+            except ValueError:
+                continue  # escapes the config dir; the walk skips it too
+            kind = "list" if tag == "!include_dir_merge_list" else "single"
         else:
             continue
         for target in targets:

@@ -17,7 +17,7 @@ Three tiers, each with its own `make` target and its own CI job.
 
 | Tier | Tests | Docker | Command | Time |
 |---|---|---|---|---|
-| Unit | **741** | no | `make test` | ~10s |
+| Unit | **743** | no | `make test` | ~10s |
 | Integration | **64** | yes (HA Core + companion) | `make test-int` | ~40s warm |
 | WireGuard | **17** | yes (real WG server) | `make test-wg` | ~85s |
 
@@ -70,8 +70,8 @@ Beyond the derived modules above, by concern:
 | Helper storage & wiring | `test_helpers_storage` `test_helpers_wiring` `test_wiring_route` | 55 |
 | Surgical writes | `test_surgical` | 26 |
 | WireGuard | `test_wireguard` `test_wg_dns` `test_wg_monitor` `test_wg_supervisor` | 110 |
-| Reference scanning | `test_refscan` `test_refscan_routes` `test_refscan_skipped` `test_related` | 81 |
-| Plumbing | `test_resolver` `test_core_api` `test_cli` `test_reload_error` `test_backups` `test_main` | 55 |
+| Reference scanning | `test_refscan` `test_refscan_routes` `test_refscan_skipped` `test_related` | 82 |
+| Plumbing | `test_resolver` `test_core_api` `test_cli` `test_reload_error` `test_backups` `test_main` | 56 |
 | Security | `test_auth` `test_pathguard` `test_paths` | 22 |
 
 ### Fixtures
@@ -148,7 +148,7 @@ CI (`.github/workflows/ci.yml`) runs on every push to `main` and every PR into i
 |---|---|
 | Version Ordering | the next version cannot go backwards |
 | Lint | markers + ruff + format check + mypy |
-| Unit Tests | the 741 |
+| Unit Tests | the 743 |
 | OpenAPI Contract | regenerates the spec from code and diffs it against the committed file |
 | Docker Build | the image still builds |
 | Integration Tests | the Docker tier, matrixed over HA **stable** and **prev** |
@@ -220,7 +220,7 @@ the core API.
 ## Quick reference
 
 ```bash
-make test        # 741 unit tests, no Docker
+make test        # 743 unit tests, no Docker
 make lint        # markers + ruff + format + mypy
 make fmt         # auto-format
 make spec        # regenerate the OpenAPI spec from code

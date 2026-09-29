@@ -316,7 +316,7 @@ def _dir_members(base: str | Path, relative: str) -> list[Path]:
         root = _contained_path(base, relative)
     except NotWiredError:
         return []
-    found = [path for path in include_dir_files(root) if path.name != "secrets.yaml"]
+    found = [path for path in include_dir_files(root, Path(base)) if path.name != "secrets.yaml"]
     return [path for path in found if _is_readable(base, path)]
 
 
