@@ -598,3 +598,17 @@ async def test_run_wg_cmd_kills_process_on_timeout(monkeypatch: pytest.MonkeyPat
 
     assert killed["kill"] is True, "timed-out subprocess was not killed"
     assert killed["wait"] is True, "killed subprocess was not reaped"
+
+
+def test_normalize_conf_is_linear_on_hostile_whitespace() -> None:
+    """A run of whitespace used to be rescanned from every offset (CodeQL #62): quadratic.
+
+    40k spaces took ~5 s in the section regex and ~18 s in the key regex, on a
+    request body, synchronously in the handler — the whole sidecar froze.
+    """
+    import time
+
+    start = time.perf_counter()
+    _normalize_conf(" " * 30_000 + "x")
+    _normalize_conf("\t" * 30_000 + "[Peer]")
+    assert time.perf_counter() - start < 1.0

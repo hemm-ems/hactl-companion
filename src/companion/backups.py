@@ -10,6 +10,7 @@ per file so a frequently-written config can't fill the volume.
 from __future__ import annotations
 
 import contextlib
+import glob
 import shutil
 from datetime import UTC, datetime
 from pathlib import Path
@@ -53,7 +54,9 @@ def _prune_backups(path: Path, *, keep: int) -> None:
     if keep <= 0:
         return
     # Timestamp format sorts lexicographically == chronologically; oldest first.
-    backups = sorted(backup_dir(path).glob(f"{path.name}.bak.*"))
+    # The name is escaped: a file literally called `*.yaml` would otherwise
+    # match — and prune — every other file's backups.
+    backups = sorted(backup_dir(path).glob(f"{glob.escape(path.name)}.bak.*"))
     for stale in backups[:-keep]:
         with contextlib.suppress(OSError):
             stale.unlink()
