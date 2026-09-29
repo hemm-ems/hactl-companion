@@ -14,8 +14,8 @@ from typing import Any
 from aiohttp import web
 
 from companion.params import parse_bool_param
-from companion.refscan import include_dir_files, include_tag, iter_config_trees, render_path, scan_tree_for_literal
-from companion.yaml_resolver import CircularIncludeError, YamlResolver
+from companion.refscan import include_tag, iter_config_trees, render_path, scan_tree_for_literal
+from companion.yaml_resolver import CircularIncludeError, YamlResolver, include_dir_files
 
 # Relationship name for "this automation's config mentions the entity". Distinct
 # from `yaml-reference` (an entity that merely co-occurs in the same YAML node),

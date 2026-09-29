@@ -389,3 +389,15 @@ def test_scan_still_follows_every_known_include_dir_tag(tmp_path: Path) -> None:
 
         hits = scan_yaml_for_literal(base, "sensor.gone")
         assert [h.location for h in hits] == ["autos/a.yaml"], f"{tag} did not reach the file it names: {hits}"
+
+
+def test_scan_follows_include_dir_into_subdirectories(tmp_path: Path) -> None:
+    """A nested split-config file is part of the graph — HA reads it, so `ref replace` must too."""
+    (tmp_path / "configuration.yaml").write_text("automation: !include_dir_merge_list automations/\n")
+    nested = tmp_path / "automations" / "kitchen"
+    nested.mkdir(parents=True)
+    (nested / "lights.yaml").write_text("- id: k\n  action:\n    target: light.gone\n")
+
+    hits = scan_yaml_for_literal(tmp_path, "light.gone")
+
+    assert [h.location for h in hits] == ["automations/kitchen/lights.yaml"]

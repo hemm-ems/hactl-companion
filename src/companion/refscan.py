@@ -44,6 +44,7 @@ from companion.yaml_resolver import (
     UnknownIncludeTagError,
     YamlResolver,
     claims_to_include,
+    include_dir_files,
 )
 
 # An entity_id is domain.object_id: a lowercase/underscore domain, a dot, then a
@@ -66,7 +67,6 @@ _ENTITY_ID_RE = re.compile(r"\b[a-z_]+\.[a-z0-9_]+\b")
 # hand-maintained lists of the same fact drift (TC-7). The resolver owns the
 # fact; here we only subtract the single-file tag.
 _INCLUDE_DIR_TAGS = INCLUDE_TAGS - {"!include"}
-_YAML_SUFFIXES = (".yaml", ".yml")
 
 # A backslash immediately before a line break: inside a double-quoted scalar YAML
 # joins those lines with no separator, so a token can span the break.
@@ -623,13 +623,6 @@ def include_tag(node: Any) -> tuple[str, str] | None:
             )
             raise UnknownIncludeTagError(msg)
     return None
-
-
-def include_dir_files(directory: Path) -> list[Path]:
-    """The YAML files an ``!include_dir_*`` tag expands to, in the resolver's order."""
-    if not directory.is_dir():
-        return []
-    return sorted(f.resolve() for f in directory.iterdir() if f.is_file() and f.suffix in _YAML_SUFFIXES)
 
 
 def _include_targets(node: Any, context_dir: Path, base_path: Path, skipped: SkipLog | None) -> list[Path]:
