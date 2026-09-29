@@ -42,6 +42,7 @@ from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
 
 from companion.pathguard import is_denied_path, is_within
+from companion.yaml_resolver import include_dir_files
 
 yaml = YAML()
 yaml.preserve_quotes = True
@@ -306,24 +307,16 @@ class DomainFile:
 def _dir_members(base: str | Path, relative: str) -> list[Path]:
     """Every file a directory include reads, by HA's rules.
 
-    ``annotatedyaml.loader._find_files``: ``os.walk`` (so recursive), ``*.yaml``,
-    skipping anything whose name starts with a dot, and skipping ``secrets.yaml``.
-    Sorted, so a listing is a function of the directory rather than of the
-    filesystem's order.
+    ``annotatedyaml.loader._find_files``, via :func:`yaml_resolver.include_dir_files`
+    — the one place that rule lives, shared with the resolver and ``ref scan``
+    (it used to be restated here, and the resolver's copy had drifted to one
+    level deep). HA additionally skips ``secrets.yaml``.
     """
     try:
         root = _contained_path(base, relative)
     except NotWiredError:
         return []
-    if not root.is_dir():
-        return []
-    found = [
-        path
-        for path in sorted(root.rglob("*.yaml"))
-        if path.is_file()
-        and path.name != "secrets.yaml"
-        and not any(part.startswith(".") for part in path.relative_to(root).parts)
-    ]
+    found = [path for path in include_dir_files(root, Path(base)) if path.name != "secrets.yaml"]
     return [path for path in found if _is_readable(base, path)]
 
 

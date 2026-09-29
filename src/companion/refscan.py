@@ -44,6 +44,7 @@ from companion.yaml_resolver import (
     UnknownIncludeTagError,
     YamlResolver,
     claims_to_include,
+    include_dir_files,
 )
 
 # An entity_id is domain.object_id: a lowercase/underscore domain, a dot, then a
@@ -66,7 +67,6 @@ _ENTITY_ID_RE = re.compile(r"\b[a-z_]+\.[a-z0-9_]+\b")
 # hand-maintained lists of the same fact drift (TC-7). The resolver owns the
 # fact; here we only subtract the single-file tag.
 _INCLUDE_DIR_TAGS = INCLUDE_TAGS - {"!include"}
-_YAML_SUFFIXES = (".yaml", ".yml")
 
 # A backslash immediately before a line break: inside a double-quoted scalar YAML
 # joins those lines with no separator, so a token can span the break.
@@ -625,13 +625,6 @@ def include_tag(node: Any) -> tuple[str, str] | None:
     return None
 
 
-def include_dir_files(directory: Path) -> list[Path]:
-    """The YAML files an ``!include_dir_*`` tag expands to, in the resolver's order."""
-    if not directory.is_dir():
-        return []
-    return sorted(f.resolve() for f in directory.iterdir() if f.is_file() and f.suffix in _YAML_SUFFIXES)
-
-
 def _include_targets(node: Any, context_dir: Path, base_path: Path, skipped: SkipLog | None) -> list[Path]:
     """Absolute paths of files reachable via !include* tags in an unresolved tree.
 
@@ -662,9 +655,14 @@ def _include_targets(node: Any, context_dir: Path, base_path: Path, skipped: Ski
         if tag == "!include":
             targets.append(dest)
         elif tag in _INCLUDE_DIR_TAGS:
+            if _rel_within(dest, base_path) is None:
+                # Outside the config dir (C-3): not walked, and recorded exactly
+                # like any other include target the walk cannot follow.
+                _record_skip(skipped, _rel_to(dest, base_path), SKIP_UNREADABLE)
+                return
             if not dest.is_dir():
                 _record_skip(skipped, _rel_to(dest, base_path), SKIP_MISSING)
-            targets.extend(include_dir_files(dest))
+            targets.extend(include_dir_files(dest, base_path))
 
     walk(node)
     return targets

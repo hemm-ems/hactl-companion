@@ -17,8 +17,8 @@ Three tiers, each with its own `make` target and its own CI job.
 
 | Tier | Tests | Docker | Command | Time |
 |---|---|---|---|---|
-| Unit | **736** | no | `make test` | ~10s |
-| Integration | **62** | yes (HA Core + companion) | `make test-int` | ~40s warm |
+| Unit | **743** | no | `make test` | ~10s |
+| Integration | **64** | yes (HA Core + companion) | `make test-int` | ~40s warm |
 | WireGuard | **17** | yes (real WG server) | `make test-wg` | ~85s |
 
 Counts are what the suite collects today, not a target.
@@ -70,8 +70,8 @@ Beyond the derived modules above, by concern:
 | Helper storage & wiring | `test_helpers_storage` `test_helpers_wiring` `test_wiring_route` | 55 |
 | Surgical writes | `test_surgical` | 26 |
 | WireGuard | `test_wireguard` `test_wg_dns` `test_wg_monitor` `test_wg_supervisor` | 110 |
-| Reference scanning | `test_refscan` `test_refscan_routes` `test_refscan_skipped` `test_related` | 80 |
-| Plumbing | `test_resolver` `test_core_api` `test_cli` `test_reload_error` `test_backups` `test_main` | 51 |
+| Reference scanning | `test_refscan` `test_refscan_routes` `test_refscan_skipped` `test_related` | 82 |
+| Plumbing | `test_resolver` `test_core_api` `test_cli` `test_reload_error` `test_backups` `test_main` | 56 |
 | Security | `test_auth` `test_pathguard` `test_paths` | 22 |
 
 ### Fixtures
@@ -117,6 +117,7 @@ long-lived token over WebSocket. Getting a token is itself the proof that HA is 
 | `test_live.py` | 55 | status, root, health, config read/write, `ref replace`, HA reload, automation/helper/script/template CRUD, startup + access logs, include wiring |
 | `test_auth.py` | 5 | auth on a real container: no/wrong token → 401, health exempt, and a **client-supplied `X-Ingress-Path` does not bypass auth** — the 2026-07 spoof, pinned |
 | `test_related.py` | 2 | the related-entity graph, reconciled against HA's own `search/related` (C-9) |
+| `test_include_dir_oracle.py` | 2 | `!include_dir_*` resolves to exactly the files HA loads, merged the way HA merges them |
 
 That last one is worth naming: the graph is not compared to a fixture we wrote, it is
 compared to **HA's own answer**. A fixture only proves we still agree with ourselves.
@@ -147,7 +148,7 @@ CI (`.github/workflows/ci.yml`) runs on every push to `main` and every PR into i
 |---|---|
 | Version Ordering | the next version cannot go backwards |
 | Lint | markers + ruff + format check + mypy |
-| Unit Tests | the 736 |
+| Unit Tests | the 743 |
 | OpenAPI Contract | regenerates the spec from code and diffs it against the committed file |
 | Docker Build | the image still builds |
 | Integration Tests | the Docker tier, matrixed over HA **stable** and **prev** |
@@ -206,13 +207,11 @@ Stated so this page is not read as exhaustive-by-omission.
 - **Backups are not atomic.** Concurrent writes are now tested for *corruption*
   (`test_concurrent_writes_no_corruption`, last-write-wins cleanly), but the
   backup-then-write sequence is still not a transaction.
-- **`!include_dir_*` reads one level only.** The resolver lists a directory with
-  `iterdir()`; HA's loader also descends into subdirectories. A split config that nests
-  files one folder deeper is resolved incompletely, and no test pins either behaviour.
 
 Closed since this page was last honest (2026-05-18), recorded so nobody re-opens them:
-concurrent writes are covered; every `!include_dir_*` variant is implemented and an
-unknown tag is a hard error rather than a shrug (C-11); the `ha` CLI is gone from the
+concurrent writes are covered; every `!include_dir_*` variant is implemented, selects and
+merges files exactly as HA does (recursion included — `test_include_dir_oracle.py`), and
+an unknown tag is a hard error rather than a shrug (C-11); the `ha` CLI is gone from the
 write path entirely — config validation goes through `POST /config/core/check_config` on
 the core API.
 
@@ -221,12 +220,12 @@ the core API.
 ## Quick reference
 
 ```bash
-make test        # 736 unit tests, no Docker
+make test        # 743 unit tests, no Docker
 make lint        # markers + ruff + format + mypy
 make fmt         # auto-format
 make spec        # regenerate the OpenAPI spec from code
 
-make test-int    # 62 integration tests, HA Core + companion
+make test-int    # 64 integration tests, HA Core + companion
 make test-wg     # 17 WireGuard tests, real tunnel
 make clean       # tear down both compose stacks
 ```

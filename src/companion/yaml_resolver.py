@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import fnmatch
+import os
 from pathlib import Path
 from typing import Any
 
@@ -119,6 +121,63 @@ def _represent_preserved_tag(representer: RoundTripRepresenter, data: PreservedT
 # — it has to come out as a tag. A per-instance registration would have left
 # whichever YAML() nobody thought about still quoting it.
 RoundTripRepresenter.add_representer(PreservedTag, _represent_preserved_tag)
+
+
+def include_dir_files(directory: Path, base: Path) -> list[Path]:
+    """The files an ``!include_dir_*`` tag expands to — the files HA reads, in HA's order.
+
+    Home Assistant's loader walks the directory *recursively*, skips every entry
+    whose name starts with a dot (files, and whole directories), and takes only
+    ``*.yaml``. Asked of a live instance rather than assumed, by
+    tests/integration/test_include_dir_oracle.py: from a probe tree HA loaded the
+    top-level file and the ones one and two directories down, and nothing from a
+    hidden directory, a hidden file or a ``.yml`` file.
+
+    This used to be ``iterdir()`` over ``.yaml``/``.yml``: one level deep, dotfiles
+    included, ``.yml`` included — wrong in both directions at once. A nested
+    split-config file was invisible to every answer built on the resolved tree
+    (and to ``ref replace``, which then left the old reference in it), while a
+    file HA never reads was shown as live config.
+
+    Order: a directory's own files first (sorted), then its subdirectories, each
+    the same way — ``os.walk`` top-down, which is what HA uses. HA leaves the
+    sibling-directory order to the filesystem; it is sorted here so that the one
+    thing it can decide (which of two same-named keys wins a merge) is at least
+    stable.
+
+    Only *which files* — deny-list filtering (``secrets.yaml``) stays with each
+    caller, which handles it in its own way.
+
+    Confined to ``base`` here, not only by the callers: a directory outside it is
+    refused (``ValueError``, as :meth:`YamlResolver._check_path` refuses a file)
+    rather than walked. ``realpath`` + ``startswith(base + os.sep)`` is the shape
+    CodeQL recognises as a path sanitizer; ``Path.resolve`` + ``is_relative_to``
+    is not, so the walk read as unchecked user input. A *file* that is a symlink
+    out of ``base`` is still listed — each caller refuses it loudly on read, and
+    dropping it here would make it look like it was never there.
+    """
+    root_base = os.path.realpath(base)
+    top = os.path.realpath(directory)
+    # Two checks. The first calls startswith on `top` itself — the form CodeQL's
+    # sanitizer model matches, and it has to be that variable, alone in its
+    # condition. It would let a `/config2` sibling pass for `/config`, so the
+    # second is the actual rule: base itself, or below base + separator.
+    msg = f"Path traversal not allowed: {directory}"
+    if not top.startswith(root_base):
+        raise ValueError(msg)
+    if top != root_base and not top.startswith(root_base + os.sep):
+        raise ValueError(msg)
+    if not os.path.isdir(top):
+        return []
+    found: list[Path] = []
+    for root, dirs, files in os.walk(top):
+        dirs[:] = sorted(d for d in dirs if not d.startswith("."))
+        found.extend(
+            Path(os.path.realpath(os.path.join(root, name)))
+            for name in sorted(files)
+            if not name.startswith(".") and fnmatch.fnmatchcase(name, "*.yaml")
+        )
+    return found
 
 
 def claims_to_include(tag: str) -> bool:
@@ -284,8 +343,8 @@ class YamlResolver:
         if not resolved.is_dir():
             return {}
         result: dict[str, Any] = {}
-        for f in sorted(resolved.iterdir()):
-            if f.is_file() and f.suffix in (".yaml", ".yml") and not is_denied(f.name):
+        for f in include_dir_files(resolved, self._base):
+            if not is_denied(f.name):
                 name = f.stem
                 content = self._resolve_file(f, visited)
                 result[name] = content
@@ -298,8 +357,8 @@ class YamlResolver:
         if not resolved.is_dir():
             return []
         result: list[Any] = []
-        for f in sorted(resolved.iterdir()):
-            if f.is_file() and f.suffix in (".yaml", ".yml") and not is_denied(f.name):
+        for f in include_dir_files(resolved, self._base):
+            if not is_denied(f.name):
                 content = self._resolve_file(f, visited)
                 result.append(content)
         return result
@@ -318,39 +377,36 @@ class YamlResolver:
         if not resolved.is_dir():
             return []
         result: list[Any] = []
-        for f in sorted(resolved.iterdir()):
-            if f.is_file() and f.suffix in (".yaml", ".yml") and not is_denied(f.name):
+        for f in include_dir_files(resolved, self._base):
+            if not is_denied(f.name):
                 content = self._resolve_file(f, visited)
+                # A file holding anything but a list contributes nothing: HA's
+                # loader drops it (tests/integration/test_include_dir_oracle.py
+                # — a single automation written as a mapping was not loaded).
                 if isinstance(content, list):
                     result.extend(content)
-                elif content is not None:
-                    result.append(content)
         return result
 
     def _include_dir_merge_named(self, dir_path: Path, visited: set[str]) -> dict[str, Any]:
-        """Resolve !include_dir_merge_named <dir> — deep merge named files."""
+        """Resolve !include_dir_merge_named <dir> — a *shallow* merge of named files.
+
+        A key defined in two files is the later file's value, whole: HA's loader
+        does ``dict.update``. This used to be a deep merge, which showed a config
+        HA does not run — tests/integration/test_include_dir_oracle.py wrote one
+        script key into two files, and HA dropped the first file's ``alias``
+        while this resolver combined both.
+        """
         resolved = dir_path.resolve()
         self._check_path(resolved)
         if not resolved.is_dir():
             return {}
         result: dict[str, Any] = {}
-        for f in sorted(resolved.iterdir()):
-            if f.is_file() and f.suffix in (".yaml", ".yml") and not is_denied(f.name):
+        for f in include_dir_files(resolved, self._base):
+            if not is_denied(f.name):
                 content = self._resolve_file(f, visited)
                 if isinstance(content, dict):
-                    result = self._deep_merge(result, content)
+                    result.update(content)
         return result
-
-    @staticmethod
-    def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
-        """Deep merge two dicts, override wins on conflict."""
-        merged = dict(base)
-        for k, v in override.items():
-            if k in merged and isinstance(merged[k], dict) and isinstance(v, dict):
-                merged[k] = YamlResolver._deep_merge(merged[k], v)
-            else:
-                merged[k] = v
-        return merged
 
     def dump_to_string(self, data: Any) -> str:
         """Serialize data back to YAML string."""

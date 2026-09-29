@@ -14,8 +14,8 @@ from typing import Any
 from aiohttp import web
 
 from companion.params import parse_bool_param
-from companion.refscan import include_dir_files, include_tag, iter_config_trees, render_path, scan_tree_for_literal
-from companion.yaml_resolver import CircularIncludeError, YamlResolver
+from companion.refscan import include_tag, iter_config_trees, render_path, scan_tree_for_literal
+from companion.yaml_resolver import CircularIncludeError, YamlResolver, include_dir_files
 
 # Relationship name for "this automation's config mentions the entity". Distinct
 # from `yaml-reference` (an entity that merely co-occurs in the same YAML node),
@@ -337,10 +337,12 @@ def _automation_include_kinds(tree: Any, context_dir: Path, base: Path) -> list[
         dest = (context_dir / raw).resolve()
         if tag == "!include":
             targets, kind = [dest], "list"
-        elif tag == "!include_dir_merge_list":
-            targets, kind = include_dir_files(dest), "list"
-        elif tag == "!include_dir_list":
-            targets, kind = include_dir_files(dest), "single"
+        elif tag in ("!include_dir_merge_list", "!include_dir_list"):
+            try:
+                targets = include_dir_files(dest, base)
+            except ValueError:
+                continue  # escapes the config dir; the walk skips it too
+            kind = "list" if tag == "!include_dir_merge_list" else "single"
         else:
             continue
         for target in targets:

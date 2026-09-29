@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 import yaml
 from aiohttp.test_utils import TestClient
 from ruamel.yaml import YAML
 
-from companion.yaml_resolver import INCLUDE_TAGS, PRESERVED_TAGS, claims_to_include
+from companion.yaml_resolver import INCLUDE_TAGS, PRESERVED_TAGS, claims_to_include, include_dir_files
 
 
 async def test_resolve_includes(client: TestClient, auth_headers: dict[str, str]) -> None:
@@ -367,3 +368,77 @@ async def test_known_include_tags_still_resolve(
     assert parsed["e"] == {"key_two": 2}
     assert str(parsed["f"].tag) == "!secret"
     assert "f: !secret some_key" in content
+
+
+def _probe_tree(root: Path) -> None:
+    """The tree tests/integration/test_include_dir_oracle.py asks a live HA about."""
+    for rel in ("a_top.yaml", "sub/b_nested.yaml", "sub/deeper/c_deep.yaml", ".hidden_dir/d.yaml", ".e.yaml", "f.yml"):
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"- id: {path.stem}\n")
+
+
+def test_include_dir_files_selects_what_home_assistant_reads(tmp_path: Path) -> None:
+    """Recursive, no hidden files or directories, `*.yaml` only — HA's answer, pinned.
+
+    The live oracle loaded top, nested and deep, and none of the other three.
+    The old one-level `iterdir()` over `.yaml`/`.yml` got it wrong both ways:
+    it missed both nested files and took the hidden file and the `.yml`.
+    """
+    root = tmp_path / "dir"
+    _probe_tree(root)
+
+    files = [p.relative_to(root.resolve()).as_posix() for p in include_dir_files(root, tmp_path)]
+
+    # A directory's own files before its subdirectories, as os.walk top-down gives.
+    assert files == ["a_top.yaml", "sub/b_nested.yaml", "sub/deeper/c_deep.yaml"]
+
+
+def test_include_dir_files_of_a_missing_directory_is_empty(tmp_path: Path) -> None:
+    assert include_dir_files(tmp_path / "nope", tmp_path) == []
+
+
+def test_include_dir_files_refuses_a_directory_outside_base(tmp_path: Path) -> None:
+    """Confinement is the function's own job, not only its callers' (C-3)."""
+    base, outside = tmp_path / "config", tmp_path / "elsewhere"
+    base.mkdir()
+    _probe_tree(outside)
+
+    with pytest.raises(ValueError, match="Path traversal"):
+        include_dir_files(base / ".." / "elsewhere", base)
+
+
+async def test_include_dir_merge_list_reads_nested_files_and_only_lists(
+    client: TestClient, auth_headers: dict[str, str], config_dir: Path
+) -> None:
+    """merge_list through the route: nested files in, a non-list file out (HA drops it)."""
+    split = config_dir / "split_nested"
+    _probe_tree(split)
+    (split / "g_mapping.yaml").write_text("id: g_mapping\n")
+    (config_dir / "nested.yaml").write_text("automation: !include_dir_merge_list split_nested/\n")
+
+    resp = await client.get("/v1/config/file?path=nested.yaml&resolve=true", headers=auth_headers)
+    assert resp.status == 200
+    automations = yaml.safe_load((await resp.json())["content"])["automation"]
+
+    assert [a["id"] for a in automations] == ["a_top", "b_nested", "c_deep"]
+
+
+async def test_include_dir_merge_named_is_shallow(
+    client: TestClient, auth_headers: dict[str, str], config_dir: Path
+) -> None:
+    """A key in two files is the later file's value, whole — HA's `dict.update`, not a deep merge.
+
+    The live oracle: HA dropped the first file's `alias` for a script defined
+    in both; a deep merge would show that alias as live config.
+    """
+    named = config_dir / "named_split"
+    (named / "sub").mkdir(parents=True)
+    (named / "a.yaml").write_text("s1:\n  alias: From First\n  sequence: []\n")
+    (named / "sub" / "b.yaml").write_text("s1:\n  sequence: []\n  mode: queued\n")
+    (config_dir / "named.yaml").write_text("script: !include_dir_merge_named named_split/\n")
+
+    resp = await client.get("/v1/config/file?path=named.yaml&resolve=true", headers=auth_headers)
+    assert resp.status == 200
+
+    assert yaml.safe_load((await resp.json())["content"])["script"] == {"s1": {"sequence": [], "mode": "queued"}}
