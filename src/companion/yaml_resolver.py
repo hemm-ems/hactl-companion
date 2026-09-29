@@ -158,11 +158,14 @@ def include_dir_files(directory: Path, base: Path) -> list[Path]:
     """
     root_base = os.path.realpath(base)
     top = os.path.realpath(directory)
-    # One startswith on both sides with a trailing separator: `base` itself
-    # passes, a sibling sharing the prefix (`/config2`) does not, and the guard
-    # stays a single call — the form CodeQL's sanitizer model matches.
-    if not (top + os.sep).startswith(root_base + os.sep):
-        msg = f"Path traversal not allowed: {directory}"
+    # Two checks. The first calls startswith on `top` itself — the form CodeQL's
+    # sanitizer model matches, and it has to be that variable, alone in its
+    # condition. It would let a `/config2` sibling pass for `/config`, so the
+    # second is the actual rule: base itself, or below base + separator.
+    msg = f"Path traversal not allowed: {directory}"
+    if not top.startswith(root_base):
+        raise ValueError(msg)
+    if top != root_base and not top.startswith(root_base + os.sep):
         raise ValueError(msg)
     if not os.path.isdir(top):
         return []
