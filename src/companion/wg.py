@@ -147,14 +147,21 @@ _WG_KEYS = (
     "Endpoint",
     "PersistentKeepalive",
 )
-_ENDPOINT_RE = re.compile(r"^Endpoint\s*=\s*\[?([^\]]+)\]?:(\d+)\s*$", re.MULTILINE)
+# Horizontal whitespace only, and a host that cannot contain a newline: with
+# `\s*` and `[^\]]+` a match could run across lines, and a body of bare
+# `Endpoint=` lines backtracked for ~30 s. One line is now the unit of work.
+_ENDPOINT_RE = re.compile(r"^Endpoint[ \t]*=[ \t]*\[?([^\]\n]+)\]?:(\d+)[ \t]*$", re.MULTILINE)
 _HOSTPORT_RE = re.compile(r"^\[?([^\]]+)\]?:(\d+)$")
 
-_WG_SECTION_RE = re.compile(r"\s*(\[(?:Interface|Peer)\])\s*", re.IGNORECASE)
+# No surrounding `\s*`: a leading one is retried from every offset of a
+# whitespace run (quadratic — CodeQL py/polynomial-redos), and _normalize_conf
+# strips each line afterwards anyway, so the output is the same.
+_WG_SECTION_RE = re.compile(r"(\[(?:Interface|Peer)\])", re.IGNORECASE)
 # Match a known key immediately followed by '='. No word-boundary requirement —
 # a value may abut the next key with no separator (e.g. "…:51826AllowedIPs=…").
 # Case-sensitive PascalCase keeps this from tripping on base64 key material.
-_WG_KEY_RE = re.compile(r"\s*(" + "|".join(_WG_KEYS) + r")\s*=\s*")
+# Anchored on the key itself for the same reason as _WG_SECTION_RE.
+_WG_KEY_RE = re.compile(r"(" + "|".join(_WG_KEYS) + r")\s*=\s*")
 
 
 def _normalize_conf(content: str) -> str:

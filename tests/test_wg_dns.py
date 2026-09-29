@@ -165,3 +165,15 @@ class TestParseHostnamePeers:
         out: list[_PeerEndpoint] = []
         _flush_peer({"PublicKey": "PUB"}, out)
         assert out == []
+
+
+async def test_endpoint_scan_is_linear_on_hostile_input() -> None:
+    """20k `Endpoint=` lines used to take ~30 s (backtracking across newlines); a request body is hostile."""
+    import time
+
+    conf = "Endpoint=\n" * 20_000
+    lookup = AsyncMock(return_value=None)
+    start = time.perf_counter()
+    with patch("companion.wg._dns_lookup_ip", lookup):
+        await _resolve_endpoint_hostnames(conf)
+    assert time.perf_counter() - start < 1.0

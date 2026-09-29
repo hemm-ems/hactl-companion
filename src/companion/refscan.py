@@ -503,7 +503,7 @@ def replace_yaml_literal(
             if not dry_run:
                 # Back up the prior content before overwriting (C-5: every applied
                 # write gets a backup, same as the PUT/POST config routes).
-                make_backup(abs_path)
+                make_backup(abs_path, base=base_path)
                 resolver.save(rel, data)
 
         _enqueue_includes(data, abs_path, base_path, queue, skipped)

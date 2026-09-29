@@ -140,7 +140,7 @@ def save_entry(base: str | Path, path: str | Path, data: Any, source: str, edit:
     if spliced is not None and not _parses_back_to(spliced, data, yaml):
         spliced = None
 
-    make_backup(target)
+    make_backup(target, base=base)
     with target.open("w", encoding="utf-8", newline="") as stream:
         if spliced is None:
             yaml.dump(data, stream)
