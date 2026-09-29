@@ -41,7 +41,7 @@ from aiohttp import web
 from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
 
-from companion.pathguard import is_denied_path, is_within
+from companion.pathguard import confine, is_denied_path, is_within
 from companion.yaml_resolver import include_dir_files
 
 yaml = YAML()
@@ -79,10 +79,11 @@ def _contained_path(base: str | Path, relative: str) -> Path:
     had.
     """
     base_path = Path(base).resolve()
-    target = (base_path / relative).resolve()
-    if not is_within(target, base_path):
+    try:
+        target = confine(base_path, relative)
+    except ValueError:
         msg = f"'{relative}' is included from outside the config directory; refusing to write there"
-        raise NotWiredError(msg)
+        raise NotWiredError(msg) from None
     if is_denied_path(target, base_path):
         msg = f"access to '{relative}' is denied"
         raise NotWiredError(msg)

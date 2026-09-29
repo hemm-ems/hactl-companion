@@ -10,7 +10,7 @@ from typing import Any
 from ruamel.yaml import YAML
 from ruamel.yaml.representer import RoundTripRepresenter
 
-from companion.pathguard import is_denied, is_denied_path, is_within
+from companion.pathguard import confine, is_denied, is_denied_path
 
 
 class CircularIncludeError(Exception):
@@ -206,20 +206,25 @@ class YamlResolver:
         self._yaml = YAML()
         self._yaml.preserve_quotes = True
 
-    def _check_path(self, path: Path) -> None:
-        """Validate path is within base and not denied."""
-        resolved = path.resolve()
-        if not is_within(resolved, self._base):
+    def _check_path(self, path: Path) -> Path:
+        """Validate path is within base and not denied; return the confined path.
+
+        Callers must touch the disk with the *returned* path: that is what makes
+        the confinement visible to CodeQL (see :func:`pathguard.confine`).
+        """
+        try:
+            resolved = confine(self._base, path)
+        except ValueError:
             msg = f"Path traversal not allowed: {path}"
-            raise ValueError(msg)
+            raise ValueError(msg) from None
         if is_denied_path(resolved, self._base):
             msg = f"Access to {resolved.name} is denied"
             raise PermissionError(msg)
+        return resolved
 
     def load(self, rel_path: str, *, resolve: bool = True) -> Any:
         """Load a YAML file, optionally resolving !include directives."""
-        target = (self._base / rel_path).resolve()
-        self._check_path(target)
+        target = self._check_path(self._base / rel_path)
         if not target.is_file():
             msg = f"File not found: {rel_path}"
             raise FileNotFoundError(msg)
@@ -232,13 +237,13 @@ class YamlResolver:
 
     def _resolve_file(self, path: Path, visited: set[str]) -> Any:
         """Load and recursively resolve a single YAML file."""
-        key = str(path.resolve())
+        path = self._check_path(path)
+        key = str(path)
         if key in visited:
             msg = f"Circular include detected: {path}"
             raise CircularIncludeError(msg)
         visited.add(key)
 
-        self._check_path(path)
         content = path.read_text(encoding="utf-8")
         data = self._resolve_includes(content, path.parent, visited)
         visited.discard(key)
@@ -329,8 +334,7 @@ class YamlResolver:
 
     def _include_file(self, path: Path, visited: set[str]) -> Any:
         """Resolve !include <path> — inline file content."""
-        resolved = path.resolve()
-        self._check_path(resolved)
+        resolved = self._check_path(path)
         if not resolved.is_file():
             msg = f"Included file not found: {path}"
             raise FileNotFoundError(msg)
@@ -338,8 +342,7 @@ class YamlResolver:
 
     def _include_dir_named(self, dir_path: Path, visited: set[str]) -> dict[str, Any]:
         """Resolve !include_dir_named <dir> — files become named dict entries."""
-        resolved = dir_path.resolve()
-        self._check_path(resolved)
+        resolved = self._check_path(dir_path)
         if not resolved.is_dir():
             return {}
         result: dict[str, Any] = {}
@@ -352,8 +355,7 @@ class YamlResolver:
 
     def _include_dir_list(self, dir_path: Path, visited: set[str]) -> list[Any]:
         """Resolve !include_dir_list <dir> — files become list items."""
-        resolved = dir_path.resolve()
-        self._check_path(resolved)
+        resolved = self._check_path(dir_path)
         if not resolved.is_dir():
             return []
         result: list[Any] = []
@@ -372,8 +374,7 @@ class YamlResolver:
         resolved to the bare directory string, so every automation in a split
         layout was invisible to `ent related`, `ref scan` and `config file`.
         """
-        resolved = dir_path.resolve()
-        self._check_path(resolved)
+        resolved = self._check_path(dir_path)
         if not resolved.is_dir():
             return []
         result: list[Any] = []
@@ -396,8 +397,7 @@ class YamlResolver:
         script key into two files, and HA dropped the first file's ``alias``
         while this resolver combined both.
         """
-        resolved = dir_path.resolve()
-        self._check_path(resolved)
+        resolved = self._check_path(dir_path)
         if not resolved.is_dir():
             return {}
         result: dict[str, Any] = {}
@@ -424,7 +424,6 @@ class YamlResolver:
         re-validated through ``_check_path``, so writes outside base or to a
         denied file (``secrets.yaml``) raise rather than escaping the config dir.
         """
-        target = (self._base / rel_path).resolve()
-        self._check_path(target)
+        target = self._check_path(self._base / rel_path)
         with target.open("w", encoding="utf-8") as stream:
             self._yaml.dump(data, stream)
