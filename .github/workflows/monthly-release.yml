@@ -57,7 +57,6 @@ jobs:
         id: check
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        env:
           HA_SERIES: ${{ steps.ha.outputs.stable_month }}
           OVERRIDE: ${{ inputs.version }}
         run: |
