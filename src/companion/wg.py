@@ -15,6 +15,7 @@ from pathlib import Path
 from aiohttp import web
 
 from companion import paths
+from companion.pathguard import confine
 
 logger = logging.getLogger(__name__)
 
@@ -33,13 +34,18 @@ _PERSIST_DIR = paths.hactl_dir()
 
 
 def _persist_path(tunnel: str, persist_dir: Path = _PERSIST_DIR) -> Path:
-    """Path of a tunnel's canonical (persistent) config."""
-    return persist_dir / f"{tunnel}.conf"
+    """Path of a tunnel's canonical (persistent) config.
+
+    ``tunnel`` is already allowlisted by :func:`_validate_tunnel`; confining the
+    file to its directory as well is what makes that visible to CodeQL, which
+    does not model a regex fullmatch as a path sanitizer.
+    """
+    return confine(persist_dir, f"{tunnel}.conf")
 
 
 def _runtime_path(tunnel: str) -> Path:
-    """Path of a tunnel's runtime config in /etc/wireguard."""
-    return _WG_CONFIG_DIR / f"{tunnel}.conf"
+    """Path of a tunnel's runtime config in /etc/wireguard (confined, as :func:`_persist_path`)."""
+    return confine(_WG_CONFIG_DIR, f"{tunnel}.conf")
 
 
 def materialize(tunnel: str, persist_dir: Path | None = None) -> bool:

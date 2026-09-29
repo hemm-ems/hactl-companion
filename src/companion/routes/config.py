@@ -16,7 +16,7 @@ from ruamel.yaml import YAML
 from companion import core_api
 from companion.backups import backup_dir, make_backup
 from companion.params import parse_bool_param
-from companion.pathguard import is_denied, is_denied_path, is_within
+from companion.pathguard import confine, is_denied, is_denied_path
 from companion.yaml_resolver import YamlResolver
 
 yaml = YAML()
@@ -31,15 +31,19 @@ class RouteDef:
 
 
 def _resolve_config_path(base: str, relative: str) -> Path:
-    """Resolve and validate a config path, preventing traversal attacks."""
+    """Resolve and validate a config path, preventing traversal attacks.
+
+    Through :func:`pathguard.confine`, whose shape CodeQL recognises: every route
+    here touches the disk with the path returned from this function.
+    """
     if not relative:
         raise web.HTTPBadRequest(text="Missing path parameter")
 
     base_path = Path(base).resolve()
-    target = (base_path / relative).resolve()
-
-    if not is_within(target, base_path):
-        raise web.HTTPBadRequest(text="Path traversal is not allowed")
+    try:
+        target = confine(base_path, relative)
+    except ValueError:
+        raise web.HTTPBadRequest(text="Path traversal is not allowed") from None
 
     if is_denied_path(target, base_path):
         raise web.HTTPForbidden(text=f"Access to {relative} is denied")
