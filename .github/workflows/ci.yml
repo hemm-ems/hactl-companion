@@ -33,6 +33,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: uv sync --extra dev
+      - run: make check-markers
       - run: uv run ruff check src/ tests/
       - run: uv run ruff format --check src/ tests/
       - run: uv run mypy
