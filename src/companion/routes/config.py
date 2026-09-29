@@ -199,7 +199,7 @@ async def put_config_file(request: web.Request) -> web.Response:
 
     # Back up the existing file (a brand-new file has nothing to back up — this
     # distinction drives the rollback path below).
-    backup_name = make_backup(target)
+    backup_name = make_backup(target, base=base)
     existed = backup_name is not None
     backup_path = backup_dir(target) / backup_name if backup_name is not None else None
 

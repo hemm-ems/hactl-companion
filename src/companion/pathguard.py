@@ -9,6 +9,7 @@ touching config paths) apply identical rules.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 # Files that must never be exposed or written, regardless of location.
@@ -48,6 +49,26 @@ def is_within(target: Path, base: Path) -> bool:
     ``path=../config2/x.yaml``). Both arguments should already be ``resolve()``d.
     """
     return target.is_relative_to(base)
+
+
+def confine(base: str | Path, target: str | Path) -> Path:
+    """``target`` with symlinks resolved, refused (``ValueError``) unless inside ``base``.
+
+    The same rule as :func:`is_within`, in the shape CodeQL models as a path
+    sanitizer: ``os.path.realpath``, then ``startswith`` called on that very
+    variable. That plain prefix check alone would let ``/config2`` pass for
+    ``/config``, so the second check is the actual rule: ``base`` itself, or
+    below ``base`` + separator. Use the *returned* path at the filesystem call —
+    checking one variable and touching another reads as unchecked input.
+    """
+    root = os.path.realpath(base)
+    full = os.path.realpath(os.path.join(root, target))
+    msg = f"Path traversal not allowed: {target}"
+    if not full.startswith(root):
+        raise ValueError(msg)
+    if full != root and not full.startswith(root + os.sep):
+        raise ValueError(msg)
+    return Path(full)
 
 
 def is_denied(name: str) -> bool:

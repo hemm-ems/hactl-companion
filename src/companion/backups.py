@@ -15,6 +15,8 @@ import shutil
 from datetime import UTC, datetime
 from pathlib import Path
 
+from companion.pathguard import confine
+
 # How many timestamped backups to retain per file.
 MAX_BACKUPS = 10
 
@@ -30,14 +32,18 @@ def backup_dir(path: str | Path) -> Path:
     return Path(path).parent / BACKUP_DIRNAME
 
 
-def make_backup(path: str | Path, *, keep: int = MAX_BACKUPS) -> str | None:
+def make_backup(path: str | Path, *, base: str | Path, keep: int = MAX_BACKUPS) -> str | None:
     """Back up ``path`` into ``.hactl_backups/<name>.bak.<ts>`` and prune old backups.
 
     Returns the backup filename (not its path), or ``None`` if ``path`` does not
     exist yet (a brand-new file has nothing to back up). Reconstruct the full
     path with :func:`backup_dir` when you need it (e.g. for rollback).
+
+    ``path`` is confined to ``base`` here as well as by every caller: this is
+    where the copy and the prune touch the disk, so this is where the guard has
+    to be visible.
     """
-    path = Path(path)
+    path = confine(base, path)
     if not path.is_file():
         return None
     dest_dir = backup_dir(path)
