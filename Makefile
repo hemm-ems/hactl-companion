@@ -1,7 +1,7 @@
 COMPOSE_FILE := docker-compose.integration.yaml
 WG_COMPOSE_FILE := docker-compose.wireguard.yaml
 
-.PHONY: test test-int test-wg lint check-markers fmt clean spec
+.PHONY: test test-int test-wg lint lint-workflows check-markers fmt clean spec
 
 # check-markers — a [NEEDS ORACLE: ...] marker records an assumption about HA
 # that has not been verified against a live instance. Markers may exist on a
@@ -32,6 +32,18 @@ test-wg:
 	status=$$?; \
 	docker compose -f $(WG_COMPOSE_FILE) down -v 2>/dev/null || true; \
 	exit $$status
+
+# lint-workflows — GitHub does not reject an invalid workflow file at push
+# time; it records a zero-job "workflow file issue" run and never executes it.
+# monthly-release.yml sat in that state from 2026-08-02 to 2026-09-29 and two
+# monthly releases silently never happened. actionlint parses every workflow
+# the way GitHub does (plus shellcheck on each `run:` block, warnings and up),
+# so a broken workflow fails CI instead. Same pinned image locally and in CI.
+ACTIONLINT_IMAGE := rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
+
+lint-workflows:
+	docker run --rm -e SHELLCHECK_OPTS=--severity=warning \
+	  -v "$(CURDIR):/repo" -w /repo $(ACTIONLINT_IMAGE) -color
 
 lint: check-markers
 	uv run ruff check src/ tests/
