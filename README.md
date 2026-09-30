@@ -3,6 +3,7 @@
 [![CI](https://github.com/hemm-ems/hactl-companion/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/hemm-ems/hactl-companion/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/hemm-ems/hactl-companion)](https://github.com/hemm-ems/hactl-companion/releases/latest)
 [![CodeQL](https://github.com/hemm-ems/hactl-companion/actions/workflows/codeql.yml/badge.svg?branch=main)](https://github.com/hemm-ems/hactl-companion/actions/workflows/codeql.yml)
+[![License](https://img.shields.io/github/license/hemm-ems/hactl-companion)](LICENSE)
 [![Python](https://img.shields.io/python/required-version-toml?tomlFilePath=https%3A%2F%2Fraw.githubusercontent.com%2Fhemm-ems%2Fhactl-companion%2Fmain%2Fpyproject.toml&label=Python)](pyproject.toml)
 
 Home Assistant app that exposes HA-internal features for the [hactl](https://github.com/hemm-ems/hactl) CLI.
@@ -127,4 +128,4 @@ sides test against.
 
 ## License
 
-MIT
+[MIT](LICENSE)
