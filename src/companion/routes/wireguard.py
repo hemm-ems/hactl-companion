@@ -8,7 +8,7 @@ from dataclasses import dataclass
 
 from aiohttp import web
 
-from companion import wg_monitor
+from companion import ha_forward, wg_monitor, wg_supervisor
 from companion.wg import (
     _conf_from_json,
     _is_interface_up,
@@ -87,6 +87,11 @@ async def post_start(request: web.Request) -> web.Response:
 
     wg_monitor.start_monitor(tunnel, conf_text)
     logger.info("WireGuard tunnel %s started", tunnel)
+    # Same switch as the startup path: no options file (dev stack) means the
+    # schema default, on.
+    opts = wg_supervisor.load_options()
+    if opts is None or opts.forward_ha:
+        await ha_forward.start(tunnel, conf_text)
     return web.json_response({"status": "started", "tunnel": tunnel})
 
 
@@ -98,6 +103,7 @@ async def post_stop(request: web.Request) -> web.Response:
         raise web.HTTPConflict(text=f"Tunnel {tunnel} is not active")
 
     wg_monitor.stop_monitor(tunnel)
+    await ha_forward.stop(tunnel)
     rc, _, stderr = await _run_wg_cmd("wg-quick", "down", tunnel)
     if rc != 0:
         logger.error("wg-quick down %s failed (rc=%s): %s", tunnel, rc, stderr.strip())
@@ -125,6 +131,7 @@ async def get_status(request: web.Request) -> web.Response:
             "state": "active",
             **parsed,
             "monitor": wg_monitor.status(tunnel),
+            "ha_forward": ha_forward.status(tunnel),
         }
     )
 

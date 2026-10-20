@@ -49,6 +49,25 @@ services:
     depends_on:
       wg-server:
         condition: service_healthy
+      fake-ha:
+        condition: service_started
+
+  # Stand-in for HA core: the add-on reaches HA at `homeassistant:8123`, and the
+  # tunnel forward (hactl-companion#135) carries tunnel peers there.
+  fake-ha:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BASE_IMAGE: python:3.12-alpine
+    container_name: fake-ha
+    command: ["python3", "/fake_ha.py"]
+    volumes:
+      - ./testdata/wireguard/fake_ha.py:/fake_ha.py:ro
+    networks:
+      wg-net:
+        aliases:
+          - homeassistant
 
 volumes:
   wg-shared:

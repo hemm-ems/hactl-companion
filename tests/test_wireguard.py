@@ -383,6 +383,25 @@ class TestPostStart:
         start_mock.assert_called_once()
         assert start_mock.call_args.args[0] == "wg0"
 
+    @pytest.mark.parametrize(("options", "forwards"), [(None, True), (True, True), (False, False)])
+    async def test_start_honors_forward_switch(self, client, auth_headers, _wg_config_dir, options, forwards) -> None:
+        """No options file (dev stack) means the schema default: forward on."""
+        from companion.wg_supervisor import VPNOptions
+
+        self._persist(_wg_config_dir)
+        opts = None if options is None else VPNOptions(enabled=True, tunnel="wg0", config="", forward_ha=options)
+        with (
+            patch("companion.routes.wireguard._is_interface_up", return_value=False),
+            patch("companion.routes.wireguard._resolve_endpoint_hostnames", AsyncMock(return_value=[])),
+            patch("companion.routes.wireguard._run_wg_cmd", return_value=(0, "", "")),
+            patch("companion.routes.wireguard.wg_monitor.start_monitor"),
+            patch("companion.routes.wireguard.wg_supervisor.load_options", return_value=opts),
+            patch("companion.routes.wireguard.ha_forward.start", AsyncMock()) as fwd_start,
+        ):
+            resp = await client.post("/v1/wireguard/start?tunnel=wg0", headers=auth_headers)
+        assert resp.status == 200
+        assert fwd_start.await_count == (1 if forwards else 0)
+
 
 class TestPostStop:
     async def test_stop_success(self, client, auth_headers) -> None:
@@ -396,6 +415,25 @@ class TestPostStop:
         body = await resp.json()
         assert body["status"] == "stopped"
         stop_mock.assert_called_once_with("wg0")
+
+    async def test_stop_closes_forward_before_tunnel_down(self, client, auth_headers) -> None:
+        order: list[str] = []
+
+        async def fwd_stop(tunnel: str) -> None:
+            order.append(f"forward-stop {tunnel}")
+
+        async def run(*args: str, **_: object) -> tuple[int, str, str]:
+            order.append(" ".join(args))
+            return 0, "", ""
+
+        with (
+            patch("companion.routes.wireguard._is_interface_up", return_value=True),
+            patch("companion.routes.wireguard._run_wg_cmd", run),
+            patch("companion.routes.wireguard.ha_forward.stop", fwd_stop),
+        ):
+            resp = await client.post("/v1/wireguard/stop?tunnel=wg0", headers=auth_headers)
+        assert resp.status == 200
+        assert order == ["forward-stop wg0", "wg-quick down wg0"]
 
     async def test_stop_not_running(self, client, auth_headers) -> None:
         with patch("companion.routes.wireguard._is_interface_up", return_value=False):
@@ -494,6 +532,109 @@ class TestNormalizeConf:
         written = (persist / "wg0.conf").read_text()
         _validate_conf(written)
         assert "\nAddress = 10.6.0.2/24\n" in written
+
+
+# What our setup helper (CT151 add-client.sh) hands a friend to paste, in the two
+# generations it has shipped, plus the bare config. hactl-companion#135.
+_PRIV = "yLaRKvrkz+DhPait/rk5OgOV2RGeikMkX/dbK8gxiHo="
+_SERVER_PUB = "FE5OhQCNLLxF1OdDBIDMf5ktc8sEFngHoxy2o5iMhxs="
+_BARE = f"""[Interface]
+PrivateKey = {_PRIV}
+Address = 10.6.0.4/24
+
+[Peer]
+PublicKey = {_SERVER_PUB}
+Endpoint = hactl.example.com:51826
+AllowedIPs = 10.6.0.0/24
+PersistentKeepalive = 25
+"""
+_SNIPPET_NESTED = "vpn:\n  enabled: true\n  tunnel: wg0\n  config: |\n" + "".join(
+    f"    {line}\n" if line else "\n" for line in _BARE.splitlines()
+)
+_SNIPPET_FLAT = "enabled: true\nautostart: true\ntunnel: wg0\nconfig: |\n" + "".join(
+    f"  {line}\n" if line else "\n" for line in _BARE.splitlines()
+)
+_EXPECTED = [
+    "[Interface]",
+    f"PrivateKey = {_PRIV}",
+    "Address = 10.6.0.4/24",
+    "[Peer]",
+    f"PublicKey = {_SERVER_PUB}",
+    "Endpoint = hactl.example.com:51826",
+    "AllowedIPs = 10.6.0.0/24",
+    "PersistentKeepalive = 25",
+]
+
+
+class TestPasteShapes:
+    """Every way a person can paste the config ends as the same valid wg.conf."""
+
+    @pytest.mark.parametrize("source", [_BARE, _SNIPPET_NESTED, _SNIPPET_FLAT], ids=["bare", "nested", "flat"])
+    @pytest.mark.parametrize(
+        "mangle",
+        [
+            lambda t: t,
+            # Chrome into a single-line <input>: line breaks removed outright.
+            lambda t: t.replace("\n", ""),
+            # Line breaks turned into spaces.
+            lambda t: t.replace("\n", " "),
+            # Windows clipboard.
+            lambda t: t.replace("\n", "\r\n"),
+            # Chat apps / rich-text editors: no-break spaces and a BOM.
+            lambda t: "\ufeff" + t.replace(" = ", "\u00a0=\u00a0"),
+        ],
+        ids=["intact", "stripped", "spaces", "crlf", "nbsp-bom"],
+    )
+    def test_shape_normalizes(self, source: str, mangle) -> None:
+        out = _normalize_conf(mangle(source))
+        _validate_conf(out)
+        assert out.splitlines() == _EXPECTED
+
+    def test_yaml_wrapper_was_what_broke(self) -> None:
+        """Before the fix the wrapper survived as a line wg-quick refuses:
+        ``Line unrecognized: `vpn:enabled:truetunnel:wg0config:|'``."""
+        out = _normalize_conf(_SNIPPET_NESTED.replace("\n", ""))
+        assert not any("vpn:" in line or "config:" in line for line in out.splitlines())
+
+    def test_lowercase_keys_get_canonical_spelling(self) -> None:
+        conf = "[interface]\nprivatekey = k\naddress = 10.0.0.2/24\n[PEER]\npublickey = p\nallowedips = 0.0.0.0/0\n"
+        assert _normalize_conf(conf).splitlines() == [
+            "[Interface]",
+            "PrivateKey = k",
+            "Address = 10.0.0.2/24",
+            "[Peer]",
+            "PublicKey = p",
+            "AllowedIPs = 0.0.0.0/0",
+        ]
+
+    def test_idempotent_on_every_shape(self) -> None:
+        once = _normalize_conf(_SNIPPET_FLAT.replace("\n", " "))
+        assert _normalize_conf(once) == once
+
+
+class TestValidateRefusesNonWireGuard:
+    def test_unknown_line_named_by_number(self) -> None:
+        from aiohttp.web import HTTPBadRequest
+
+        conf = "[Interface]\nPrivateKey = k\nAddress = 10.0.0.2/24\nautostart: true\n[Peer]\nPublicKey = p\n"
+        with pytest.raises(HTTPBadRequest) as exc:
+            _validate_conf(conf)
+        assert exc.value.text == "Config line 4 is not WireGuard: 'autostart: true'"
+
+    def test_refusal_never_echoes_key_material(self) -> None:
+        from aiohttp.web import HTTPBadRequest
+
+        # A colon instead of '=' — the line is refused, and the key must not
+        # travel into the log or the 400 body with it.
+        conf = f"[Interface]\nPrivateKey: {_PRIV}\nAddress = 10.0.0.2/24\n[Peer]\nPublicKey = p\nPrivateKey = x\n"
+        with pytest.raises(HTTPBadRequest) as exc:
+            _validate_conf(conf)
+        assert _PRIV not in exc.value.text
+        assert _PRIV[:20] not in exc.value.text
+        assert "line 2" in exc.value.text
+
+    def test_comments_and_blank_lines_allowed(self) -> None:
+        _validate_conf("# summt\n[Interface]\nPrivateKey = k\n\n[Peer]\n# server\nPublicKey = p\n")
 
 
 class TestSaveAndMaterialize:

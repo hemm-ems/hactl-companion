@@ -169,29 +169,94 @@ _WG_SECTION_RE = re.compile(r"(\[(?:Interface|Peer)\])", re.IGNORECASE)
 # Anchored on the key itself for the same reason as _WG_SECTION_RE.
 _WG_KEY_RE = re.compile(r"(" + "|".join(_WG_KEYS) + r")\s*=\s*")
 
+# Line-level only (the line is already split, so no base64 run can be mistaken
+# for a key): wg-quick matches its own keys case-sensitively and hands the rest
+# to `wg`, so `address = …` would fail. We write the canonical spelling.
+_WG_KEY_LINE_RE = re.compile(r"^([A-Za-z]+)[ \t]*=[ \t]*(.*)$")
+_WG_KEY_CANON = {key.lower(): key for key in _WG_KEYS}
+_WG_SECTION_CANON = {"[interface]": "[Interface]", "[peer]": "[Peer]"}
+
+# What a browser, chat app or editor slips into a paste: no-break and narrow
+# spaces become plain spaces; the BOM and zero-width marks vanish.
+_PASTE_CHARS = str.maketrans(
+    {
+        "\u00a0": " ",
+        "\u2007": " ",
+        "\u202f": " ",
+        "\ufeff": None,
+        "\u200b": None,
+        "\u200c": None,
+        "\u200d": None,
+        "\u2060": None,
+    }
+)
+
+# A run this long from the base64 alphabet is treated as key material and never
+# echoed back in an error. WireGuard keys are 44 characters.
+_KEY_MATERIAL_RE = re.compile(r"[A-Za-z0-9+/]{20,}={0,2}")
+
+
+def _canonical_line(line: str) -> str:
+    """Spell a section header or known key the way wg-quick expects it."""
+    if (section := _WG_SECTION_CANON.get(line.lower())) is not None:
+        return section
+    m = _WG_KEY_LINE_RE.match(line)
+    if m and (key := _WG_KEY_CANON.get(m.group(1).lower())) is not None:
+        return f"{key} = {m.group(2)}"
+    return line
+
 
 def _normalize_conf(content: str) -> str:
-    """Reconstruct a tidy wg.conf even if line breaks/spaces were stripped.
+    """Rebuild a wg.conf from whatever a person pasted.
 
     Idempotent on already well-formed input. Each ``[Interface]``/``[Peer]``
     header and each known ``Key = Value`` is placed on its own line. Values are
     preserved verbatim (only the key token and surrounding ``=`` are touched), so
     base64 keys, IPs, and ``host:port`` endpoints are unaffected.
+
+    Everything before the first section header is dropped. That is where the
+    YAML around a config lands when someone pastes our whole setup snippet
+    (``vpn: enabled: true tunnel: wg0 config: |``) into the single-line form
+    field — wg-quick refuses such a line, and nothing in it is WireGuard.
     """
+    content = content.replace("\r\n", "\n").replace("\r", "\n").translate(_PASTE_CHARS)
     content = _WG_SECTION_RE.sub(lambda m: "\n" + m.group(1) + "\n", content)
     content = _WG_KEY_RE.sub(lambda m: "\n" + m.group(1) + " = ", content)
-    lines = [line.strip() for line in content.splitlines() if line.strip()]
+    lines = [_canonical_line(line.strip()) for line in content.splitlines() if line.strip()]
+    first = next((i for i, line in enumerate(lines) if line in _WG_SECTION_CANON.values()), 0)
+    if first:
+        logger.info("ignored %d line(s) before the first section (not WireGuard, e.g. YAML around a paste)", first)
+        lines = lines[first:]
     return "\n".join(lines) + "\n" if lines else content
 
 
+def _describe_line(line: str) -> str:
+    """Name an unrecognized line for an error message without leaking a key."""
+    head = line.split("=", 1)[0].strip() if "=" in line else line
+    head = _KEY_MATERIAL_RE.sub("<redacted>", head)
+    return head if len(head) <= 40 else head[:40] + "…"
+
+
 def _validate_conf(content: str) -> None:
-    """Basic validation of a WireGuard .conf — must have [Interface] and [Peer]."""
+    """Validate a normalized WireGuard .conf before wg-quick sees it.
+
+    Beyond the required sections, every line must be a section header, a key
+    wg-quick knows, or a comment — the check wg-quick itself makes, run early so
+    the refusal can say which line and stays free of key material.
+    """
     if "[Interface]" not in content:
         raise web.HTTPBadRequest(text="Config must contain an [Interface] section")
     if "[Peer]" not in content:
         raise web.HTTPBadRequest(text="Config must contain at least one [Peer] section")
     if "PrivateKey" not in content:
         raise web.HTTPBadRequest(text="Config must contain a PrivateKey in [Interface]")
+    for n, raw in enumerate(content.splitlines(), start=1):
+        line = raw.strip()
+        if not line or line.startswith("#") or line in _WG_SECTION_CANON.values():
+            continue
+        m = _WG_KEY_LINE_RE.match(line)
+        if m is None or m.group(1) not in _WG_KEYS:
+            raise web.HTTPBadRequest(text=f"Config line {n} is not WireGuard: {_describe_line(line)!r}")
 
 
 def _humanize_bytes(n: int) -> str:

@@ -50,13 +50,23 @@ Then set the toggles in the **Configuration** tab and restart the add-on:
 | `vpn.enabled` | `false` | Bring the tunnel up on every add-on (re)start when `true` (so it returns after a host reboot once the add-on starts); bring it down and keep it down when `false`. |
 | `vpn.tunnel` | `wg0` | Interface name (`^[a-zA-Z0-9_]{1,15}$`). |
 | `vpn.config` | `""` | *Optional* inline config. Leave empty to use the file above. When set, it is written into `/config/hactl/<tunnel>.conf` on start (it wins over an existing file). |
+| `vpn.forward_ha` | `true` | Make Home Assistant reachable through the tunnel at `<tunnel-address>:<HA port>` (usually `http://10.x.y.z:8123`). This is what lets `hactl` on the other end of the tunnel talk to HA. |
 
-> ℹ️ **Pasting into `vpn.config`:** the default form field is single-line, so a pasted
-> multi-line `wg.conf` loses its line breaks — the add-on **normalizes** the collapsed
-> value back into a valid config on startup, so it still works. If you instead use the
-> **Edit in YAML** mode, a multi-line value must be a block scalar (`config: |` with each
-> line indented); raw paste there is invalid YAML and HA rejects it before the add-on runs.
-> The file / `hactl config -f` methods above avoid both pitfalls.
+> ℹ️ **Pasting into `vpn.config`:** just paste what you were given into the field — the
+> bare WireGuard config, or the whole `vpn:` block including `enabled:` and `config: |`.
+> The field is single-line and eats the line breaks; the add-on rebuilds the config on
+> startup and ignores the YAML around it. If something in it is not WireGuard, the add-on
+> log names the line (never the key) and the tunnel stays down. In **Edit in YAML** mode a
+> multi-line value must be a block scalar (`config: |` with each line indented); raw paste
+> there is invalid YAML and HA rejects it before the add-on runs.
+
+After a restart the log shows where HA can be reached, e.g.
+`HA reachable through tunnel wg0 at http://10.6.0.4:8123`. Use that address as `HA_URL`.
+
+> ⚠️ HA sees tunnel clients as this add-on's address (`172.30.33.x`). If your
+> `http: trusted_proxies` covers that subnet (common with a reverse-proxy add-on) **and**
+> you use the `trusted_networks` auth provider, a tunnel client could claim a trusted
+> address via `X-Forwarded-For`. In that setup, set `vpn.forward_ha: false`.
 
 Restart the add-on after changing the config. See `docs/wireguard.md` for the full feature manual, including the REST API for multi-tunnel or scripted setups.
 

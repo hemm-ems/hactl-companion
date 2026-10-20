@@ -24,9 +24,12 @@ options:
     enabled: false
     tunnel: wg0
     config: ""
+    forward_ha: true
 schema:
   vpn:
     enabled: bool
     tunnel: "match(^[a-zA-Z0-9_]{1,15}$)"
     config: str?
+    # Optional so installs that predate it validate; absent means on.
+    forward_ha: bool?
 image: "ghcr.io/hemm-ems/hactl-companion"
