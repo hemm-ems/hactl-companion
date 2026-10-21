@@ -38,6 +38,7 @@ Either:
 | `enabled` | Master switch, persisted across restarts. `true` ⇒ tunnel is brought up on every add-on (re)start (including after a host reboot, since the add-on restarts then). `false` ⇒ tunnel is brought down and kept down. |
 | `tunnel` | Interface name. Must match `^[a-zA-Z0-9_]{1,15}$`. Default `wg0`. |
 | `config` | *Optional* inline config. Leave empty to use the canonical file. When non-empty it is written into `/config/hactl/<tunnel>.conf` on start (takes precedence over an existing file). |
+| `forward_ha` | Default `true` (also when the key is absent). While the tunnel is up, HA core is reachable through it at `<tunnel-address>:<HA port>` — see [HA through the tunnel](#ha-through-the-tunnel). |
 
 Save and restart the add-on. On startup the supervisor resolves the config (`vpn.config` if
 set, else the file), writes it canonically + into `/etc/wireguard/<tunnel>.conf` (mode `0600`),
@@ -46,9 +47,14 @@ and runs `wg-quick up <tunnel>` when `enabled`.
 > **Pasting `vpn.config` — two cases:**
 >
 > - **Form field (default UI):** the `config` box is single-line, so a pasted multi-line
->   `wg.conf` arrives with its **line breaks stripped** (`[Interface]PrivateKey=…Address=…`).
->   The add-on **normalizes** this back into a valid config on startup (the keys are a known
->   vocabulary), so a mangled paste now works.
+>   `wg.conf` arrives with its **line breaks stripped** (`[Interface]PrivateKey=…Address=…`)
+>   or turned into spaces. The add-on **normalizes** this back into a valid config on
+>   startup (the keys are a known vocabulary). Everything before the first `[Interface]`
+>   is dropped, so pasting the whole `vpn:` YAML block (`enabled:`, `config: |`, …) into
+>   the field works too — earlier versions kept that wrapper as a line and `wg-quick`
+>   refused the config (`Line unrecognized`). CRLF, no-break spaces, a BOM and lowercase
+>   keys are fixed up as well. A line that is still not WireGuard after all that is
+>   refused before `wg-quick` runs; the log names its line number, never key material.
 > - **YAML editor mode:** a multi-line value must still be a block scalar — paste under
 >   `config: |` with every line indented:
 >   ```yaml
@@ -210,6 +216,34 @@ curl "$HA/v1/wireguard/status?tunnel=wg0" -H "$AUTH"
 curl -X POST "$HA/v1/wireguard/stop?tunnel=wg0" -H "$AUTH"
 ```
 
+## HA through the tunnel
+
+The tunnel ends inside the add-on's container, where nothing listens on HA's port — HA
+core runs on the host. So a peer on the tunnel reaches the companion (`:9100`) but, on its
+own, not HA, while `hactl` needs HA itself (REST + WebSocket). With `vpn.forward_ha` on
+(the default), the add-on listens on the tunnel address at HA's port and pipes each
+connection byte for byte to HA core (`homeassistant:<port>`). TLS and WebSocket pass
+through untouched. On the far end:
+
+```bash
+hactl setup --url http://<tunnel-address>:8123   # https:// if HA serves TLS
+```
+
+- **Port:** read from the Supervisor (`/core/info` → `port`, `ssl`), so a non-default
+  `http: server_port` is followed. 8123 is the fallback when the Supervisor cannot be asked.
+- **Scope:** only the tunnel address is bound, never `0.0.0.0`, and the target is always HA
+  core — it is not configurable, so the add-on cannot become a pivot into the LAN.
+- **Lifecycle:** starts when the tunnel comes up (on add-on start or
+  `POST /v1/wireguard/start`), stops before `POST /v1/wireguard/stop` takes it down.
+- **Log:** `HA reachable through tunnel wg0 at http://10.6.0.4:8123 (forwarded to homeassistant:8123)`,
+  or `HA is NOT reachable through tunnel wg0: <reason>`.
+- **Status:** `GET /v1/wireguard/status` → `ha_forward` (`listening`, `target`, connection
+  counts, `last_error`).
+- **Auth is HA's:** every client still needs an HA login or token. HA sees tunnel clients
+  as the add-on's address (`172.30.33.x`). If `http: trusted_proxies` covers that subnet
+  and the `trusted_networks` auth provider is in use, a tunnel client could claim a
+  trusted address via `X-Forwarded-For` — set `forward_ha: false` in that setup.
+
 ## Surviving a reboot
 
 There's no separate auto-start switch. Set `vpn.enabled: true` in the add-on
@@ -269,7 +303,7 @@ make test-wg
 - **wg-server**: Alpine with WireGuard, generates keypairs, runs as VPN server on `10.13.13.1`
 - **companion-wg**: Full companion image with WireGuard tools, acts as VPN client on `10.13.13.2`
 
-Tests verify: config push (raw + JSON) → tunnel start → status active with peer handshake → actual ping through tunnel → stop → status inactive → ping fails → auth enforcement → declarative reconcile across container recreate → DNS pre-flight 502 for unresolvable hostname → monitor re-resolve after dyndns IP change (~42 s wait).
+Tests verify: config push (raw + JSON) → tunnel start → status active with peer handshake → HA (a stand-in, `fake-ha`, aliased `homeassistant`) reachable from the server peer at `10.13.13.2:8123` over HTTP and WebSocket → actual ping through tunnel → stop → status inactive → ping and HA fail → auth enforcement → declarative reconcile across container recreate from the whole YAML snippet pasted line-break-free → `forward_ha: false` listens nowhere → DNS pre-flight 502 for unresolvable hostname → monitor re-resolve after dyndns IP change (~42 s wait).
 
 Works on **Windows** (Docker Desktop) and **GitHub Actions** (Ubuntu, `ubuntu-latest`).
 

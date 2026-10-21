@@ -80,6 +80,37 @@ def _read_from_container(container: str, path: str) -> str:
     return result.stdout
 
 
+# The companion's tunnel address in the rig, and HA's port there (hactl-companion#135).
+TUNNEL_HA = "10.13.13.2:8123"
+
+
+def _from_peer(*cmd: str, timeout: int = 20) -> subprocess.CompletedProcess[str]:
+    """Run a command on the wg-server — the far end of the tunnel, where hactl sits."""
+    return subprocess.run(["docker", "exec", "wg-server", *cmd], capture_output=True, text=True, timeout=timeout)
+
+
+def _ha_api_through_tunnel() -> subprocess.CompletedProcess[str]:
+    return _from_peer("curl", "-sS", "-m", "5", f"http://{TUNNEL_HA}/api/")
+
+
+def _write_options(options: dict[str, object]) -> None:
+    subprocess.run(
+        ["docker", "exec", "-i", "companion-wg", "sh", "-c", "cat > /data/options.json"],
+        input=json.dumps(options),
+        text=True,
+        check=True,
+        timeout=15,
+    )
+
+
+def _recreate_companion() -> str:
+    """Recreate from the image — wipes /etc/wireguard, keeps /data + /config."""
+    _compose("up", "-d", "--force-recreate", "--no-deps", "companion-wg")
+    url = _fresh_companion_url()
+    _wait_for_url(f"{url}/v1/health")
+    return url
+
+
 @pytest.fixture(scope="module")
 def wg_stack():
     """Start the WG integration stack and yield URLs, then tear down."""
@@ -204,6 +235,29 @@ class TestWireGuardFlow:
         # contract is checked against output wireguard-tools actually produced.
         assert_conforms("GET", "/v1/wireguard/status", body)
 
+    def test_07b_status_reports_ha_forward(self, companion_url: str, auth_headers: dict[str, str]) -> None:
+        r = requests.get(f"{companion_url}/v1/wireguard/status?tunnel=wg0", headers=auth_headers, timeout=10)
+        fwd = r.json()["ha_forward"]
+        assert fwd["running"] is True
+        assert fwd["listening"] == [TUNNEL_HA]
+        assert fwd["target"] == "homeassistant:8123"
+
+    def test_08b_ha_reachable_through_tunnel(self) -> None:
+        """The peer reaches HA at <tunnel-ip>:8123 — what hactl setup needs (#135)."""
+        result = _ha_api_through_tunnel()
+        assert result.returncode == 0, f"HA not reachable through tunnel: {result.stderr}"
+        body = json.loads(result.stdout)
+        assert body["message"] == "API running."
+        # HA sees the add-on, not the tunnel client (the documented trusted_proxies caveat).
+        assert body["remote"] != "10.13.13.1"
+
+    def test_08c_websocket_through_tunnel(self) -> None:
+        """hactl's other half: the WebSocket API, upgrade and frames both ways."""
+        host, port = TUNNEL_HA.split(":")
+        result = _from_peer("python3", "/ws_probe.py", host, port)
+        assert result.returncode == 0, f"WebSocket through tunnel failed: {result.stderr}"
+        assert result.stdout.strip() == "echo:hello"
+
     def test_08_ping_through_tunnel(self) -> None:
         """Verify actual connectivity: ping the WG server through the tunnel."""
         result = subprocess.run(
@@ -244,6 +298,10 @@ class TestWireGuardFlow:
             timeout=15,
         )
         assert result.returncode != 0, "Ping should fail after tunnel stop"
+
+    def test_11b_ha_not_reachable_after_stop(self) -> None:
+        result = _ha_api_through_tunnel()
+        assert result.returncode != 0, f"HA still reachable after tunnel stop: {result.stdout}"
 
     def test_12_config_json(
         self, companion_url: str, auth_headers: dict[str, str], client_json: dict[str, object]
@@ -303,25 +361,17 @@ class TestWireGuardFlow:
         from persistent storage — and that the canonical /config/hactl copy
         persisted. This is the scenario the add-on exists for.
 
-        The inline config is newline-stripped to mimic an HA add-on options text
-        field eating the line breaks (the real-world paste failure) — so this
-        also exercises the config normalizer end-to-end.
+        The inline config is what Summt's owner pasted (hactl-companion#135): the
+        whole setup snippet, YAML wrapper included, pasted into the single-line
+        form field, which strips the line breaks. Before the fix the wrapper
+        survived as a line and wg-quick refused the config.
         """
-        collapsed = client_conf.replace("\n", "")
-        options = {"vpn": {"enabled": True, "tunnel": "wg0", "config": collapsed}}
-        # Write options.json into the persistent /data volume.
-        subprocess.run(
-            ["docker", "exec", "-i", "companion-wg", "sh", "-c", "cat > /data/options.json"],
-            input=json.dumps(options),
-            text=True,
-            check=True,
-            timeout=15,
+        snippet = "vpn:\n  enabled: true\n  tunnel: wg0\n  config: |\n" + "".join(
+            f"    {line}\n" for line in client_conf.splitlines()
         )
-
-        # Recreate from the image — wipes /etc/wireguard, keeps /data + /config.
-        _compose("up", "-d", "--force-recreate", "--no-deps", "companion-wg")
-        new_url = f"http://localhost:{_get_mapped_port('companion-wg', 9100)}"
-        _wait_for_url(f"{new_url}/v1/health")
+        options = {"vpn": {"enabled": True, "tunnel": "wg0", "config": snippet.replace("\n", "")}}
+        _write_options(options)
+        new_url = _recreate_companion()
 
         # Supervisor should have brought wg0 up on startup, with no REST call.
         time.sleep(3)
@@ -345,6 +395,20 @@ class TestWireGuardFlow:
             timeout=20,
         )
         assert result.returncode == 0, f"ping through reconciled tunnel failed: {result.stderr}"
+
+        # And HA is reachable from the far end, with nothing but the paste (#135).
+        ha = _ha_api_through_tunnel()
+        assert ha.returncode == 0, f"HA not reachable through reconciled tunnel: {ha.stderr}"
+
+    def test_15b_forward_off_listens_nowhere(self, client_conf: str, auth_headers: dict[str, str]) -> None:
+        _write_options({"vpn": {"enabled": True, "tunnel": "wg0", "config": client_conf, "forward_ha": False}})
+        url = _recreate_companion()
+        time.sleep(3)
+        r = requests.get(f"{url}/v1/wireguard/status?tunnel=wg0", headers=auth_headers, timeout=10)
+        assert r.json()["state"] == "active"
+        assert r.json()["ha_forward"] == {"running": False}
+        result = _ha_api_through_tunnel()
+        assert result.returncode != 0, f"forward_ha=false but HA reachable: {result.stdout}"
 
 
 # ---------------------------------------------------------------------------

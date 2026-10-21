@@ -282,6 +282,73 @@ class TestReconcileEnabled:
         assert result is None
 
 
+@pytest.mark.asyncio
+class TestReconcileReadsThePasteAsWgQuickWill:
+    """hactl-companion#135: the whole setup snippet pasted into the form field."""
+
+    _PASTE = (
+        "vpn:  enabled: true  tunnel: wg0  config: |    [Interface]    PrivateKey = aaaa    Address = 10.0.0.2/24"
+        "    [Peer]    PublicKey = bbbb    Endpoint = home.example.com:51826    AllowedIPs = 0.0.0.0/0"
+    )
+
+    async def test_snippet_paste_reconciles_from_normalized_text(self, wg_conf_dir: Path, fallback_dir: Path) -> None:
+        opts = VPNOptions(enabled=True, tunnel="wg0", config=self._PASTE)
+        dns = AsyncMock(return_value=[])
+        with (
+            patch("companion.wg_supervisor.wg._is_interface_up", AsyncMock(return_value=False)),
+            patch("companion.wg_supervisor.wg._run_wg_cmd", AsyncMock(return_value=(0, "", ""))),
+            patch("companion.wg_supervisor.wg._resolve_endpoint_hostnames", dns),
+        ):
+            result = await reconcile(opts, fallback_dir=fallback_dir)
+        assert result is not None
+        assert result.conf_text == _HOSTNAME_CONF
+        # The DNS pre-flight (and, through result.conf_text, the monitor) see the
+        # Endpoint line; on the raw single-line paste they saw nothing.
+        dns.assert_awaited_once_with(_HOSTNAME_CONF)
+        assert (wg_conf_dir / "wg0.conf").read_text() == _HOSTNAME_CONF
+
+    async def test_rejection_logs_the_reason_not_bad_request(
+        self, wg_conf_dir: Path, fallback_dir: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        conf = _VALID_CONF.replace("[Peer]", "autostart: true\n[Peer]")
+        opts = VPNOptions(enabled=True, tunnel="wg0", config=conf)
+        with (
+            patch("companion.wg_supervisor.wg._is_interface_up", AsyncMock(return_value=False)),
+            patch("companion.wg_supervisor.wg._run_wg_cmd", AsyncMock(return_value=(0, "", ""))),
+            caplog.at_level("WARNING", logger=wg_supervisor.logger.name),
+        ):
+            assert await reconcile(opts, fallback_dir=fallback_dir) is None
+        rejected = [r.getMessage() for r in caplog.records if "rejected" in r.getMessage()]
+        assert rejected == [
+            "vpn config rejected: Config line 4 is not WireGuard: 'autostart: true'; tunnel not started"
+        ]
+
+    async def test_result_carries_forward_switch(self, wg_conf_dir: Path, fallback_dir: Path) -> None:
+        opts = VPNOptions(enabled=True, tunnel="wg0", config=_VALID_CONF, forward_ha=False)
+        with (
+            patch("companion.wg_supervisor.wg._is_interface_up", AsyncMock(return_value=False)),
+            patch("companion.wg_supervisor.wg._run_wg_cmd", AsyncMock(return_value=(0, "", ""))),
+            patch("companion.wg_supervisor.wg._resolve_endpoint_hostnames", AsyncMock(return_value=[])),
+        ):
+            result = await reconcile(opts, fallback_dir=fallback_dir)
+        assert result is not None and result.forward_ha is False
+
+
+class TestLoadOptionsForwardHA:
+    def test_absent_means_on(self, tmp_path: Path) -> None:
+        """Installs that predate the option have no key; the schema default is on."""
+        p = tmp_path / "options.json"
+        p.write_text(json.dumps({"vpn": {"enabled": True}}))
+        opts = load_options(p)
+        assert opts is not None and opts.forward_ha is True
+
+    def test_off(self, tmp_path: Path) -> None:
+        p = tmp_path / "options.json"
+        p.write_text(json.dumps({"vpn": {"enabled": True, "forward_ha": False}}))
+        opts = load_options(p)
+        assert opts is not None and opts.forward_ha is False
+
+
 _HANDSHAKE_DUMP = "PRIV\tIFACE\t51820\toff\nPEER\t(none)\t1.2.3.4:51826\t10.6.0.0/24\t{hs}\t184\t584\toff\n"
 
 

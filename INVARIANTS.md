@@ -424,6 +424,35 @@ domain reads as unwired rather than as wrong.
   stated reason; a domain wired twice not counted twice; and the recursive
   directory walk with its dotfile and `secrets.yaml` exclusions)
 
+## C-16 — The tunnel carries HA, from the tunnel address, and nothing else
+
+The tunnel ends in the add-on's network namespace, so a tunnel peer reaches HA
+only through the add-on's forward. That forward is a door into the instance, and
+it stays the narrowest one that does the job: it listens on the tunnel's own
+address and never on `0.0.0.0`, its target is HA core as the Supervisor reports
+it and is not configurable from options, and it closes before the tunnel goes
+down. HA's own auth is the only gate — the forward adds no trust and claims none.
+
+- Enforced by: `tests/test_ha_forward.py` (bound sockets are exactly the tunnel
+  address; target is `homeassistant:<core port>`; stop cuts open connections and
+  the listener; `forward_ha` off starts nothing), `tests/test_wireguard.py`
+  (stop closes the forward before `wg-quick down`), and `make test-wg`
+  (HTTP + WebSocket through a real tunnel; unreachable after stop and when off)
+
+## C-17 — A pasted config reaches wg-quick only as WireGuard
+
+`vpn.config` is pasted by people into a single-line field. Whatever arrives is
+normalized first, and everything downstream — validation, the DNS pre-flight,
+the dyndns monitor, the persisted file — reads the normalized text, never the
+paste. A line that is still not a section, a known key or a comment is refused
+before `wg-quick` runs, and the refusal names the line number but never echoes
+key material.
+
+- Enforced by: `tests/test_wireguard.py::TestPasteShapes` (bare config, nested
+  and flat setup snippets × intact, stripped, spaces, CRLF, NBSP+BOM),
+  `::TestValidateRefusesNonWireGuard`, and
+  `tests/test_wg_supervisor.py::TestReconcileReadsThePasteAsWgQuickWill`
+
 ---
 
 Client-side counterparts (retry idempotency, CLI confirm gate, vendored-spec

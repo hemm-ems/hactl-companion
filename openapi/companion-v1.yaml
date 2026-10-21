@@ -1630,6 +1630,31 @@ paths:
                       last_error:
                         type: string
                         nullable: true
+                  ha_forward:
+                    type: object
+                    description: "Home Assistant's port carried into the tunnel: a
+                      tunnel peer reaches HA at an address in `listening`. `{\"running\"\
+                      : false}` alone when no forward was started (option `vpn.forward_ha`
+                      off, or the tunnel was not brought up by this add-on)."
+                    properties:
+                      running:
+                        type: boolean
+                      listening:
+                        type: array
+                        items:
+                          type: string
+                        description: '`<tunnel-address>:<HA port>` per tunnel address
+                          being listened on.'
+                      target:
+                        type: string
+                        description: 'Where connections go: HA core, `homeassistant:<port>`.'
+                      connections_total:
+                        type: integer
+                      connections_active:
+                        type: integer
+                      last_error:
+                        type: string
+                        nullable: true
         4XX:
           $ref: '#/components/responses/Error'
         5XX:

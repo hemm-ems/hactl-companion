@@ -20,7 +20,7 @@ from pathlib import Path
 
 from aiohttp import web
 
-from companion import paths, wg, wg_monitor
+from companion import ha_forward, paths, wg, wg_monitor
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +37,8 @@ class VPNOptions:
     enabled: bool
     tunnel: str
     config: str
+    # Absent on installs that predate the option; the schema default is on.
+    forward_ha: bool = True
 
 
 @dataclass
@@ -45,6 +47,7 @@ class ReconcileResult:
 
     tunnel: str
     conf_text: str
+    forward_ha: bool = True
 
 
 def load_options(path: Path = _OPTIONS_PATH) -> VPNOptions | None:
@@ -81,6 +84,7 @@ def load_options(path: Path = _OPTIONS_PATH) -> VPNOptions | None:
         enabled=bool(vpn.get("enabled", False)),
         tunnel=tunnel,
         config=str(vpn.get("config") or ""),
+        forward_ha=bool(vpn.get("forward_ha", True)),
     )
 
 
@@ -132,10 +136,15 @@ async def reconcile(opts: VPNOptions, *, fallback_dir: Path = _FALLBACK_DIR) -> 
             )
             return None
 
+        # Everything below — validation, DNS pre-flight, the monitor — reads the
+        # config as wg-quick will, not as it was pasted: a form-field paste has
+        # no line breaks, so the line-anchored Endpoint scan found nothing in it.
+        conf_text = wg._normalize_conf(conf_text)
         try:
             wg._validate_conf(conf_text)
-        except Exception as exc:
-            logger.warning("vpn config rejected: %s; tunnel not started", exc)
+        except web.HTTPException as exc:
+            # .text, not str(exc): the latter is just "Bad Request".
+            logger.warning("vpn config rejected: %s; tunnel not started", exc.text)
             return None
 
         # Persist the resolved config to the canonical location (keeps the file
@@ -160,7 +169,7 @@ async def reconcile(opts: VPNOptions, *, fallback_dir: Path = _FALLBACK_DIR) -> 
             logger.info("tunnel %s already up; left in place", opts.tunnel)
 
         await _log_up_summary(opts.tunnel)
-        return ReconcileResult(tunnel=opts.tunnel, conf_text=conf_text)
+        return ReconcileResult(tunnel=opts.tunnel, conf_text=conf_text, forward_ha=opts.forward_ha)
     except Exception:
         logger.exception("VPN reconcile failed for tunnel %s", opts.tunnel)
         return None
@@ -184,17 +193,20 @@ async def _log_up_summary(tunnel: str) -> None:
         logger.debug("could not build wg up-summary for %s", tunnel, exc_info=True)
 
 
-def register_startup_tasks(app: web.Application, tunnel: str, conf_text: str) -> None:
+def register_startup_tasks(app: web.Application, tunnel: str, conf_text: str, *, forward_ha: bool = True) -> None:
     """Start post-up WG work in the server's (long-lived) event loop.
 
-    Done via ``on_startup`` rather than in reconcile so the dyndns monitor and
-    the connection watcher run in the loop that stays alive — fixing a bug where
-    a monitor started under __main__'s ``asyncio.run`` was cancelled on exit.
+    Done via ``on_startup`` rather than in reconcile so the dyndns monitor, the
+    connection watcher and the HA forward run in the loop that stays alive —
+    fixing a bug where a monitor started under __main__'s ``asyncio.run`` was
+    cancelled on exit.
     """
 
     async def _on_startup(app: web.Application) -> None:
         # Dyndns re-resolution for hostname peers (no-op for IP endpoints).
         wg_monitor.start_monitor(tunnel, conf_text)
+        if forward_ha:
+            await ha_forward.start(tunnel, conf_text)
         # Fire-and-forget: must not await, or serving would block on the handshake.
         app["_wg_watch"] = asyncio.create_task(_watch_connection(tunnel))
 
@@ -203,6 +215,7 @@ def register_startup_tasks(app: web.Application, tunnel: str, conf_text: str) ->
         if task is not None:
             task.cancel()
         wg_monitor.stop_monitor(tunnel)
+        await ha_forward.stop(tunnel)
 
     app.on_startup.append(_on_startup)
     app.on_cleanup.append(_on_cleanup)

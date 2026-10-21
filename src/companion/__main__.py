@@ -83,7 +83,9 @@ def main(argv: list[str] | None = None) -> None:
     # Post-up WG work (dyndns monitor + connection confirmation) must run in the
     # server's event loop, not reconcile's throwaway one — see wg_supervisor.
     if reconciled is not None:
-        wg_supervisor.register_startup_tasks(app, reconciled.tunnel, reconciled.conf_text)
+        wg_supervisor.register_startup_tasks(
+            app, reconciled.tunnel, reconciled.conf_text, forward_ha=reconciled.forward_ha
+        )
 
     # access_log=None silences aiohttp's built-in access logger; our
     # access_log_middleware already emits one structured line per request.
