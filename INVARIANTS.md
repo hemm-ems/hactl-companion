@@ -74,7 +74,10 @@ caller-supplied config path (`routes/config.py`, `wiring.py`, `surgical.py`,
   `::test_write_secrets_denied`, `::test_write_storage_denied`,
   `tests/test_wiring.py::test_include_of_a_storage_path_is_refused`,
   `tests/test_surgical.py::test_storage_directory_is_refused`,
-  `tests/test_resolver.py::test_resolve_include_of_storage_is_denied`
+  `tests/test_resolver.py::test_resolve_include_of_storage_is_denied`,
+  `tests/test_refgrep.py::test_storage_is_never_searched`,
+  `::test_skipped_files_are_named_and_the_walk_goes_on` (an `!include` of
+  `secrets.yaml` is never searched, and is named in `skipped`)
 
 ## C-4 — Dry-run is the default wherever it is offered
 

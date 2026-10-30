@@ -49,6 +49,7 @@ from companion.routes import (
     config,
     helpers,
     logs,
+    refgrep,
     refscan,
     related,
     scripts,
@@ -457,6 +458,21 @@ RESPONSE_PROBES: dict[tuple[str, str], tuple[Probe, ...]] = {
             expect={"stale": True},
         ),
     ),
+    # `ref grep` walks the same graph as the three routes below, so it carries
+    # the same `skipped` probe and must report the same record for it.
+    ("GET", "/v1/ref/grep"): (
+        Probe(
+            "/v1/ref/grep?term=GONE",
+            setup=_seed_ref_target,
+            expect={"total": 1, "truncated": False, "regex": False, "case_sensitive": False},
+        ),
+        Probe(
+            "/v1/ref/grep?term=gone",
+            label="skipped",
+            setup=_seed_ref_skipped,
+            expect={"skipped": SKIPPED_PROBE_EXPECT},
+        ),
+    ),
     # Second probe on each ref route: `skipped[]` is emitted only when the walk
     # could not read the whole config graph, and all three routes must report it.
     ("GET", "/v1/ref/scan"): (
@@ -767,7 +783,20 @@ async def test_route_response_conformance(
 
 _QUERY_READ_RE = re.compile(r"request\.query(?:\.get\(|\[)\s*[\"']([a-zA-Z_]+)[\"']")
 
-_ROUTE_MODULES = [config, related, refscan, templates, scripts, automations, helpers, status, logs, wireguard, wiring]
+_ROUTE_MODULES = [
+    config,
+    related,
+    refscan,
+    refgrep,
+    templates,
+    scripts,
+    automations,
+    helpers,
+    status,
+    logs,
+    wireguard,
+    wiring,
+]
 
 
 @pytest.mark.parametrize("module", _ROUTE_MODULES, ids=lambda m: m.__name__.rsplit(".", 1)[-1])

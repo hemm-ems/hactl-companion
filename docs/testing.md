@@ -70,7 +70,7 @@ Beyond the derived modules above, by concern:
 | Helper storage & wiring | `test_helpers_storage` `test_helpers_wiring` `test_wiring_route` | 55 |
 | Surgical writes | `test_surgical` `test_refscan_splice` | 35 |
 | WireGuard | `test_wireguard` `test_wg_dns` `test_wg_monitor` `test_wg_supervisor` | 112 |
-| Reference scanning | `test_refscan` `test_refscan_routes` `test_refscan_skipped` `test_related` | 82 |
+| Reference scanning | `test_refscan` `test_refscan_routes` `test_refscan_skipped` `test_refgrep` `test_related` | 121 |
 | Plumbing | `test_resolver` `test_core_api` `test_cli` `test_reload_error` `test_backups` `test_main` | 58 |
 | Security | `test_auth` `test_pathguard` `test_paths` | 22 |
 
@@ -118,6 +118,7 @@ long-lived token over WebSocket. Getting a token is itself the proof that HA is 
 | `test_auth.py` | 5 | auth on a real container: no/wrong token → 401, health exempt, and a **client-supplied `X-Ingress-Path` does not bypass auth** — the 2026-07 spoof, pinned |
 | `test_related.py` | 2 | the related-entity graph, reconciled against HA's own `search/related` (C-9) |
 | `test_include_dir_oracle.py` | 2 | `!include_dir_*` resolves to exactly the files HA loads, merged the way HA merges them |
+| `test_refgrep.py` | 10 | `ref grep` over a probe automation HA has confirmed it loaded: substring in a template body, non-ASCII case, regex, the `secrets.yaml` skip, the stated cap, and `ref scan`/`ref replace` responses unchanged |
 
 That last one is worth naming: the graph is not compared to a fixture we wrote, it is
 compared to **HA's own answer**. A fixture only proves we still agree with ourselves.
