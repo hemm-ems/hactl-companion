@@ -39,7 +39,8 @@ _PROBE = (
     "  conditions:\n"
     "    - condition: template\n"
     f'      value_template: "{TEMPLATE}"\n'
-    "  variables:\n" + "".join(f"    grepcap_{i:05d}: {i}\n" for i in range(CAP_KEYS)) + "  actions:\n"
+    "  variables:\n"
+    '    grepcity: "İstanbul ΟΔΟΣ"\n' + "".join(f"    grepcap_{i:05d}: {i}\n" for i in range(CAP_KEYS)) + "  actions:\n"
     '    - delay: "00:00:01"\n'
 )
 
@@ -158,6 +159,18 @@ class TestRefGrepLive:
             ("[0].alias", "Küche Licht grepprobe"),
         ]
 
+    @pytest.mark.parametrize("term", ["istanbul", "ISTANBUL", "οδοσ"])
+    def test_simple_lowercase_not_full_str_lower(
+        self, companion_url: str, grep_probe: dict[str, str], term: str
+    ) -> None:
+        """Run in the shipped interpreter: ``İ`` lowers to ``i`` and a final capital sigma to U+03C3 (Go's ToLower)."""
+        for regex in ("false", "true"):
+            body = _grep(companion_url, grep_probe, term=term, regex=regex)
+
+            assert [(h["path"], h["matched_value"]) for h in _hits_in(body, "automations.yaml")] == [
+                ("[0].variables.grepcity", "İstanbul ΟΔΟΣ"),
+            ], regex
+
     def test_case_sensitive_opt_in(self, companion_url: str, grep_probe: dict[str, str]) -> None:
         loose = _grep(companion_url, grep_probe, term="küche")
         assert [h["path"] for h in _hits_in(loose, "automations.yaml")] == ["[0].alias", "[0].description"]
@@ -173,11 +186,16 @@ class TestRefGrepLive:
             ("[0].triggers[0].entity_id[1]", "sensor.grepprobe_wp_rl"),
         ]
 
-    def test_invalid_regex_is_400(self, companion_url: str, grep_probe: dict[str, str]) -> None:
+    @pytest.mark.parametrize(
+        "pattern",
+        ["(", "a{4294967296}", "(" * 500 + ")" * 500],
+        ids=["unclosed", "repeat-overflow", "deep-nesting"],
+    )
+    def test_invalid_regex_is_400(self, companion_url: str, grep_probe: dict[str, str], pattern: str) -> None:
         r = requests.get(
-            f"{companion_url}/v1/ref/grep", params={"term": "(", "regex": "true"}, headers=grep_probe, timeout=30
+            f"{companion_url}/v1/ref/grep", params={"term": pattern, "regex": "true"}, headers=grep_probe, timeout=30
         )
-        assert r.status_code == 400
+        assert r.status_code == 400, r.text
         assert r.json()["error"]["message"].startswith("Invalid regex: ")
 
     def test_skipped_secrets_are_named(self, companion_url: str, grep_probe: dict[str, str]) -> None:

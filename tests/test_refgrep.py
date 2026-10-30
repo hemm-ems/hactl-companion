@@ -4,8 +4,10 @@ The cases follow the acceptance criteria in the workspace ``SPEC-global-grep.md`
 and the lane B oracle resolutions it records:
 
 * substring, not whole token, and inside template bodies (AC-1);
-* case-insensitive by ``str.lower()`` — a non-ASCII pin, and the two places
-  ``casefold`` would answer differently (D-49 / AC-2);
+* case-insensitive by the simple per-code-point lowercase mapping (Go's
+  ``strings.ToLower``) — a non-ASCII pin, the two places ``casefold`` would
+  answer differently, and the two where whole-string ``str.lower()`` would
+  (D-49 / AC-2);
 * found even where the raw file text does not hold the term (the reason the
   ``ref scan`` prefilter is not used here);
 * mapping keys searched as their own ``kind`` (resolution 1);
@@ -18,6 +20,7 @@ and the lane B oracle resolutions it records:
 
 from __future__ import annotations
 
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -113,7 +116,7 @@ async def test_hits_follow_the_include_graph_and_name_the_file(
 
 
 # ---------------------------------------------------------------------------
-# Case: str.lower(), not casefold (D-49 / AC-2)
+# Case: simple lowercase, not casefold, not full str.lower() (D-49 / AC-2)
 # ---------------------------------------------------------------------------
 
 
@@ -155,6 +158,57 @@ async def test_lowercase_not_casefold(client: TestClient, auth_headers: dict[str
 
     assert _values(body) == ["STRAẞE 2", "Straße 3"]
     assert "straße".casefold() in "STRASSE 1".casefold(), "premise: casefold WOULD have matched"
+
+
+@pytest.mark.parametrize(
+    ("text", "term"),
+    [
+        # str.lower() maps U+0130 to "i" + U+0307 (SpecialCasing); the simple
+        # mapping, Go's unicode.ToLower and re.IGNORECASE all give plain "i".
+        ("İstanbul", "istanbul"),
+        ("İstanbul", "ISTANBUL"),
+        # str.lower() turns a word-final capital sigma into final "ς"; the simple
+        # mapping is U+03C3 (non-final sigma) in every position.
+        ("ΟΔΟΣ", "οδοσ"),
+        ("ΟΔΟΣ ΑΘΗΝΑΣ", "οδοσ αθηνασ"),
+    ],
+    ids=["dotted-I", "dotted-I-ascii-upper-term", "final-sigma", "final-sigma-mid-string"],
+)
+async def test_literal_uses_the_simple_mapping_and_agrees_with_regex(
+    client: TestClient, auth_headers: dict[str, str], config_dir: Path, text: str, term: str
+) -> None:
+    """The literal matcher lowercases per code point, by the simple mapping — Go's ``strings.ToLower``.
+
+    Whole-string ``str.lower()`` applies SpecialCasing (``İ`` → ``i̇``) and the
+    final-sigma context rule (``Σ`` → ``ς`` at a word end), so it missed both
+    of these while ``regex=true`` and the dashboard half found them.
+    """
+    _only_config(config_dir, f"a: {text}\nb: other\n")
+    assert term.lower() not in text.lower(), "premise: whole-string str.lower() misses this"
+
+    literal = await _grep(client, auth_headers, term=term)
+    pattern = await _grep(client, auth_headers, term=term, regex="true")
+
+    assert _values(literal) == [text]
+    assert _values(pattern) == [text]
+
+
+def test_simple_lower_is_per_code_point_and_one_to_one() -> None:
+    """Every code point lowers to exactly one code point, ``str.lower()``'s own wherever that is one.
+
+    ``U+0130`` is the one code point whose ``str.lower()`` is longer than one
+    (Unicode 15.0 and 16.0 both). Should a Unicode update add another, this
+    fails instead of the override table silently going stale.
+    """
+    multi = {cp for cp in range(sys.maxunicode + 1) if len(chr(cp).lower()) != 1}
+    assert multi == set(refgrep.SIMPLE_LOWER_OVERRIDES)
+    for cp in range(sys.maxunicode + 1):
+        lowered = refgrep.simple_lower(chr(cp))
+        assert len(lowered) == 1, hex(cp)
+        if cp not in multi:
+            assert lowered == chr(cp).lower(), hex(cp)
+    assert refgrep.simple_lower("İ") == "i"
+    assert refgrep.simple_lower("ΟΔΟΣ") == "οδοσ"
 
 
 async def test_found_where_the_raw_text_does_not_hold_the_term(
@@ -272,7 +326,15 @@ async def test_regex_is_not_length_gated(client: TestClient, auth_headers: dict[
         ("(unclosed", "missing ), unterminated subpattern"),
         ("a**", "multiple repeat"),
         ("wp_(?=vl", "missing ), unterminated subpattern"),
+        # `re` raises OverflowError, not re.error, for a repeat count past its
+        # C limit, and RecursionError for deep nesting. RE2 (nesting limit 1000)
+        # compiles 500 groups, so hactl would send this one; a 500 here would be
+        # retried three times by hactl's GET retry.
+        ("a{4294967296}", "the repetition number is too large"),
+        ("a{0,4294967295}", "the repetition number is too large"),
+        ("(" * 500 + ")" * 500, "maximum recursion depth exceeded"),
     ],
+    ids=["unclosed", "multiple-repeat", "lookahead-unclosed", "repeat-overflow", "range-overflow", "deep-nesting"],
 )
 async def test_invalid_regex_is_400_with_the_parser_message(
     client: TestClient, auth_headers: dict[str, str], config_dir: Path, pattern: str, parser_says: str

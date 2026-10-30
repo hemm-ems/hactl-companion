@@ -25,11 +25,20 @@ lane B oracle results):
   ``Küche Licht``) and a non-ASCII term written as a YAML escape. A regex cannot
   use it at all. A full walk measured 2.8 to 3.5 s on a real house against hactl's
   30 s timeout, so the walk always reads everything.
-* **Matching rule (hactl D-49).** Simple Unicode lowercase on both sides
-  (``str.lower()``), never ``casefold()`` — ``casefold`` maps ``ß`` to ``ss`` and
-  has no twin in Go's ``strings.ToLower``, which matches the dashboard half of
-  the same search. ``re.IGNORECASE`` agrees with that on every non-ASCII case the
-  oracle probed (``Küche``/``KÜCHE``, ``ß``/``ẞ``, no ``ß``→``SS``).
+* **Matching rule (hactl D-49).** The *simple* Unicode lowercase mapping on
+  both sides, one code point to one code point (:func:`simple_lower`) — the
+  mapping Go's ``strings.ToLower`` applies on the dashboard half of the same
+  search. Never ``casefold()``, which maps ``ß`` to ``ss`` and has no Go twin.
+  Not whole-string ``str.lower()`` either: that applies SpecialCasing
+  (``İ`` → ``i`` + U+0307) and the final-sigma context rule (``Σ`` → ``ς`` at a
+  word end), so ``istanbul`` missed ``İstanbul`` and ``οδοσ`` missed ``ΟΔΟΣ``
+  while Go and ``re.IGNORECASE`` found both. Measured over every code point:
+  per-code-point ``str.lower()`` with :data:`SIMPLE_LOWER_OVERRIDES` equals Go
+  1.26's ``unicode.ToLower`` exactly on Python 3.12 (both Unicode 15.0.0, the
+  production image). A newer interpreter's Unicode adds mappings only for
+  characters added after 15.0 (Python 3.14, Unicode 16.0: 30 code points,
+  e.g. Garay). ``re.IGNORECASE`` agrees on every non-ASCII case the oracle
+  probed (``Küche``/``KÜCHE``, ``ß``/``ẞ``, no ``ß``→``SS``).
 * **A hit cap with exact counts.** :data:`HIT_CAP` rows at most, ``truncated``
   and ``total`` always stated, per-file counts computed before the cap.
 
@@ -45,6 +54,7 @@ literal path is linear and needs none of this.
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import re
 import sys
@@ -74,6 +84,32 @@ REGEX_DEADLINE_S = 5.0
 
 KIND_KEY = "key"
 KIND_VALUE = "value"
+
+
+#: Code points whose ``str.lower()`` is longer than one code point, mapped to
+#: their simple (UnicodeData.txt) lowercase instead. U+0130 is the only one in
+#: Unicode 15.0 and 16.0; ``tests/test_refgrep.py`` fails if that changes.
+SIMPLE_LOWER_OVERRIDES: dict[int, str] = {0x0130: "i"}
+
+
+@functools.cache
+def _simple_lower_table() -> dict[int, str]:
+    table: dict[int, str] = {}
+    for cp in range(sys.maxunicode + 1):
+        lowered = chr(cp).lower()
+        if lowered != chr(cp):
+            table[cp] = lowered
+    table.update(SIMPLE_LOWER_OVERRIDES)
+    return table
+
+
+def simple_lower(text: str) -> str:
+    """Lowercase ``text`` one code point at a time by the simple mapping (hactl D-49).
+
+    A per-character ``str.translate``, so no context rule (final sigma) applies
+    and no character grows (``İ``), unlike whole-string ``str.lower()``.
+    """
+    return text.translate(_simple_lower_table())
 
 
 class GrepRequestError(ValueError):
@@ -142,7 +178,12 @@ def validate_term(term: str, *, regex: bool, case_sensitive: bool) -> re.Pattern
         warnings.simplefilter("error")
         try:
             return re.compile(term, flags)
-        except re.error as exc:
+        # `re` reports two kinds of uncompilable pattern outside `re.error`:
+        # OverflowError for a repeat count past its C limit (`a{4294967296}`)
+        # and RecursionError for deep group nesting (500 levels, which RE2
+        # accepts, so hactl sends it). Uncaught they are a 500, and hactl
+        # retries a GET on any 5xx.
+        except (re.error, OverflowError, RecursionError) as exc:
             raise GrepRequestError(f"Invalid regex: {exc}") from exc
         except Warning as exc:
             raise GrepRequestError(f"Ambiguous regex: {exc}") from exc
@@ -187,11 +228,11 @@ def collect_candidates(
 
 
 def literal_matches(candidates: list[_Candidate], term: str, *, case_sensitive: bool) -> list[_Candidate]:
-    """Substring match under hactl D-49: ``str.lower()`` on both sides unless case-sensitive."""
+    """Substring match under hactl D-49: :func:`simple_lower` on both sides unless case-sensitive."""
     if case_sensitive:
         return [c for c in candidates if term in c.text]
-    needle = term.lower()
-    return [c for c in candidates if needle in c.text.lower()]
+    needle = simple_lower(term)
+    return [c for c in candidates if needle in simple_lower(c.text)]
 
 
 # Runs in a separate, isolated (-I) interpreter: standard library only, nothing

@@ -501,19 +501,21 @@ paths:
         and every file it `!include`s, the same walk as `/v1/ref/scan`. Unlike `ref
         scan` this is substring, not whole token, and it searches mapping keys as
         well as string leaves. There is no write counterpart; a rename is `/v1/ref/replace`,
-        on an exact id. Default: `term` is a literal substring, compared after simple
-        Unicode lowercasing of both sides (`str.lower()`, not case folding: `Küche`
-        matches `KÜCHE`, `straße` does not match `STRASSE`). `case_sensitive=true`
-        compares as written. `regex=true` reads `term` as a Python `re` pattern searched
-        anywhere in the string, case-insensitive (`re.IGNORECASE`) unless `case_sensitive=true`.
-        The leaf is matched as parsed, so a block scalar keeps its trailing newline
-        and a bare `$` also matches before it. Refused with 400: a missing, empty
-        or whitespace-only `term`; a literal `term` shorter than 2 characters (counted
-        in code points: a 1-character term matches most of any real config); a pattern
-        that does not compile, or that Python warns will change meaning (`[[:alpha:]]`),
-        with the parser's message; a pattern that does not finish within the evaluation
-        deadline (catastrophic backtracking). Non-string scalars (numbers, booleans)
-        and tagged values (`!secret`, `!input`) are not searched."
+        on an exact id. Default: `term` is a literal substring, compared after lowercasing
+        both sides one code point at a time by the simple Unicode mapping, the one
+        Go's `strings.ToLower` applies (not case folding: `Küche` matches `KÜCHE`,
+        `straße` does not match `STRASSE`; not full `str.lower()`: `istanbul` matches
+        `İstanbul` and `οδοσ` matches `ΟΔΟΣ`). `case_sensitive=true` compares as written.
+        `regex=true` reads `term` as a Python `re` pattern searched anywhere in the
+        string, case-insensitive (`re.IGNORECASE`) unless `case_sensitive=true`. The
+        leaf is matched as parsed, so a block scalar keeps its trailing newline and
+        a bare `$` also matches before it. Refused with 400: a missing, empty or whitespace-only
+        `term`; a literal `term` shorter than 2 characters (counted in code points:
+        a 1-character term matches most of any real config); a pattern that does not
+        compile, or that Python warns will change meaning (`[[:alpha:]]`), with the
+        parser's message; a pattern that does not finish within the evaluation deadline
+        (catastrophic backtracking). Non-string scalars (numbers, booleans) and tagged
+        values (`!secret`, `!input`) are not searched."
       parameters:
       - name: term
         in: query
