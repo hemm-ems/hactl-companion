@@ -126,6 +126,99 @@ def _skipped_schema() -> dict[str, Any]:
     }
 
 
+# `ref grep` is the substring/regex sibling of `ref scan` (hactl #115, D-48..D-50
+# in hactl's docs/decisions.md). Its own route rather than a mode on `ref scan`,
+# so no substring matcher is ever one parameter away from `ref replace`'s write.
+# The hit cap and `truncated`/`total` come from the oracle measurements in the
+# workspace's SPEC-global-grep.md (resolution 1): 1,000 rows never truncates a
+# word search on the measured house (heaviest config half 773 rows) while it
+# stops a 2-letter flood (`on`: 3,681). `sources` is counted before the cap, so
+# a truncated answer still says exactly how much there was and where.
+_REF_GREP_HIT_CAP_DESC = (
+    "At most 1000 hits, ordered by `location`, then `path`, then `kind` (`key` before `value`). "
+    "When there are more, `truncated` is true and the rest are not sent; `total` and `sources` "
+    "still count every hit."
+)
+_REF_GREP_SCHEMA = {
+    "type": "object",
+    "required": ["term", "regex", "case_sensitive", "hits", "total", "truncated", "sources"],
+    "properties": {
+        "term": {"type": "string", "description": "The term exactly as received."},
+        "regex": {"type": "boolean", "description": "Whether `term` was matched as a regular expression."},
+        "case_sensitive": {"type": "boolean", "description": "Whether matching was case-sensitive."},
+        "hits": {
+            "type": "array",
+            "description": _REF_GREP_HIT_CAP_DESC,
+            "items": {
+                "type": "object",
+                "required": ["location", "path", "key", "kind", "matched_value"],
+                "properties": {
+                    "location": {"type": "string", "description": "Config-relative file, e.g. `automations.yaml`."},
+                    "path": {
+                        "type": "string",
+                        "description": (
+                            "Path within that file in the `ref scan` form, e.g. `[3].action[0].data.message`. "
+                            "For a `key` hit it ends at the matching key."
+                        ),
+                    },
+                    "key": {
+                        "type": "string",
+                        "description": (
+                            "The last mapping key on `path` (`alias`, `value_template`, `entity_id`, ...), so a "
+                            "caller can tell prose from ids from template bodies. Empty for a value that sits "
+                            "only under list indices."
+                        ),
+                    },
+                    "kind": {
+                        "type": "string",
+                        "enum": ["key", "value"],
+                        "description": (
+                            "`value`: a string leaf contains the term. `key`: a mapping key contains it. Keys "
+                            "are where scripts and YAML helpers are defined (`licht_an:` under `script:`), "
+                            "which no leaf holds."
+                        ),
+                    },
+                    "matched_value": {
+                        "type": "string",
+                        "description": "The whole string that matched: the leaf's value, or the key.",
+                    },
+                },
+            },
+        },
+        "total": {"type": "integer", "description": "Every hit, including any beyond the cap."},
+        "truncated": {"type": "boolean", "description": "True when `hits` holds fewer than `total`."},
+        "sources": {
+            "type": "array",
+            "description": "One row per file with at least one hit, counted before the cap, ordered by `location`.",
+            "items": {
+                "type": "object",
+                "required": ["location", "key_hits", "value_hits"],
+                "properties": {
+                    "location": {"type": "string"},
+                    "key_hits": {"type": "integer"},
+                    "value_hits": {"type": "integer"},
+                },
+            },
+        },
+        "skipped": _skipped_schema(),
+    },
+}
+_REF_GREP_DESC = (
+    "Read-only search for a term across the config file graph: `configuration.yaml` and every file it "
+    "`!include`s, the same walk as `/v1/ref/scan`. Unlike `ref scan` this is substring, not whole token, "
+    "and it searches mapping keys as well as string leaves. There is no write counterpart; a rename is "
+    "`/v1/ref/replace`, on an exact id. "
+    "Default: `term` is a literal substring, compared after simple Unicode lowercasing of both sides "
+    "(`str.lower()`, not case folding: `Küche` matches `KÜCHE`, `straße` does not match `STRASSE`). "
+    "`case_sensitive=true` compares as written. `regex=true` reads `term` as a Python `re` pattern searched "
+    "anywhere in the string, case-insensitive (`re.IGNORECASE`) unless `case_sensitive=true`. The leaf is "
+    "matched as parsed, so a block scalar keeps its trailing newline and a bare `$` also matches before it. "
+    "Refused with 400: a missing, empty or whitespace-only `term`; a literal `term` shorter than 2 "
+    "characters (counted in code points: a 1-character term matches most of any real config); a pattern "
+    "that does not compile, or that Python warns will change meaning (`[[:alpha:]]`), with the parser's "
+    "message; a pattern that does not finish within the evaluation deadline (catastrophic backtracking). "
+    "Non-string scalars (numbers, booleans) and tagged values (`!secret`, `!input`) are not searched."
+)
 _REF_SCAN_SCHEMA = {
     "type": "object",
     "required": ["target", "hits"],
@@ -739,6 +832,35 @@ ENDPOINT_META: dict[tuple[str, str], dict[str, object]] = {
             {"name": "target", "in": "query", "required": True, "schema": {"type": "string"}},
         ],
         "response_schema": _REF_SCAN_SCHEMA,
+    },
+    ("GET", "/v1/ref/grep"): {
+        "summary": "Search every config file for a substring or pattern (read-only)",
+        "description": _REF_GREP_DESC,
+        "tags": ["ref"],
+        "parameters": [
+            {
+                "name": "term",
+                "in": "query",
+                "required": True,
+                "schema": {"type": "string"},
+                "description": "Substring, or a pattern with `regex=true`. A literal needs at least 2 characters.",
+            },
+            {
+                "name": "regex",
+                "in": "query",
+                "required": False,
+                "schema": {"type": "boolean", "default": False},
+                "description": "Read `term` as a Python `re` pattern.",
+            },
+            {
+                "name": "case_sensitive",
+                "in": "query",
+                "required": False,
+                "schema": {"type": "boolean", "default": False},
+                "description": "Compare as written instead of after lowercasing.",
+            },
+        ],
+        "response_schema": _REF_GREP_SCHEMA,
     },
     ("GET", "/v1/ref/entities"): {
         "summary": "Enumerate every entity_id-shaped reference across config files",
