@@ -349,6 +349,15 @@ byte exactly as it was. Comments, blank lines, line folding, indentation and
 quote style elsewhere in the file survive verbatim; only the touched entry gets
 tool-normalized formatting.
 
+`POST /v1/ref/replace` is held to the same rule one level down. It rewrites
+scalars at any depth in every file of the `!include` graph, so the unit it may
+disturb is the **scalar**, not the entry. Only the matching token inside each
+matching scalar's own source text changes. The scalar's quotes, block indicator,
+escapes and folding are not re-emitted, and every other byte of every file is
+left alone. This is the path `hactl ent rename --confirm` takes for its
+reference rewrite. Until #88 it re-dumped every file it touched, the same defect
+as P1 #4 on the one write route the first fix did not reach.
+
 The defect this closes was not a misunderstood feature. All four route families
 wrote their file back with a whole-document `yaml.dump(data, f)`, so one
 confirmed automation write came back having reformatted ~34 unrelated real
@@ -366,10 +375,19 @@ back to the whole-file dump. A fallback is never silent: the response carries
 caller keeping its config in git is told the difference between "your entry
 changed" and "the file was rewritten".
 
+`surgical.splice_leaves` does the same for `ref replace`. It walks each
+rewritten leaf's path through the composed node tree to its `ScalarNode`. A
+scalar's marks are exact, unlike a collection's. It applies the substitution to
+the raw source slice and verifies the whole spliced file the same way. It also
+refuses when the raw slice and the parsed value disagree on how many tokens
+they hold, as with a token split by an escaped line continuation or an anchor
+name that matches. A file it cannot verify is re-serialized whole, and each of
+that file's `changes[]` carries `reformatted: true`, in a dry run as well as on
+apply.
+
 A route that rewrites a whole file by nature (`PUT /v1/config/file`, whose
-caller supplies the content; `POST /v1/ref/replace`, which rewrites scalars
-scattered across a whole `!include` graph — leaf-granular splicing is #88)
-declares a `whole_file_reason` instead. The canary enforces the choice.
+caller supplies the content) declares a `whole_file_reason` instead. The canary
+enforces the choice.
 
 - Enforced by: `tests/test_invariants.py::test_single_entry_write_leaves_every_other_byte_alone`
   (sweeps every route declaring `surgical`, and carries an anti-vacuity guard
@@ -379,7 +397,12 @@ declares a `whole_file_reason` instead. The canary enforces the choice.
   `::test_every_file_write_declares_a_formatting_stance` (canary);
   `tests/test_surgical.py` (byte-level behaviour: comments between entries,
   block scalars, unicode, CRLF, indented sequences, and each fallback still
-  producing correct content); `tests/integration/test_live.py::TestSurgicalWrites`
+  producing correct content); `tests/test_refscan_splice.py` (the same for
+  `ref replace`: a hand-maintained multi-entry file, several files across an
+  `!include` graph, quoted/literal/folded/plain-multiline scalars, CRLF + BOM,
+  aliases, merge keys, and the split-token and unquotable-replacement
+  fallbacks); `tests/integration/test_live.py::TestRefReplace::test_apply_changes_only_the_token_lines_and_ha_still_loads_the_file`;
+  `tests/integration/test_live.py::TestSurgicalWrites`
   (a real HA loads the spliced file, and the same edit through HA's own
   `/api/config/automation/config/<id>` is shown re-serializing the whole file —
   the boundary of what this service can fix)

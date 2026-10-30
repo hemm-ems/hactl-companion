@@ -166,6 +166,19 @@ _REF_ENTITIES_SCHEMA = {
         "skipped": _skipped_schema(),
     },
 }
+# `ref replace` rewrites each matching scalar in place, inside the bytes the
+# scalar already occupies. When a file holds something that splice cannot carry
+# (the token split by an escaped line continuation, a replacement the scalar's
+# quoting cannot hold, an anchor name that matches the token) that file is
+# re-serialized whole instead. Per change rather than per response because the
+# answer is per file and a rename touches several; every change in one file
+# carries the same answer. Same "present only when it matters" shape as the
+# single-entry write routes' `reformatted`.
+_REF_REFORMATTED_DESC = (
+    "True when the file this change lives in was re-serialized whole instead of having only the "
+    "matching scalars rewritten in place, so formatting elsewhere in that file may have changed. "
+    "In a dry run, says whether applying would do so. Absent otherwise."
+)
 _REF_REPLACE_SCHEMA = {
     "type": "object",
     "required": ["status", "changes"],
@@ -181,6 +194,7 @@ _REF_REPLACE_SCHEMA = {
                     "path": {"type": "string"},
                     "before": {"type": "string"},
                     "after": {"type": "string"},
+                    "reformatted": {"type": "boolean", "description": _REF_REFORMATTED_DESC},
                 },
             },
         },
@@ -747,6 +761,13 @@ ENDPOINT_META: dict[tuple[str, str], dict[str, object]] = {
     },
     ("POST", "/v1/ref/replace"): {
         "summary": "Rewrite a literal reference across config files (dry-run or apply)",
+        "description": (
+            "Every whole-token occurrence of `old` is rewritten to `new` in the file it lives in, across "
+            "the `!include` graph. Only the bytes of each matching scalar change: its quotes, block style, "
+            "escapes and every other line of the file stay exactly as they were. The rewritten file is "
+            "re-parsed and compared against the intended result before it is written; where they disagree "
+            "the file is re-serialized whole instead, and each of its changes carries `reformatted: true`."
+        ),
         "tags": ["ref"],
         "requestBody": _REF_REPLACE_BODY,
         "response_schema": _REF_REPLACE_SCHEMA,
