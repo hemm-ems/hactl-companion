@@ -192,6 +192,19 @@ def _seed_ref_skipped(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None
     )
 
 
+def _seed_ref_split_token(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The target split by an escaped line continuation inside double quotes.
+
+    ``changes[].reformatted`` exists only on the branch where ``ref replace``
+    cannot rewrite a scalar in place and re-serializes its file whole. This
+    reaches that branch with a real input rather than a patched splice. The raw
+    bytes hold ``sensor.go``, a backslash, a line break and ``ne``. The value
+    joins them back into ``sensor.gone``, so the token is in the value and not
+    in the text.
+    """
+    (config_dir / "configuration.yaml").write_text('sensor:\n  value: "sensor.go\\\n    ne"\n', encoding="utf-8")
+
+
 def _seed_storage_helpers(config_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A helper created in HA's UI — the only kind a normally-configured instance has."""
     seed_storage_helpers(config_dir, ["input_boolean"])
@@ -487,6 +500,24 @@ RESPONSE_PROBES: dict[tuple[str, str], tuple[Probe, ...]] = {
             setup=_seed_ref_skipped,
             json_body={"old": "sensor.gone", "new": "sensor.new", "dry_run": True},
             expect={"skipped": SKIPPED_PROBE_EXPECT},
+        ),
+        # `reformatted` is on a change only when its file cannot be spliced.
+        Probe(
+            "/v1/ref/replace",
+            label="split-token",
+            setup=_seed_ref_split_token,
+            json_body={"old": "sensor.gone", "new": "sensor.new", "dry_run": True},
+            expect={
+                "changes": [
+                    {
+                        "location": "configuration.yaml",
+                        "path": "sensor.value",
+                        "before": "sensor.gone",
+                        "after": "sensor.new",
+                        "reformatted": True,
+                    }
+                ]
+            },
         ),
     ),
     ("GET", "/v1/config/templates"): (Probe("/v1/config/templates"),),

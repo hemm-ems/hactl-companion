@@ -35,9 +35,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
+from ruamel.yaml import YAML
 from ruamel.yaml.scalarstring import ScalarString
 
 from companion.backups import make_backup
+from companion.surgical import splice_leaves, write_fields
 from companion.yaml_resolver import (
     INCLUDE_TAGS,
     CircularIncludeError,
@@ -441,7 +443,7 @@ def replace_yaml_literal(
     *,
     dry_run: bool,
     skipped: SkipLog | None = None,
-) -> list[dict[str, str]]:
+) -> list[dict[str, Any]]:
     """Rewrite every whole-token occurrence of ``target`` to ``replacement``, per file.
 
     Matches the same boundary-aware notion of "occurrence" as
@@ -452,13 +454,22 @@ def replace_yaml_literal(
 
     Walks the exact same ``!include`` graph as :func:`scan_yaml_for_literal` and
     rewrites the literal *in the file it actually lives in*, so a reference in
-    ``automations.yaml`` is changed there and not in a resolved blob. Each file is
-    loaded round-trip (``resolve=False``) and dumped back through the resolver, so
-    comments, formatting and quote style of untouched nodes survive.
+    ``automations.yaml`` is changed there and not in a resolved blob.
 
-    Returns ``[{location, path, before, after}]`` for every rewritten leaf. When
-    ``dry_run`` is true the report is identical but no file is written. Each
-    rewritten file is backed up (see :mod:`companion.backups`) before it is saved.
+    Only the matching scalars' own bytes change (C-14). Each file is loaded
+    round-trip (``resolve=False``) to find and rewrite the leaves. Then
+    :func:`companion.surgical.splice_leaves` applies the same substitution to
+    each leaf's raw source text and checks that the result parses back to the
+    rewritten tree. A file it cannot verify is dumped whole through
+    :meth:`YamlResolver.save`, which keeps comments and quote style but
+    re-indents and re-folds the whole file. Each of that file's changes then
+    carries ``reformatted: True``, so the caller is told.
+
+    Returns ``[{location, path, before, after}]`` for every rewritten leaf, plus
+    ``reformatted`` on those whose file was re-serialized. When ``dry_run`` is
+    true the report is identical, ``reformatted`` included, but no file is
+    written. Each rewritten file is backed up (see :mod:`companion.backups`)
+    before it is saved.
 
     A file this walk cannot read is never written — and, with a :class:`SkipLog`
     supplied, is named in it. This is the sharp end of the whole mechanism: a
@@ -469,7 +480,10 @@ def replace_yaml_literal(
     base_path = Path(base).resolve()
     resolver = YamlResolver(base_path)
     pattern = _target_pattern(target)
-    changes: list[dict[str, str]] = []
+    splice_yaml = YAML()
+    splice_yaml.preserve_quotes = True
+    changes: list[dict[str, Any]] = []
+    writes: list[tuple[str, Path, Any, str | None]] = []
     seen: set[str] = set()
     queue: deque[str] = deque([entry_file])
 
@@ -491,6 +505,15 @@ def replace_yaml_literal(
 
         match_paths = _replace_tree(data, pattern, replacement)
         if match_paths:
+            # Computed in a dry run too: it is deterministic over the file's
+            # bytes, so the preview reports what the confirmed run will do.
+            spliced = splice_leaves(
+                resolver.read_source(rel),
+                data,
+                match_paths,
+                lambda raw: pattern.subn(lambda _m: replacement, raw),
+                splice_yaml,
+            )
             for match_path in match_paths:
                 changes.append(
                     {
@@ -498,15 +521,25 @@ def replace_yaml_literal(
                         "path": render_path(match_path),
                         "before": target,
                         "after": replacement,
+                        **write_fields(spliced is not None),
                     }
                 )
-            if not dry_run:
-                # Back up the prior content before overwriting (C-5: every applied
-                # write gets a backup, same as the PUT/POST config routes).
-                make_backup(abs_path, base=base_path)
-                resolver.save(rel, data)
+            writes.append((rel, abs_path, data, spliced))
 
         _enqueue_includes(data, abs_path, base_path, queue, skipped)
+
+    # Every file is read, rewritten and verified above before any is written
+    # here, so a failure while working out one file's new content cannot leave
+    # the files before it in the walk already renamed.
+    if not dry_run:
+        for rel, abs_path, data, spliced in writes:
+            # Back up the prior content before overwriting (C-5: every applied
+            # write gets a backup, same as the PUT/POST config routes).
+            make_backup(abs_path, base=base_path)
+            if spliced is None:
+                resolver.save(rel, data)
+            else:
+                resolver.save_source(rel, spliced)
 
     changes.sort(key=lambda c: (c["location"], c["path"]))
     return changes

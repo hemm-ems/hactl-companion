@@ -86,7 +86,16 @@ async def test_spoofed_ingress_header_rejected(client: TestClient, method: str, 
 
 
 def _seed_ref_target(config_dir: Path) -> None:
-    (config_dir / "configuration.yaml").write_text("sensor:\n  value: sensor.gone\n", encoding="utf-8")
+    """A reference to rewrite, beside a block a whole-file dump would re-indent.
+
+    The four-space block is what makes the C-14 sweep able to tell the two
+    writers apart on this route: ruamel re-indents it to two spaces, a splice
+    leaves it alone.
+    """
+    (config_dir / "configuration.yaml").write_text(
+        "probe_block:\n    name: Probe home\n    unit_system: metric\nsensor:\n  value: sensor.gone\n",
+        encoding="utf-8",
+    )
 
 
 # Every file-mutating endpoint, with a request that provably reaches its write
@@ -195,10 +204,7 @@ FILE_WRITES: dict[tuple[str, str], dict[str, Any]] = {
         "no_wiring_reason": "removes an entry; a user must be able to clean up a file HA ignores",
     },
     ("POST", "/v1/ref/replace"): {
-        "whole_file_reason": (
-            "rewrites scalars scattered across a whole !include graph, not one entry — "
-            "leaf-granular splicing is hactl-companion #88"
-        ),
+        "surgical": "configuration.yaml",
         "url": "/v1/ref/replace",
         "json": {"old": "sensor.gone", "new": "sensor.new"},
         "gated": True,
@@ -506,6 +512,8 @@ async def test_single_entry_write_leaves_every_other_byte_alone(
     ruamel's canonical form would let this test pass against either writer.
     """
     probe = SURGICAL[(method, path)]
+    if seed := probe.get("seed"):
+        seed(config_dir)
     target = config_dir / probe["surgical"]
     before = _read(target)
 
@@ -513,7 +521,9 @@ async def test_single_entry_write_leaves_every_other_byte_alone(
     resp = await client.request(method, url, **_request_kwargs(probe, auth_headers, apply=True))
     assert resp.status < 400, await resp.text()
     body = await resp.json()
-    assert "reformatted" not in body, (
+    # `ref replace` reports a fallback per change, since it can touch several files.
+    flagged = [body, *body.get("changes", [])]
+    assert not any("reformatted" in part for part in flagged), (
         f"{method} {path}: fell back to a whole-file re-serialization on a plain fixture: {body}"
     )
 

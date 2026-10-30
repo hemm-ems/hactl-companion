@@ -220,3 +220,31 @@ async def test_ref_replace_missing_old_is_400(
 async def test_ref_replace_requires_auth(client: TestClient, config_dir: Path) -> None:
     resp = await client.post("/v1/ref/replace", json={"old": "sensor.gone", "new": "sensor.new"})
     assert resp.status == 401
+
+
+async def test_ref_replace_with_an_unconstructible_replacement_is_200_and_applies_everywhere(
+    client: TestClient, auth_headers: dict[str, str], config_dir: Path
+) -> None:
+    """``2020-13-45`` spliced into a plain scalar is a malformed timestamp.
+
+    Verifying that splice must not turn into a 500, in the preview or the
+    apply, and must not leave the rename applied to some files only.
+    """
+    old = "binary_sensor.door_old"
+    (config_dir / "configuration.yaml").write_text(
+        f"automation: !include automations.yaml\nsensor:\n  value: '{old}'\n", encoding="utf-8"
+    )
+    (config_dir / "automations.yaml").write_text(
+        f"- id: a\n  trigger:\n    - platform: state\n      entity_id: {old}\n  action: []\n", encoding="utf-8"
+    )
+
+    for dry_run in (True, False):
+        resp = await client.post(
+            "/v1/ref/replace", json={"old": old, "new": "2020-13-45", "dry_run": dry_run}, headers=auth_headers
+        )
+        assert resp.status == 200, await resp.text()
+        reformatted = {c["location"]: c.get("reformatted") for c in (await resp.json())["changes"]}
+        assert reformatted == {"automations.yaml": True, "configuration.yaml": None}
+
+    assert old not in (config_dir / "configuration.yaml").read_text(encoding="utf-8")
+    assert old not in (config_dir / "automations.yaml").read_text(encoding="utf-8")
