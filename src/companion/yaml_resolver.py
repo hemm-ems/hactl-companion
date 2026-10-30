@@ -419,11 +419,40 @@ class YamlResolver:
     def save(self, rel_path: str, data: Any) -> None:
         """Round-trip dump ``data`` back to ``rel_path``, within base only.
 
-        Uses the resolver's own YAML instance (``preserve_quotes=True``) so the
-        formatting, comments and quote style of untouched nodes survive. Path is
-        re-validated through ``_check_path``, so writes outside base or to a
-        denied file (``secrets.yaml``) raise rather than escaping the config dir.
+        This is a **whole-document re-serialization**. The resolver's own YAML
+        instance (``preserve_quotes=True``) keeps comments and the quote style of
+        quoted scalars. It does *not* keep indentation or line folding. Every
+        collection is re-indented to ruamel's defaults and every long scalar is
+        re-folded at ruamel's own width, all through the file, wherever the
+        change was. The result is semantically the same file and visibly a
+        different one. So a writer that changes part of a file should splice
+        (:mod:`companion.surgical`) and keep this as the fallback.
+
+        Path is re-validated through ``_check_path``, so writes outside base or
+        to a denied file (``secrets.yaml``) raise rather than escaping the config
+        dir.
         """
         target = self._check_path(self._base / rel_path)
         with target.open("w", encoding="utf-8") as stream:
             self._yaml.dump(data, stream)
+
+    def read_source(self, rel_path: str) -> str:
+        """The text of ``rel_path`` exactly as it is on disk, within base only.
+
+        It is read with ``newline=""``: universal-newline translation would turn
+        a CRLF file into LF, and a splice built on that text would rewrite every
+        line ending in the file.
+        """
+        target = self._check_path(self._base / rel_path)
+        with target.open(encoding="utf-8", newline="") as stream:
+            return stream.read()
+
+    def save_source(self, rel_path: str, text: str) -> None:
+        """Write ``text`` to ``rel_path`` byte for byte, within base only.
+
+        The counterpart to :meth:`read_source`. No newline translation, so a
+        spliced file keeps the line endings it was read with.
+        """
+        target = self._check_path(self._base / rel_path)
+        with target.open("w", encoding="utf-8", newline="") as stream:
+            stream.write(text)

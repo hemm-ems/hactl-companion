@@ -68,7 +68,7 @@ Beyond the derived modules above, by concern:
 |---|---|---|
 | Routes & CRUD | `test_automations` `test_scripts` `test_templates` `test_helpers` `test_config` `test_config_write` `test_ha` `test_health` `test_status` `test_root` `test_logs` | 146 |
 | Helper storage & wiring | `test_helpers_storage` `test_helpers_wiring` `test_wiring_route` | 55 |
-| Surgical writes | `test_surgical` | 26 |
+| Surgical writes | `test_surgical` `test_refscan_splice` | 35 |
 | WireGuard | `test_wireguard` `test_wg_dns` `test_wg_monitor` `test_wg_supervisor` | 112 |
 | Reference scanning | `test_refscan` `test_refscan_routes` `test_refscan_skipped` `test_related` | 82 |
 | Plumbing | `test_resolver` `test_core_api` `test_cli` `test_reload_error` `test_backups` `test_main` | 58 |
@@ -114,7 +114,7 @@ long-lived token over WebSocket. Getting a token is itself the proof that HA is 
 
 | Module | Tests | Covers |
 |---|---|---|
-| `test_live.py` | 55 | status, root, health, config read/write, `ref replace`, HA reload, automation/helper/script/template CRUD, startup + access logs, include wiring |
+| `test_live.py` | 56 | status, root, health, config read/write, `ref replace`, HA reload, automation/helper/script/template CRUD, startup + access logs, include wiring |
 | `test_auth.py` | 5 | auth on a real container: no/wrong token → 401, health exempt, and a **client-supplied `X-Ingress-Path` does not bypass auth** — the 2026-07 spoof, pinned |
 | `test_related.py` | 2 | the related-entity graph, reconciled against HA's own `search/related` (C-9) |
 | `test_include_dir_oracle.py` | 2 | `!include_dir_*` resolves to exactly the files HA loads, merged the way HA merges them |

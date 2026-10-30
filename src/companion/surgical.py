@@ -42,10 +42,19 @@ carry, such as an anchor whose definition lives in the entry being replaced —
 the whole-file dump runs instead. The surgical path is therefore never a
 correctness risk over the status quo; the worst case is the behaviour this
 module exists to replace, and :func:`write_fields` says so on the wire.
+
+The same argument, one level down
+---------------------------------
+``ref replace`` rewrites scalars at any depth, in every file of the
+``!include`` graph, and so has no single entry to scope a write to.
+:func:`splice_leaves` does the same work for it at scalar granularity. It
+rewrites each matching scalar's own source text in place, then verifies and
+falls back exactly as above.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from io import StringIO
 from pathlib import Path
@@ -313,6 +322,134 @@ def _reindent(block: str, indent: str, eol: str) -> str:
     if eol != "\n":
         out = [line[:-1] + eol if line.endswith("\n") else line for line in out]
     return "".join(out)
+
+
+# ---------------------------------------------------------------------------
+# leaf splice
+# ---------------------------------------------------------------------------
+
+#: Rewrites one piece of scalar text and says how many substitutions it made,
+#: the shape of :meth:`re.Pattern.subn`.
+Rewrite = Callable[[str], tuple[str, int]]
+
+
+def splice_leaves(source: str, data: Any, paths: list[list[Any]], rewrite: Rewrite, yaml: YAML) -> str | None:
+    """``source`` with only the scalars at ``paths`` rewritten in place, or None.
+
+    The entry splice above works on whole top-level entries. This one works on
+    single scalars at any depth, for ``ref replace``. That route rewrites
+    entity ids scattered through a whole ``!include`` graph, and an entry span
+    does not help it. One level down the boundary problem goes away. A
+    composed ``ScalarNode``'s marks are exact: the span ends where the scalar
+    ends, so a comment after it is never inside it. That is not true of a
+    collection's span (see the module docstring).
+
+    ``data`` is the tree after the route mutated it, and ``paths`` are the
+    leaves it changed (what :func:`companion.refscan._replace_tree` returns).
+    Each path is walked through the *composed* node tree to its scalar.
+    ``rewrite`` is applied to the scalar's **raw source text**, not to its
+    parsed value, and the result is put back where that text was. The quotes,
+    block indicator, escapes and line folding of the scalar are never
+    re-emitted, so they cannot change.
+
+    Raw text and parsed value differ, and that is the risk here. An escaped
+    line continuation inside double quotes can split a token in the source that
+    the value joins back up. An escape sequence can sit next to the token, and a
+    replacement can hold a quote the scalar style cannot carry. None of these is
+    special-cased. Each one either makes a different number of substitutions in
+    the raw text than in the value, or produces a file that parses to something
+    other than ``data``. Either way None is returned and the caller falls back to
+    the whole-file dump. That is the same safety argument :func:`save_entry`
+    uses: the splice can only change formatting, never content.
+    """
+    try:
+        root = yaml.compose(StringIO(source))
+    except YAMLError:
+        return None
+    if root is None:
+        return None
+
+    # Keyed by span: an alias resolves to the very node it names, so two paths
+    # can arrive at one scalar. Its text is rewritten once and both positions
+    # read the new value on re-parse, which is what ``data`` says.
+    #
+    # A path that leads nowhere in the composed tree is a key the mapping only
+    # has through a merge (``<<: *base``). Its bytes are the merged-in scalar,
+    # which its own path reaches, so there is nothing more to rewrite. If that
+    # reasoning is wrong for some input, the re-parse below says so.
+    spans: dict[tuple[int, int], Any] = {}
+    for path in paths:
+        node = _node_at(root, path)
+        if node is None:
+            continue
+        if node.id != "scalar":
+            return None
+        spans[(node.start_mark.index, node.end_mark.index)] = node
+    if not spans:
+        return None
+
+    pieces: list[str] = []
+    cursor = 0
+    for (start, end), node in sorted(spans.items()):
+        if start < cursor:
+            return None
+        body = _scalar_body_start(source, start, end, node)
+        raw = source[body:end]
+        rewritten, made = rewrite(raw)
+        # As many substitutions in the bytes as in the value, or the two
+        # disagree about where the token is (a split token, an escape glued to
+        # it, an anchor name that happens to match). Re-parsing could pass some
+        # of these, for example a renamed anchor nothing aliases. It would
+        # still have rewritten bytes that are not the scalar's content.
+        if made == 0 or made != rewrite(str(node.value))[1]:
+            return None
+        pieces.append(source[cursor:body])
+        pieces.append(rewritten)
+        cursor = end
+    pieces.append(source[cursor:])
+    spliced = "".join(pieces)
+    return spliced if _parses_back_to(spliced, data, yaml) else None
+
+
+def _node_at(root: Any, path: list[Any]) -> Any:
+    """The composed node at ``path`` (keys and indices of the loaded tree), or None.
+
+    A mapping segment matches a key node by its text, and only when exactly one
+    key in that mapping has that text (ruamel refuses duplicate keys on load, so
+    two is not expected). A key reached only through a merge (``<<: *base``) is
+    not among the mapping's own pairs, so it finds nothing.
+    """
+    node = root
+    for segment in path:
+        if node.id == "sequence":
+            if not isinstance(segment, int) or not 0 <= segment < len(node.value):
+                return None
+            node = node.value[segment]
+        elif node.id == "mapping":
+            text = str(segment)
+            found = [value for key, value in node.value if key.id == "scalar" and key.value == text]
+            if len(found) != 1:
+                return None
+            node = found[0]
+        else:
+            return None
+    return node
+
+
+def _scalar_body_start(source: str, start: int, end: int, node: Any) -> int:
+    """Where a scalar's content begins inside its span.
+
+    A block scalar's span starts at its ``|``/``>`` indicator. The rest of that
+    header line is not content, and can hold a comment, which must not be
+    rewritten. So for those styles the content starts on the next line. Any
+    other style is content from its first character. (The anchor or tag before a
+    scalar can also sit inside the span; the substitution count check above
+    covers that case.)
+    """
+    if node.style in ("|", ">"):
+        newline = source.find("\n", start, end)
+        return end if newline < 0 else newline + 1
+    return start
 
 
 # ---------------------------------------------------------------------------

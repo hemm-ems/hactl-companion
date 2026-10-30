@@ -356,6 +356,92 @@ class TestRefReplace:
         values = {e["matched_value"] for e in r.json()["entities"]}
         assert self.STALE in values, f"{self.STALE} not enumerated; got {sorted(values)}"
 
+    SPLICE_OLD = "binary_sensor.refsplice_probe_old"
+    SPLICE_NEW = "binary_sensor.refsplice_probe_new"
+    _HAND_MAINTAINED = f"""\
+# Hand-maintained automations. A rename must not reformat them.
+- id: refsplice_door
+  alias: Refsplice Door
+  trigger:
+      - platform: state
+        entity_id: {SPLICE_OLD}   # the door contact
+  action:
+      - service: persistent_notification.create
+        data:
+          message: Door:{{{{ states('{SPLICE_OLD}') }}}}:{{{{states.input_number.posclock_speed.state|int}}}}:tail
+  mode: single
+
+# Unrelated, and must come back byte for byte.
+- id: refsplice_unrelated
+  alias: Refsplice Unrelated
+  description: |-
+    Alle Phasen mit water=high und fan=high;
+    zweiter Absatz bleibt erhalten.
+  trigger:
+      - platform: state
+        entity_id: input_boolean.refsplice_other
+  action: []
+  mode: single
+# dangling comment at end of file
+"""
+
+    def test_apply_changes_only_the_token_lines_and_ha_still_loads_the_file(
+        self, companion_url: str, auth_headers: dict[str, str], ha_url: str, ha_token: str, _ha_ready: None
+    ) -> None:
+        """C-14 for `ref replace` (#88): a byte diff, then HA's own reading of the result.
+
+        The byte diff is the test of the defect. The old writer produced a file
+        that parsed identically, so only the bytes show the difference. HA's
+        verdict is the other half: a splice that keeps every byte but yields a
+        file HA reads differently would pass the diff and still be wrong.
+        """
+        original = _read_config_file(companion_url, auth_headers, "automations.yaml")
+        try:
+            assert (
+                _write_config_file(companion_url, auth_headers, "automations.yaml", self._HAND_MAINTAINED).status_code
+                == 200
+            )
+            before = _read_config_file(companion_url, auth_headers, "automations.yaml")
+            assert before == self._HAND_MAINTAINED
+
+            r = requests.post(
+                f"{companion_url}/v1/ref/replace",
+                json={"old": self.SPLICE_OLD, "new": self.SPLICE_NEW, "dry_run": False},
+                headers=auth_headers,
+                timeout=30,
+            )
+            assert r.status_code == 200, r.text
+            body = r.json()
+            assert body["status"] == "applied", body
+            mine = [c for c in body["changes"] if c["location"] == "automations.yaml"]
+            assert [c["path"] for c in mine] == ["[0].action[0].data.message", "[0].trigger[0].entity_id"], body
+            assert not any("reformatted" in c for c in mine), f"fell back to a whole-file re-serialization: {body}"
+
+            after = _read_config_file(companion_url, auth_headers, "automations.yaml")
+            assert after == before.replace(self.SPLICE_OLD, self.SPLICE_NEW), (
+                "bytes outside the two token occurrences changed"
+            )
+
+            check = requests.post(
+                f"{ha_url}/api/config/core/check_config",
+                headers={"Authorization": f"Bearer {ha_token}"},
+                timeout=90,
+            )
+            assert check.status_code == 200, check.text
+            assert check.json()["result"] == "valid", check.json()
+            _reload_automations(ha_url, ha_token)
+            loaded = requests.get(
+                f"{ha_url}/api/config/automation/config/refsplice_door",
+                headers={"Authorization": f"Bearer {ha_token}"},
+                timeout=15,
+            )
+            assert loaded.status_code == 200, loaded.text
+            trigger = loaded.json()["trigger"][0]
+            assert trigger["entity_id"] == self.SPLICE_NEW, f"HA reads the spliced file differently: {trigger}"
+        finally:
+            if original is not None:
+                _write_config_file(companion_url, auth_headers, "automations.yaml", original)
+
 
 class TestHaReload:
     """Integration tests for POST /v1/ha/reload/{domain} against real HA.
