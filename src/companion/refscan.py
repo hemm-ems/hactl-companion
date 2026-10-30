@@ -483,6 +483,7 @@ def replace_yaml_literal(
     splice_yaml = YAML()
     splice_yaml.preserve_quotes = True
     changes: list[dict[str, Any]] = []
+    writes: list[tuple[str, Path, Any, str | None]] = []
     seen: set[str] = set()
     queue: deque[str] = deque([entry_file])
 
@@ -523,16 +524,22 @@ def replace_yaml_literal(
                         **write_fields(spliced is not None),
                     }
                 )
-            if not dry_run:
-                # Back up the prior content before overwriting (C-5: every applied
-                # write gets a backup, same as the PUT/POST config routes).
-                make_backup(abs_path, base=base_path)
-                if spliced is None:
-                    resolver.save(rel, data)
-                else:
-                    resolver.save_source(rel, spliced)
+            writes.append((rel, abs_path, data, spliced))
 
         _enqueue_includes(data, abs_path, base_path, queue, skipped)
+
+    # Every file is read, rewritten and verified above before any is written
+    # here, so a failure while working out one file's new content cannot leave
+    # the files before it in the walk already renamed.
+    if not dry_run:
+        for rel, abs_path, data, spliced in writes:
+            # Back up the prior content before overwriting (C-5: every applied
+            # write gets a backup, same as the PUT/POST config routes).
+            make_backup(abs_path, base=base_path)
+            if spliced is None:
+                resolver.save(rel, data)
+            else:
+                resolver.save_source(rel, spliced)
 
     changes.sort(key=lambda c: (c["location"], c["path"]))
     return changes

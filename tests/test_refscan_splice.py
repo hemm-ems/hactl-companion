@@ -15,6 +15,7 @@ import difflib
 from io import StringIO
 from pathlib import Path
 
+import pytest
 from ruamel.yaml import YAML
 
 from companion.refscan import replace_yaml_literal
@@ -311,3 +312,58 @@ def test_a_dry_run_writes_nothing_and_reports_the_splice(tmp_path: Path) -> None
     assert changes == [{"location": "configuration.yaml", "path": "sensor.value", "before": OLD, "after": NEW}]
     assert _read(cfg) == f"sensor:\n    value: {OLD}\n"
     assert not (tmp_path / ".hactl_backups").exists()
+
+
+# Replacements that, spliced into a *plain* scalar, resolve to an implicit or
+# explicit tag whose constructor raises rather than raising a YAMLError: a
+# date-shaped id that is no calendar date, and explicit tags with a body their
+# constructor cannot take. hactl's ref-target check lets a date-shaped id
+# through, and the raw API takes any string.
+UNCONSTRUCTIBLE = ["2020-13-45", "2020-02-30", "!!int abc", "!!float abc", "!!timestamp nope", "!!set"]
+
+
+@pytest.mark.parametrize("replacement", UNCONSTRUCTIBLE)
+@pytest.mark.parametrize("dry_run", [True, False])
+def test_a_replacement_that_cannot_be_constructed_falls_back_instead_of_raising(
+    tmp_path: Path, replacement: str, dry_run: bool
+) -> None:
+    """A re-parse that raises anything counts as "does not parse back".
+
+    The old whole-file writer never constructed the spliced text, so it could
+    not fail this way. The verification step must not add a failure the writer
+    it replaces did not have.
+    """
+    cfg = tmp_path / "configuration.yaml"
+    before = f"sensor:\n    value: {OLD}\n"
+    _write(cfg, before)
+
+    changes = replace_yaml_literal(tmp_path, OLD, replacement, dry_run=dry_run)
+
+    assert [(c["path"], c["after"], c.get("reformatted")) for c in changes] == [("sensor.value", replacement, True)]
+    if dry_run:
+        assert _read(cfg) == before
+    else:
+        assert YAML().load(StringIO(_read(cfg))) == {"sensor": {"value": replacement}}
+
+
+def test_a_multi_file_replace_with_an_unconstructible_replacement_rewrites_every_file(tmp_path: Path) -> None:
+    """The file that splices cleanly and the one that cannot both end up rewritten.
+
+    configuration.yaml holds the token single-quoted, where ``2020-13-45`` is
+    still a string, so it splices. automations.yaml holds it plain, where the
+    same text is a malformed timestamp. A crash on the second file used to
+    leave the first already written: a half-applied rename.
+    """
+    cfg = f"automation: !include automations.yaml\nsensor:\n    value: '{OLD}'\n"
+    autos = f"- id: a\n  trigger:\n      - platform: state\n        entity_id: {OLD}\n  action: []\n"
+    _write(tmp_path / "configuration.yaml", cfg)
+    _write(tmp_path / "automations.yaml", autos)
+
+    changes = replace_yaml_literal(tmp_path, OLD, "2020-13-45", dry_run=False)
+
+    assert {(c["location"], c.get("reformatted")) for c in changes} == {
+        ("configuration.yaml", None),
+        ("automations.yaml", True),
+    }
+    assert _read(tmp_path / "configuration.yaml") == cfg.replace(OLD, "2020-13-45")
+    assert YAML().load(StringIO(_read(tmp_path / "automations.yaml")))[0]["trigger"][0]["entity_id"] == "2020-13-45"

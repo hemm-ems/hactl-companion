@@ -464,10 +464,19 @@ def _parses_back_to(spliced: str, data: Any, yaml: YAML) -> bool:
     some file nobody thought of produces a tree that differs from ``data``, and
     the caller writes the whole-file dump instead — the pre-existing behaviour.
     So the splice can only ever change *formatting*, never content.
+
+    Any exception from the re-parse counts as "does not parse back", not only
+    a :class:`YAMLError`. Loading *constructs* the spliced text, and a
+    constructor can raise on text that scans and parses fine: a date-shaped
+    plain scalar that is no calendar date (``2020-13-45``) raises ValueError,
+    ``!!int abc`` likewise, ``!!set`` on a scalar AttributeError. The writer
+    this check guards never constructed anything, so letting those escape
+    would add a failure it did not have; the whole-file dump writes the value
+    as a quoted string instead.
     """
     try:
         reparsed = yaml.load(StringIO(spliced))
-    except YAMLError:
+    except Exception:  # any failure means "fall back", see the docstring
         return False
     return bool(_plain(reparsed) == _plain(data))
 
