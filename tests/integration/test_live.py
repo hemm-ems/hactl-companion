@@ -908,8 +908,17 @@ def _restart_ha_core(ha_url: str, ha_token: str, settle_entity: str, settle_stat
     self-synchronising: no template entity can exist until HA has come back up
     having read template.yaml, so the pre-restart process cannot satisfy this
     poll. Measured at ~6s locally.
+
+    Both ends wait for HA's core state to be ``RUNNING``. A restart requested
+    while HA is still starting (``/api/config`` state ``NOT_RUNNING``) answers
+    200 and is silently dropped — measured 2026-10-30 on the integration
+    stack: no downtime, the old process simply carries on. The settle entity
+    renders while HA is still starting, so returning on it alone handed the
+    next restart-using test a HA that would swallow its restart; that test
+    then timed out with ``last seen: None`` on both CI lanes and locally.
     """
     hdr = {"Authorization": f"Bearer {ha_token}"}
+    _wait_for_core_running(ha_url, hdr, timeout)
     r = requests.post(f"{ha_url}/api/services/homeassistant/restart", headers=hdr, json={}, timeout=90)
     assert r.status_code == 200, f"homeassistant.restart failed: {r.status_code} {r.text}"
 
@@ -921,11 +930,27 @@ def _restart_ha_core(ha_url: str, ha_token: str, settle_entity: str, settle_stat
             if s.status_code == 200:
                 last = s.json()["state"]
                 if last == settle_state:
+                    _wait_for_core_running(ha_url, hdr, max(1.0, deadline - time.monotonic()))
                     return
         except requests.RequestException:
             pass
         time.sleep(2)
     raise AssertionError(f"{settle_entity} never reached {settle_state!r} after the restart (last seen: {last!r})")
+
+
+def _wait_for_core_running(ha_url: str, hdr: dict[str, str], timeout: float) -> None:
+    """Block until HA reports core state ``RUNNING`` — the only state that honours a restart."""
+    deadline = time.monotonic() + timeout
+    state: str | None = None
+    while time.monotonic() < deadline:
+        try:
+            state = requests.get(f"{ha_url}/api/config", headers=hdr, timeout=5).json().get("state")
+            if state == "RUNNING":
+                return
+        except (requests.RequestException, ValueError):
+            pass
+        time.sleep(1)
+    raise AssertionError(f"HA core never reached RUNNING (last state: {state!r})")
 
 
 class TestTemplateBlockIsolation:
